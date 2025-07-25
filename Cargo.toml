@@ -4,3 +4,92 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# --- Interaction Principale avec Solana ---
+
+# Permet d'envoyer des requêtes au nœud RPC Solana (ex: get_account, get_multiple_accounts).
+# C'est notre principal moyen de "lire" l'état de la blockchain.
+solana-client = "2.3.5"
+
+# Fournit les types de données de base de Solana (Pubkey, Transaction, Instruction, etc.).
+# C'est le "vocabulaire" fondamental pour parler à Solana.
+solana-sdk = "2.3.1"
+
+# Fournit les définitions pour interagir avec les comptes de tokens SPL (la norme des jetons sur Solana).
+# Utile pour vérifier les soldes, les mints, etc.
+spl-token = "8.0.0"
+
+
+# --- Décodage des Données de Compte ---
+
+# Aide à interagir avec les programmes Solana construits avec le framework Anchor.
+# Beaucoup de protocoles DeFi utilisent Anchor, donc c'est utile pour décoder leurs comptes.
+anchor-lang = "0.31.1"
+
+# Le standard de (dé)sérialisation binaire utilisé par la plupart des programmes Solana.
+# Essentiel pour transformer les données brutes d'un compte en struct Rust.
+borsh = "1.5.7"
+
+# Permet de faire du "zero-copy casting". C'est une technique EXTRÊMEMENT rapide
+# pour interpréter une tranche de bytes `&[u8]` comme une struct, sans aucune copie mémoire.
+# C'est un gain de performance majeur pour le décodage.
+bytemuck = "1.23.1"
+
+
+# --- Gestion des Données (API, Encodage) ---
+
+# Le framework de (dé)sérialisation le plus populaire en Rust.
+# Nous l'utilisons avec `serde_json` pour parser les réponses des API (Raydium, Orca).
+serde = { version = "1", features = ["derive"] }
+
+# L'implémentation de `serde` pour le format JSON.
+serde_json = "1"
+
+# Pour les appels réseau HTTP (ex: interroger les API de découverte de marché).
+reqwest = { version = "0.12", features = ["json"] }
+
+# Utilitaires pour encoder/décoder les adresses Solana (qui sont en base58).
+bs58 = "0.5.1"
+# Utile pour manipuler les données de transaction qui sont parfois en base64.
+base64 = "0.22.1"
+# Pour convertir des bytes en représentation hexadécimale (utile pour le logging/debug).
+hex = "0.4.3"
+
+
+# --- Concurrence et Performance ---
+
+# Le runtime asynchrone le plus performant et populaire en Rust.
+# Indispensable pour gérer des tâches parallèles (écouter Geyser, répondre aux API) sans bloquer.
+tokio = { version = "1", features = ["full"] }
+
+# Une structure de données atomique pour échanger des pointeurs.
+# C'est la CLÉ de notre architecture rapide : un thread met à jour le graphe,
+# les autres threads y accèdent en lecture sans jamais être bloqués (pas de mutex).
+arc-swap = "1.7.1"
+
+
+# --- Mathématiques et Utilitaires ---
+
+# Fournit des types de nombres à virgule fixe de haute précision.
+# INDISPENSABLE pour les calculs financiers (prix, taux) afin d'éviter les erreurs
+# d'arrondi des nombres flottants (f32/f64) qui peuvent coûter très cher.
+fixed = "1.29.0"
+
+# Fournit des fonctions mathématiques spécifiques à la norme SPL.
+spl-math = "0.3.0"
+
+# Une librairie pour une gestion d'erreurs simple et propre (`anyhow::Result<T>`).
+anyhow = "1"
+
+
+# --- Configuration et Logging ---
+
+# Permet de charger les variables d'un fichier .env dans l'environnement du processus.
+dotenvy = "0.15"
+
+# Permet de parser les variables d'environnement directement dans une struct `Config`.
+envy = "0.4.2"
+
+# Un framework de logging performant et configurable.
+tracing = "0.1.41"
+# Le "collecteur" pour `tracing` qui nous permet de formater et d'afficher les logs.
+tracing-subscriber = {  version = "0.3.19", features = ["env-filter"] }
