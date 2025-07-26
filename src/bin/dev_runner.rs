@@ -1,39 +1,49 @@
 // src/bin/dev_runner.rs
 
-// On importe le module raydium que nous voulons tester.
-use mev::data_pipeline::discovery::raydium;
+use mev::config::Config;
+use mev::data_pipeline::onchain_scanner;
+use solana_client::rpc_client::RpcClient;
 use anyhow::Result;
 
-// La fonction fetch_raydium_pools est asynchrone, nous devons donc
-// utiliser la macro `#[tokio::main]` pour que notre fonction `main`
-// puisse utiliser `.await`.
+const RAYDIUM_LAUNCHPAD_PROGRAM_ID: &str = "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj";
+const POOL_STATE_DISCRIMINATOR: [u8; 8] = [247, 237, 227, 245, 215, 195, 222, 70];
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("--- Development Runner: Test de la récupération complète des pools Raydium ---");
+    println!("--- Development Runner: DIAGNOSTIC de la taille des comptes Launchpad ---");
 
-    // On appelle notre fonction et on attend le résultat.
-    // On utilise un `match` pour gérer proprement le cas de succès et le cas d'erreur.
-    match raydium::fetch_raydium_pools().await {
-        Ok(pools) => {
-            println!("\n✅ --- Test de récupération terminé avec succès ! ---");
-            println!("Nombre total de pools Raydium effectivement récupérés: {}", pools.len());
+    let config = Config::load().expect("Erreur chargement config");
+    let rpc_client = RpcClient::new(config.solana_rpc_url);
 
-            // On affiche le détail des 3 premiers pools pour vérifier que les données sont bien là.
-            println!("\n--- Aperçu des 3 premiers pools : ---");
-            for (i, pool) in pools.iter().take(3).enumerate() {
-                println!("\n--- Pool N°{} ---", i + 1);
-                println!("  ID:         {}", pool.id);
-                println!("  Type:       {}", pool.pool_type);
-                println!("  Mint A:     {}", pool.mint_a.address);
-                println!("  Mint B:     {}", pool.mint_b.address);
-                println!("  TVL:        ${:.2}", pool.tvl); // Formatage pour la lisibilité
-                println!("  Volume 24h: ${:.2}", pool.day.volume);
+    let raw_accounts = onchain_scanner::find_pools_by_program_id(&rpc_client, RAYDIUM_LAUNCHPAD_PROGRAM_ID)?;
+
+    println!("Scan réussi. {} comptes trouvés.", raw_accounts.len());
+
+    println!("\nRecherche des comptes 'PoolState' et affichage de la taille de leurs données...");
+
+    let mut found_count = 0;
+    for account in raw_accounts.iter() {
+        if account.data.len() > 8 && &account.data[..8] == POOL_STATE_DISCRIMINATOR {
+
+            // --- C'EST LA LIGNE IMPORTANTE ---
+            // On affiche la taille totale des données, et la taille après le discriminator.
+            println!(
+                "Compte PoolState trouvé ! Adresse: {}. Taille totale: {}. Taille des données: {}",
+                account.address,
+                account.data.len(),
+                account.data.len() - 8
+            );
+
+            found_count += 1;
+            // On s'arrête après en avoir trouvé quelques-uns pour ne pas surcharger.
+            if found_count >= 5 {
+                break;
             }
-        },
-        Err(e) => {
-            println!("\n❌ --- Échec du test de récupération. ---");
-            println!("Erreur: {}", e);
         }
+    }
+
+    if found_count == 0 {
+        println!("\nAucun compte de type 'PoolState' n'a été trouvé.");
     }
 
     Ok(())

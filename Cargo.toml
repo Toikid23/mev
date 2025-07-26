@@ -23,7 +23,7 @@ spl-token = "8.0.0"
 
 # Aide à interagir avec les programmes Solana construits avec le framework Anchor.
 # Beaucoup de protocoles DeFi utilisent Anchor, donc c'est utile pour décoder leurs comptes.
-anchor-lang = "0.31.1"
+anchor-lang = { version = "0.31.1", features = ["init-if-needed"] }
 
 # Le standard de (dé)sérialisation binaire utilisé par la plupart des programmes Solana.
 # Essentiel pour transformer les données brutes d'un compte en struct Rust.
@@ -93,3 +93,7 @@ envy = "0.4.2"
 tracing = "0.1.41"
 # Le "collecteur" pour `tracing` qui nous permet de formater et d'afficher les logs.
 tracing-subscriber = {  version = "0.3.19", features = ["env-filter"] }
+
+solana-account-decoder = "2.3.5"
+
+spl-token-2022 = "9.0.0"
