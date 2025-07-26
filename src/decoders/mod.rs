@@ -1,93 +1,61 @@
-
-use solana_sdk::pubkey::Pubkey;
-use anyhow::{Result, anyhow};
-
-pub mod orca_decoders;
-pub mod raydium_decoders;
-pub mod spl_token_decoders;
-pub mod meteora_decoders;
 // src/decoders/mod.rs
 
+use solana_sdk::pubkey::Pubkey;
+use anyhow::Result;
 
+// --- 1. Déclarer tous nos modules ---
+pub mod pool_operations;
+pub mod raydium_decoders;
+pub mod orca_decoders;
+pub mod meteora_decoders;
+pub mod spl_token_decoders;
 
+// --- 2. Importer le trait ---
+pub use pool_operations::PoolOperations;
 
-
-
-
-
-
-
-
-
-
-
-// --- STRUCTURES DE SORTIE UNIFIÉES ---
-
-// Représente les informations essentielles d'un pool AMM classique (x * y = k)
+// --- 3. Définir l'enum unifié en utilisant les chemins complets ---
 #[derive(Debug, Clone)]
-pub struct DecodedAmmPool {
-    pub address: Pubkey,
-    pub mint_a: Pubkey,
-    pub mint_b: Pubkey,
-    pub vault_a: Pubkey,
-    pub vault_b: Pubkey,
-    pub total_fee_percent: f64,
+pub enum Pool {
+    RaydiumAmmV4(raydium_decoders::amm_v4::DecodedAmmPool),
+    RaydiumCpmm(raydium_decoders::cpmm::DecodedCpmmPool),
+    RaydiumClmm(raydium_decoders::clmm_pool::DecodedClmmPool),
+    RaydiumStableSwap(raydium_decoders::stable_swap::DecodedStableSwapPool),
+    RaydiumLaunchpad(raydium_decoders::launchpad::DecodedLaunchpadPool),
+    MeteoraDlmm(meteora_decoders::dlmm::DecodedDlmmPool),
 }
 
+// --- 4. Implémenter le trait pour l'enum ---
+impl PoolOperations for Pool {
+    fn get_mints(&self) -> (Pubkey, Pubkey) {
+        match self {
+            Pool::RaydiumAmmV4(p) => p.get_mints(),
+            Pool::RaydiumCpmm(p) => p.get_mints(),
+            Pool::RaydiumClmm(p) => p.get_mints(),
+            Pool::RaydiumStableSwap(p) => p.get_mints(),
+            Pool::RaydiumLaunchpad(p) => p.get_mints(),
+            Pool::MeteoraDlmm(p) => p.get_mints(),
+        }
+    }
 
+    fn get_vaults(&self) -> (Pubkey, Pubkey) {
+        match self {
+            Pool::RaydiumAmmV4(p) => p.get_vaults(),
+            Pool::RaydiumCpmm(p) => p.get_vaults(),
+            Pool::RaydiumClmm(p) => p.get_vaults(),
+            Pool::RaydiumStableSwap(p) => p.get_vaults(),
+            Pool::RaydiumLaunchpad(p) => p.get_vaults(),
+            Pool::MeteoraDlmm(p) => p.get_vaults(),
+        }
+    }
 
-#[derive(Debug, Clone)]
-pub struct DecodedClmmPool {
-    pub address: Pubkey,
-    pub mint_a: Pubkey,
-    pub mint_b: Pubkey,
-    pub vault_a: Pubkey,
-    pub vault_b: Pubkey,
-
-    // Le prix n'est pas direct, il est stocké sous forme de racine carrée
-    pub sqrt_price: u128,
-    // La "case" de prix actuelle
-    pub tick_current_index: i32,
-
-    // Les frais sont plus simples sur les Whirlpools, il y a un taux de base.
-    pub fee_rate_percent: f64,
-}
-
-
-
-#[derive(Debug, Clone)]
-pub struct DecodedLaunchpadPool {
-    pub address: Pubkey,
-    pub mint_a: Pubkey, // Le "base_mint" dans le jargon Launchpad
-    pub mint_b: Pubkey, // Le "quote_mint"
-    pub vault_a: Pubkey,
-    pub vault_b: Pubkey,
-
-    // Un Launchpad n'a pas de "frais" au sens d'un AMM.
-    // Les informations importantes sont liées à l'état de la vente.
-    pub total_base_sold: u64,
-    pub total_quote_raised: u64,
-    pub global_config: Pubkey, // Pour connaître le type de courbe et les frais globaux
-    pub virtual_base: u64,
-    pub virtual_quote: u64,
-}
-
-
-// DANS: src/decoders/mod.rs
-
-// ... (après DecodedLaunchpadPool)
-
-#[derive(Debug, Clone)]
-pub struct DecodedStablePool {
-    pub address: Pubkey,
-    pub mint_a: Pubkey,
-    pub mint_b: Pubkey,
-    pub vault_a: Pubkey,
-    pub vault_b: Pubkey,
-
-    // Le paramètre clé de la courbe de prix pour les stable swaps
-    pub amp: u64,
-
-    // Les frais sont directement dans le pool
-    pub total_fee_percent: f64,
+    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64) -> Result<u64> {
+        match self {
+            Pool::RaydiumAmmV4(p) => p.get_quote(token_in_mint, amount_in),
+            Pool::RaydiumCpmm(p) => p.get_quote(token_in_mint, amount_in),
+            Pool::RaydiumClmm(p) => p.get_quote(token_in_mint, amount_in),
+            Pool::RaydiumStableSwap(p) => p.get_quote(token_in_mint, amount_in),
+            Pool::RaydiumLaunchpad(p) => p.get_quote(token_in_mint, amount_in),
+            Pool::MeteoraDlmm(p) => p.get_quote(token_in_mint, amount_in),
+        }
+    }
 }

@@ -1,27 +1,24 @@
 // src/decoders/raydium_decoders/stable_swap.rs
 
+use crate::decoders::pool_operations::PoolOperations;
 use bytemuck::{from_bytes, Pod, Zeroable};
 use solana_sdk::pubkey::Pubkey;
-use anyhow::{bail, Result};
+use anyhow::{bail, Result, anyhow};
 
-// --- STRUCTURE DE SORTIE PARTIELLE ---
-// Cette structure contient les infos du compte principal.
-// Elle nous donne aussi l'adresse du 'model_data_account' à lire ensuite.
 #[derive(Debug, Clone)]
-pub struct DecodedStablePoolInfo {
+pub struct DecodedStableSwapPool {
     pub address: Pubkey,
     pub mint_a: Pubkey,
     pub mint_b: Pubkey,
     pub vault_a: Pubkey,
     pub vault_b: Pubkey,
-    pub model_data_account: Pubkey, // L'adresse à lire pour les maths !
+    pub model_data_account: Pubkey,
     pub total_fee_percent: f64,
-}
-
-/// Contient les infos du compte de données mathématiques.
-#[derive(Debug, Clone)]
-pub struct DecodedStableModelData {
+    // Le paramètre mathématique clé
     pub amp: u64,
+    // Les réserves seront hydratées plus tard
+    pub reserve_a: u64,
+    pub reserve_b: u64,
 }
 
 
@@ -75,44 +72,43 @@ struct StableSwapAmmInfoData {
 }
 
 /// Décode le compte principal d'un pool Stable Swap.
-pub fn decode_stable_pool_info(address: &Pubkey, data: &[u8]) -> Result<DecodedStablePoolInfo> {
-    // Ce programme n'est pas Anchor, donc PAS de discriminator.
+/// Retourne une structure PARTIELLE qui doit être complétée par le ModelDataAccount.
+pub fn decode_pool_info(address: &Pubkey, data: &[u8]) -> Result<(StableSwapAmmInfoData, f64)> {
     if data.len() != std::mem::size_of::<StableSwapAmmInfoData>() {
-        bail!(
-            "Stable Swap Pool data length mismatch. Expected {}, got {}.",
-            std::mem::size_of::<StableSwapAmmInfoData>(),
-            data.len()
-        );
+        bail!("Stable Swap Pool data length mismatch.");
     }
-
     let pool_struct: &StableSwapAmmInfoData = from_bytes(data);
-
     let total_fee_percent = if pool_struct.fees.trade_fee_denominator == 0 {
         0.0
     } else {
         pool_struct.fees.trade_fee_numerator as f64 / pool_struct.fees.trade_fee_denominator as f64
     };
-
-    Ok(DecodedStablePoolInfo {
-        address: *address,
-        mint_a: pool_struct.coin_mint,
-        mint_b: pool_struct.pc_mint,
-        vault_a: pool_struct.coin_vault,
-        vault_b: pool_struct.pc_vault,
-        model_data_account: pool_struct.model_data_key,
-        total_fee_percent,
-    })
+    Ok((*pool_struct, total_fee_percent))
 }
 
 
 /// Décode le ModelDataAccount pour en extraire le facteur d'amplification.
-pub fn decode_model_data_account(data: &[u8]) -> Result<DecodedStableModelData> {
-    // Pour l'instant, on suppose que l'amp est le premier u64.
+pub fn decode_model_data(data: &[u8]) -> Result<u64> {
     if data.len() < 8 {
-        bail!("ModelDataAccount data is too short to contain an amp factor.");
+        bail!("ModelDataAccount data is too short.");
     }
     let amp_bytes: [u8; 8] = data[0..8].try_into()?;
-    let amp = u64::from_le_bytes(amp_bytes);
+    Ok(u64::from_le_bytes(amp_bytes))
+}
 
-    Ok(DecodedStableModelData { amp })
+// --- IMPLEMENTATION DE LA LOGIQUE DU POOL ---
+impl PoolOperations for DecodedStableSwapPool {
+    fn get_mints(&self) -> (Pubkey, Pubkey) {
+        (self.mint_a, self.mint_b)
+    }
+
+    fn get_vaults(&self) -> (Pubkey, Pubkey) {
+        (self.vault_a, self.vault_b)
+    }
+
+    fn get_quote(&self, _token_in_mint: &Pubkey, _amount_in: u64) -> Result<u64> {
+        // La logique de calcul pour un Stable Swap est très complexe et dépend de `amp`.
+        // On la laisse en placeholder pour l'instant.
+        Err(anyhow!("get_quote for Raydium Stable Swap is not implemented yet."))
+    }
 }
