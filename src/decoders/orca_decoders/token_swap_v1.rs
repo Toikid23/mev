@@ -63,25 +63,18 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedAmmPool> {
     // --- CALCUL DES FRAIS ---
     // Les frais sont stockés sous forme de fraction (numérateur / dénominateur).
     // On les convertit en pourcentage.
-    let lp_fee_percent = if pool_struct.fees.trade_fee_denominator == 0 {
+    let total_fee_percent = if pool_struct.fees.trade_fee_denominator == 0 {
         0.0
     } else {
         pool_struct.fees.trade_fee_numerator as f64 / pool_struct.fees.trade_fee_denominator as f64
     };
-
-    let protocol_fee_percent = if pool_struct.fees.owner_trade_fee_denominator == 0 {
-        0.0 // Si le dénominateur est 0, les frais sont 0.
-    } else {
-        pool_struct.fees.owner_trade_fee_numerator as f64 / pool_struct.fees.owner_trade_fee_denominator as f64
-    };
-
+    
     Ok(DecodedAmmPool {
         address: *address,
         mint_a: pool_struct.token_a_mint,
         mint_b: pool_struct.token_b_mint,
         vault_a: pool_struct.token_a_vault,
         vault_b: pool_struct.token_b_vault,
-        lp_fee_percent,
-        protocol_fee_percent,
+        total_fee_percent,
     })
 }

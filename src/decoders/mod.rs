@@ -1,10 +1,25 @@
 
+use solana_sdk::pubkey::Pubkey;
+use anyhow::{Result, anyhow};
+
 pub mod orca_decoders;
 pub mod raydium_decoders;
 pub mod spl_token_decoders;
+pub mod meteora_decoders;
 // src/decoders/mod.rs
 
-use solana_sdk::pubkey::Pubkey;
+
+
+
+
+
+
+
+
+
+
+
+
 
 // --- STRUCTURES DE SORTIE UNIFIÉES ---
 
@@ -16,10 +31,7 @@ pub struct DecodedAmmPool {
     pub mint_b: Pubkey,
     pub vault_a: Pubkey,
     pub vault_b: Pubkey,
-
-    // Frais exprimés en pourcentage (ex: 0.003 pour 0.3%)
-    pub lp_fee_percent: f64,
-    pub protocol_fee_percent: f64,
+    pub total_fee_percent: f64,
 }
 
 
@@ -58,4 +70,24 @@ pub struct DecodedLaunchpadPool {
     pub global_config: Pubkey, // Pour connaître le type de courbe et les frais globaux
     pub virtual_base: u64,
     pub virtual_quote: u64,
+}
+
+
+// DANS: src/decoders/mod.rs
+
+// ... (après DecodedLaunchpadPool)
+
+#[derive(Debug, Clone)]
+pub struct DecodedStablePool {
+    pub address: Pubkey,
+    pub mint_a: Pubkey,
+    pub mint_b: Pubkey,
+    pub vault_a: Pubkey,
+    pub vault_b: Pubkey,
+
+    // Le paramètre clé de la courbe de prix pour les stable swaps
+    pub amp: u64,
+
+    // Les frais sont directement dans le pool
+    pub total_fee_percent: f64,
 }

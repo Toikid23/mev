@@ -28,7 +28,6 @@ pub struct PoolStateData {
     pub base_decimals: u8,
     pub quote_decimals: u8,
     pub migrate_type: u8,
-    pub _padding: [u8; 3], // Pour l'alignement, non présent dans l'IDL mais souvent nécessaire
     pub supply: u64,
     pub total_base_sell: u64,
     pub virtual_base: u64,

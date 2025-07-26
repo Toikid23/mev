@@ -1,50 +1,41 @@
 // src/bin/dev_runner.rs
 
-use mev::config::Config;
-use mev::data_pipeline::onchain_scanner;
 use solana_client::rpc_client::RpcClient;
-use anyhow::Result;
+use solana_sdk::pubkey::Pubkey;
+use std::str::FromStr;
+use mev::config::Config;
+use mev::decoders::meteora_decoders::dlmm;
 
-const RAYDIUM_LAUNCHPAD_PROGRAM_ID: &str = "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj";
-const POOL_STATE_DISCRIMINATOR: [u8; 8] = [247, 237, 227, 245, 215, 195, 222, 70];
+const TARGET_DLMM_POOL: &str = "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6";
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    println!("--- Development Runner: DIAGNOSTIC de la taille des comptes Launchpad ---");
-
-    let config = Config::load().expect("Erreur chargement config");
+async fn main() -> anyhow::Result<()> {
+    println!("--- Validation Chaîne Complète (IDL-based): Meteora DLMM ---");
+    let config = Config::load()?;
     let rpc_client = RpcClient::new(config.solana_rpc_url);
+    let pool_pubkey = Pubkey::from_str(TARGET_DLMM_POOL)?;
 
-    let raw_accounts = onchain_scanner::find_pools_by_program_id(&rpc_client, RAYDIUM_LAUNCHPAD_PROGRAM_ID)?;
+    // 1. Décoder le compte LbPair
+    println!("\n[1/3] Décodage du LbPair...");
+    let lb_pair_data = rpc_client.get_account_data(&pool_pubkey)?;
+    let decoded_lb_pair = dlmm::decode_lb_pair(&pool_pubkey, &lb_pair_data)?;
+    println!("-> Succès. Bin Actif ID: {}", decoded_lb_pair.active_bin_id);
 
-    println!("Scan réussi. {} comptes trouvés.", raw_accounts.len());
+    // 2. Calculer l'adresse du BinArray
+    println!("\n[2/3] Calcul de l'adresse du BinArray...");
+    let bin_array_address = dlmm::get_bin_array_address(&pool_pubkey, decoded_lb_pair.active_bin_id);
+    println!("-> Adresse calculée: {}", bin_array_address);
 
-    println!("\nRecherche des comptes 'PoolState' et affichage de la taille de leurs données...");
+    // 3. Lire et décoder le Bin actif depuis le BinArray
+    println!("\n[3/3] Lecture du BinArray et extraction des réserves...");
+    let bin_array_data = rpc_client.get_account_data(&bin_array_address)?;
+    let decoded_bin = dlmm::decode_bin_from_bin_array(decoded_lb_pair.active_bin_id, &bin_array_data)?;
 
-    let mut found_count = 0;
-    for account in raw_accounts.iter() {
-        if account.data.len() > 8 && &account.data[..8] == POOL_STATE_DISCRIMINATOR {
-
-            // --- C'EST LA LIGNE IMPORTANTE ---
-            // On affiche la taille totale des données, et la taille après le discriminator.
-            println!(
-                "Compte PoolState trouvé ! Adresse: {}. Taille totale: {}. Taille des données: {}",
-                account.address,
-                account.data.len(),
-                account.data.len() - 8
-            );
-
-            found_count += 1;
-            // On s'arrête après en avoir trouvé quelques-uns pour ne pas surcharger.
-            if found_count >= 5 {
-                break;
-            }
-        }
-    }
-
-    if found_count == 0 {
-        println!("\nAucun compte de type 'PoolState' n'a été trouvé.");
-    }
+    println!("\n--- DÉCODEUR DLMM FINALISÉ ---");
+    println!("   Pool: {}", decoded_lb_pair.address);
+    println!("   Réserves du Bin Actif (USDC): {}", decoded_bin.amount_a);
+    println!("   Réserves du Bin Actif (USDT): {}", decoded_bin.amount_b);
+    println!("------------------------------");
 
     Ok(())
 }
