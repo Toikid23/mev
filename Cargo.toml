@@ -39,7 +39,7 @@ bytemuck = "1.23.1"
 
 # Le framework de (dé)sérialisation le plus populaire en Rust.
 # Nous l'utilisons avec `serde_json` pour parser les réponses des API (Raydium, Orca).
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 
 # L'implémentation de `serde` pour le format JSON.
 serde_json = "1"
@@ -98,3 +98,6 @@ solana-account-decoder = "2.3.5"
 
 spl-token-2022 = "9.0.0"
 
+uint = "0.10.0"
+
+num-integer = "0.1.46"

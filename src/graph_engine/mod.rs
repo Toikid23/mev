@@ -1,5 +1,5 @@
 use crate::decoders::{Pool, PoolOperations}; // On importe juste Pool et le trait
-use crate::decoders::raydium_decoders::{amm_config, clmm_config, tick_array, launchpad, global_config}; // Outils
+use crate::decoders::raydium_decoders::{amm_config, clmm_config, tick_array, launchpad, global_config, clmm_pool}; // Outils
 use crate::decoders::meteora_decoders::dlmm;
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
@@ -61,34 +61,8 @@ impl Graph {
 
             Pool::RaydiumClmm(mut p) => {
                 println!("Hydrating Raydium CLMM: {}", p.address);
-
-                // 1. Hydrater les frais
-                let config_data = rpc_client.get_account_data(&p.amm_config)?;
-                let decoded_config = clmm_config::decode_config(&config_data)?;
-                p.total_fee_percent = decoded_config.trade_fee_rate as f64 / 1_000_000.0;
-
-                // 2. Hydrater les TickArrays
-                let current_array_start_idx = tick_array::get_start_tick_index(p.tick_current, p.tick_spacing, 0);
-                let addresses_to_fetch = [
-                    tick_array::get_tick_array_address(&p.address, current_array_start_idx - 1, &p.program_id), // Previous
-                    tick_array::get_tick_array_address(&p.address, current_array_start_idx, &p.program_id),     // Current
-                    tick_array::get_tick_array_address(&p.address, current_array_start_idx + 1, &p.program_id), // Next
-                ];
-
-                let tick_array_accounts = rpc_client.get_multiple_accounts(&addresses_to_fetch)?;
-
-                let mut tick_arrays = BTreeMap::new();
-                for (i, account) in tick_array_accounts.iter().enumerate() {
-                    if let Some(acc) = account {
-                        if let Ok(decoded_array) = tick_array::decode_tick_array(&acc.data) {
-                            tick_arrays.insert(decoded_array.start_tick_index, decoded_array);
-                        }
-                    }
-                }
-
-                // Mettre à jour le pool avec les tick_arrays hydratés
-                p.tick_arrays = Some(tick_arrays);
-
+                // Le chef d'orchestre délègue tout le travail à l'expert.
+                clmm_pool::hydrate(&mut p, rpc_client)?;
                 Ok(Pool::RaydiumClmm(p))
             },
 

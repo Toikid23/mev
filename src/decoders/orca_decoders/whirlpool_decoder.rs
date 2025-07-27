@@ -1,4 +1,4 @@
-// src/decoders/orca_decoders/whirlpool_decoder.rs
+/*// src/decoders/orca_decoders/whirlpool_decoder.rs
 
 use bytemuck::{from_bytes, Pod, Zeroable};
 use solana_sdk::pubkey::Pubkey;
@@ -82,4 +82,4 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedClmmPool> {
         tick_current_index: whirlpool_data.tick_current_index,
         fee_rate_percent,
     })
-}
+}*/

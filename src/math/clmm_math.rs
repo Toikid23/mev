@@ -33,7 +33,7 @@ pub fn tick_to_sqrt_price_x64(tick: i32) -> u128 {
     if tick < 0 {
         ratio = U128_MAX / ratio;
     }
-    (ratio << 32)
+    ratio << 32
 }
 
 fn get_next_sqrt_price(price: u128, liquidity: u128, amount: u128, is_add: bool) -> u128 {
@@ -68,4 +68,33 @@ pub fn get_next_sqrt_price_from_amount_x_in(sqrt_price: u128, liquidity: u128, a
 
 pub fn get_next_sqrt_price_from_amount_y_in(sqrt_price: u128, liquidity: u128, amount_in: u128) -> u128 {
     sqrt_price + (amount_in << BITS) / liquidity
+}
+
+
+pub fn compute_swap_step(
+    sqrt_price_current_x64: u128,
+    sqrt_price_target_x64: u128,
+    liquidity: u128,
+    amount_remaining: u128,
+    is_base_input: bool,
+) -> (u128, u128, u128) {
+    let mut amount_in = amount_remaining;
+    let amount_out: u128;
+    let next_sqrt_price_x64: u128;
+
+    if is_base_input {
+        // On vend du token 0 pour acheter du token 1 (le prix baisse)
+        let amount_to_reach_target = get_amount_x(sqrt_price_target_x64, sqrt_price_current_x64, liquidity);
+        amount_in = amount_in.min(amount_to_reach_target);
+        next_sqrt_price_x64 = get_next_sqrt_price_from_amount_x_in(sqrt_price_current_x64, liquidity, amount_in);
+        amount_out = get_amount_y(next_sqrt_price_x64, sqrt_price_current_x64, liquidity);
+    } else {
+        // On vend du token 1 pour acheter du token 0 (le prix monte)
+        let amount_to_reach_target = get_amount_y(sqrt_price_current_x64, sqrt_price_target_x64, liquidity);
+        amount_in = amount_in.min(amount_to_reach_target);
+        next_sqrt_price_x64 = get_next_sqrt_price_from_amount_y_in(sqrt_price_current_x64, liquidity, amount_in);
+        amount_out = get_amount_x(sqrt_price_current_x64, next_sqrt_price_x64, liquidity);
+    }
+
+    (amount_in, amount_out, next_sqrt_price_x64)
 }

@@ -2307,6 +2307,7 @@ dependencies = [
  "envy",
  "fixed",
  "hex",
+ "num-integer",
  "reqwest",
  "serde",
  "serde_json",
@@ -2319,6 +2320,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uint",
 ]
 
 [[package]]
