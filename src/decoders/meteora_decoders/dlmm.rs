@@ -176,9 +176,13 @@ pub fn decode_lb_pair(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Res
 
     let pool_struct: &LbPairData = from_bytes(data_slice);
 
-    // Calcul précis des frais de base en millionièmes
+    // --- LA FORMULE DE FRAIS EXACTE, TIRÉE DE L'IDL ---
+    let power_factor = pool_struct.parameters.base_fee_power_factor as u32;
+    let multiplier = 10u64.pow(power_factor).saturating_mul(10);
+
     let base_fee_rate = (pool_struct.parameters.base_factor as u64)
-        .saturating_mul(pool_struct.bin_step as u64);
+        .saturating_mul(pool_struct.bin_step as u64)
+        .saturating_mul(multiplier);
 
     Ok(DecodedDlmmPool {
         address: *address,
@@ -277,67 +281,55 @@ fn get_dlmm_quote_with_bins(
     token_in_mint: &Pubkey,
     bin_arrays: &BTreeMap<i64, Vec<u8>>,
 ) -> Result<u64> {
+    // --- LA PRÉCISION DES FRAIS, TIRÉE DE L'IDL ---
+    const FEE_PRECISION: u128 = 1_000_000_000;
     let mut amount_remaining = amount_in as u128;
     let mut total_amount_out: u128 = 0;
     let mut current_bin_id = pool.active_bin_id;
     let is_base_input = *token_in_mint == pool.mint_a;
 
     while amount_remaining > 0 {
-        // 1. Trouver dans quel BinArray se trouve notre bin actuel
         let bin_array_idx = (current_bin_id as i64 / MAX_BIN_PER_ARRAY as i64)
             - if current_bin_id < 0 && current_bin_id % MAX_BIN_PER_ARRAY != 0 { 1 } else { 0 };
 
         let bin_array_data = match bin_arrays.get(&bin_array_idx) {
-            Some(data) => data,
-            // Si le BinArray n'est pas dans notre cache, on suppose qu'il n'y a plus de liquidité dans cette direction.
-            None => break,
+            Some(data) => data, None => break,
         };
-
-        // 2. Décoder le bin actuel depuis les données du BinArray
         let current_bin = match decode_bin_from_bin_array(current_bin_id, bin_array_data) {
-            Ok(bin) => bin,
-            // Si le bin ne peut être décodé, on s'arrête.
-            Err(_) => break,
+            Ok(bin) => bin, Err(_) => break,
         };
 
-        // 3. Déterminer la liquidité disponible dans ce bin
         let (in_reserve, out_reserve) = if is_base_input {
             (current_bin.amount_a as u128, current_bin.amount_b as u128)
         } else {
             (current_bin.amount_b as u128, current_bin.amount_a as u128)
         };
 
-        // Si le bin est vide ou si on cherche à vendre un token qui n'y est pas, on passe au suivant.
         if in_reserve == 0 {
             current_bin_id = if is_base_input { current_bin_id - 1 } else { current_bin_id + 1 };
             continue;
         }
 
-        // 4. Calculer le swap pour ce bin
         let amount_to_process = amount_remaining.min(in_reserve);
-        let active_bin_price = dlmm_math::get_price_of_bin(current_bin_id, pool.bin_step)?;
 
         let amount_out_chunk = dlmm_math::get_amount_out(
             amount_to_process as u64,
             in_reserve,
-            active_bin_price,
-            is_base_input,
+            out_reserve,
         )?;
 
         total_amount_out = total_amount_out.saturating_add(amount_out_chunk as u128);
         amount_remaining = amount_remaining.saturating_sub(amount_to_process);
 
-        // 5. Préparer le passage au bin suivant si nécessaire
         if amount_remaining > 0 {
             current_bin_id = if is_base_input { current_bin_id - 1 } else { current_bin_id + 1 };
         }
     }
 
-    // Appliquer les frais de pool (base_fee_rate) sur le montant total de sortie
-    let fee = (total_amount_out * pool.base_fee_rate as u128) / 1_000_000;
+    // --- APPLICATION DES FRAIS AVEC LA BONNE PRÉCISION ---
+    let fee = (total_amount_out * pool.base_fee_rate as u128) / FEE_PRECISION;
     Ok(total_amount_out.saturating_sub(fee) as u64)
 }
-
 
 pub async fn hydrate(pool: &mut DecodedDlmmPool, rpc_client: &RpcClient) -> Result<()> {
     // --- 1. Hydrater les frais de transfert des mints ---
