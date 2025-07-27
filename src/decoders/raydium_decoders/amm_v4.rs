@@ -5,6 +5,8 @@ use crate::decoders::pool_operations::PoolOperations;
 use bytemuck::{from_bytes, Pod, Zeroable};
 use solana_sdk::pubkey::Pubkey;
 use anyhow::{bail, Result, anyhow};
+use solana_client::nonblocking::rpc_client::RpcClient;
+use crate::decoders::spl_token_decoders;
 
 // --- STRUCTURE PUBLIQUE : Elle contient maintenant les réserves ---
 #[derive(Debug, Clone)]
@@ -12,6 +14,8 @@ pub struct DecodedAmmPool {
     pub address: Pubkey,
     pub mint_a: Pubkey,
     pub mint_b: Pubkey,
+    pub mint_a_transfer_fee_bps: u16,
+    pub mint_b_transfer_fee_bps: u16,
     pub vault_a: Pubkey,
     pub vault_b: Pubkey,
     pub total_fee_percent: f64,
@@ -19,6 +23,15 @@ pub struct DecodedAmmPool {
     // Ils seront mis à jour par le graph_engine avant tout calcul.
     pub reserve_a: u64,
     pub reserve_b: u64,
+}
+
+// Dans amm_v4.rs, après la struct DecodedAmmPool
+impl DecodedAmmPool {
+    /// Calcule et retourne les frais de pool sous forme de pourcentage lisible.
+    pub fn fee_as_percent(&self) -> f64 {
+        // total_fee_percent est déjà un ratio (ex: 0.0025 pour 0.25%)
+        self.total_fee_percent * 100.0
+    }
 }
 
 // --- STRUCTURES BRUTES (ne changent pas, assurez-vous qu'elles sont complètes) ---
@@ -79,6 +92,8 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedAmmPool> {
         vault_a: pool_struct.token_coin,
         vault_b: pool_struct.token_pc,
         total_fee_percent,
+        mint_a_transfer_fee_bps: 0,
+        mint_b_transfer_fee_bps: 0,
         reserve_a: 0, // Les réserves sont initialisées à 0
         reserve_b: 0,
     })
@@ -95,36 +110,75 @@ impl PoolOperations for DecodedAmmPool {
     }
 
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64) -> Result<u64> {
-        if self.reserve_a == 0 || self.reserve_b == 0 {
-            return Ok(0); // Pas de liquidité, on retourne 0
-        }
-
-        let (in_reserve, out_reserve) = if *token_in_mint == self.mint_a {
-            (self.reserve_a, self.reserve_b)
+        // --- 1. Appliquer les frais de transfert sur l'INPUT ---
+        let (in_mint_fee_bps, out_mint_fee_bps, in_reserve, out_reserve) = if *token_in_mint == self.mint_a {
+            (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps, self.reserve_a, self.reserve_b)
         } else if *token_in_mint == self.mint_b {
-            (self.reserve_b, self.reserve_a)
+            (self.mint_b_transfer_fee_bps, self.mint_a_transfer_fee_bps, self.reserve_b, self.reserve_a)
         } else {
             return Err(anyhow!("Input token does not belong to this pool."));
         };
 
-        // --- MATHÉMATIQUES OPTIMISÉES AVEC u128 ---
-        const PRECISION: u128 = 1_000_000; // On choisit une précision d'un million
+        let fee_on_input = (amount_in as u128 * in_mint_fee_bps as u128) / 10000;
+        let amount_in_after_transfer_fee = amount_in.saturating_sub(fee_on_input as u64);
 
-        // On convertit le pourcentage de frais en un numérateur entier
-        // Ex: 0.0025 (0.25%) devient 2500
-        let fee_numerator = (self.total_fee_percent * PRECISION as f64) as u128;
-
-        // Calcul du montant après frais, en utilisant uniquement des entiers
-        let amount_in_with_fee = amount_in as u128 * (PRECISION - fee_numerator) / PRECISION;
-
-        // Calcul du montant de sortie avec la formule x*y=k
-        let numerator = amount_in_with_fee * out_reserve as u128;
-        let denominator = in_reserve as u128 + amount_in_with_fee;
-
-        if denominator == 0 {
-            return Ok(0); // Evite la division par zéro
+        if in_reserve == 0 || out_reserve == 0 {
+            return Ok(0);
         }
 
-        Ok((numerator / denominator) as u64)
+        // --- 2. Calculer le swap avec le montant NET ---
+        const PRECISION: u128 = 1_000_000;
+        let pool_fee_numerator = (self.total_fee_percent * PRECISION as f64) as u128;
+        let amount_in_with_fees = (amount_in_after_transfer_fee as u128 * (PRECISION - pool_fee_numerator)) / PRECISION;
+
+        let numerator = amount_in_with_fees * out_reserve as u128;
+        let denominator = in_reserve as u128 + amount_in_with_fees;
+        if denominator == 0 { return Ok(0); }
+        let gross_amount_out = (numerator / denominator) as u64;
+
+        // --- 3. Appliquer les frais de transfert sur l'OUTPUT ---
+        let fee_on_output = (gross_amount_out as u128 * out_mint_fee_bps as u128) / 10000;
+        let final_amount_out = gross_amount_out.saturating_sub(fee_on_output as u64);
+
+        Ok(final_amount_out)
     }
+}
+
+pub async fn hydrate(pool: &mut DecodedAmmPool, rpc_client: &RpcClient) -> Result<()> {
+    // --- LA CORRECTION EST ICI ---
+    // On crée une variable qui va "posséder" le slice de pubkeys.
+    // Sa durée de vie est maintenant celle de toute la fonction hydrate.
+    let vaults_to_fetch = [pool.vault_a, pool.vault_b];
+
+    // On fetch tout en parallèle : les vaults et les mints
+    let (vault_accounts_res, mint_a_res, mint_b_res) = tokio::join!(
+         // On passe une référence à notre variable qui a une longue durée de vie
+         rpc_client.get_multiple_accounts(&vaults_to_fetch),
+         rpc_client.get_account_data(&pool.mint_a),
+         rpc_client.get_account_data(&pool.mint_b)
+    );
+
+    // Traitement des vaults
+    let vault_accounts = vault_accounts_res?;
+    let vault_a_account = vault_accounts[0]
+        .as_ref()
+        .ok_or_else(|| anyhow!("AMM V4 Vault A not found for pool {}", pool.address))?;
+    pool.reserve_a = u64::from_le_bytes(vault_a_account.data[64..72].try_into()?);
+
+    let vault_b_account = vault_accounts[1]
+        .as_ref()
+        .ok_or_else(|| anyhow!("AMM V4 Vault B not found for pool {}", pool.address))?;
+    pool.reserve_b = u64::from_le_bytes(vault_b_account.data[64..72].try_into()?);
+
+    // --- AJOUT DE LA LOGIQUE D'HYDRATATION DES MINTS ---
+    let mint_a_data = mint_a_res?;
+    let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_data)?;
+    pool.mint_a_transfer_fee_bps = decoded_mint_a.transfer_fee_basis_points;
+
+    let mint_b_data = mint_b_res?;
+    let decoded_mint_b = spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_data)?;
+    pool.mint_b_transfer_fee_bps = decoded_mint_b.transfer_fee_basis_points;
+    // --- FIN DE L'AJOUT ---
+
+    Ok(())
 }

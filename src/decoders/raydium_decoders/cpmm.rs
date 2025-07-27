@@ -4,6 +4,9 @@ use crate::decoders::pool_operations::PoolOperations; // On importe le contrat
 use bytemuck::{from_bytes, Pod, Zeroable};
 use solana_sdk::pubkey::Pubkey;
 use anyhow::{bail, Result, anyhow};
+use solana_client::nonblocking::rpc_client::RpcClient;
+use crate::decoders::raydium_decoders::amm_config;
+use crate::decoders::spl_token_decoders;
 
 // Discriminator pour les comptes PoolState du programme CPMM
 const CPMM_POOL_STATE_DISCRIMINATOR: [u8; 8] = [247, 237, 227, 245, 215, 195, 222, 70];
@@ -19,11 +22,20 @@ pub struct DecodedCpmmPool {
     pub token_1_mint: Pubkey,
     pub token_0_vault: Pubkey,
     pub token_1_vault: Pubkey,
+    pub mint_a_transfer_fee_bps: u16,
+    pub mint_b_transfer_fee_bps: u16,
     pub status: u8,
     // Les champs "intelligents"
     pub total_fee_percent: f64, // Les frais seront stockés ici après lecture du config
     pub reserve_a: u64,
     pub reserve_b: u64,
+}
+
+// Dans cpmm.rs, après la struct DecodedCpmmPool
+impl DecodedCpmmPool {
+    pub fn fee_as_percent(&self) -> f64 {
+        self.total_fee_percent * 100.0
+    }
 }
 
 // --- STRUCTURE DE DONNÉES BRUTES (Miroir exact de l'IDL) ---
@@ -85,6 +97,8 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedCpmmPool> {
         token_0_vault: pool_struct.token_0_vault,
         token_1_vault: pool_struct.token_1_vault,
         status: pool_struct.status,
+        mint_a_transfer_fee_bps: 0,
+        mint_b_transfer_fee_bps: 0,
         // Les champs "intelligents" sont initialisés à 0
         total_fee_percent: 0.0,
         reserve_a: 0,
@@ -103,34 +117,71 @@ impl PoolOperations for DecodedCpmmPool {
     }
 
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64) -> Result<u64> {
-        if self.reserve_a == 0 || self.reserve_b == 0 {
-            return Ok(0); // Pas de liquidité
-        }
-
-        let (in_reserve, out_reserve) = if *token_in_mint == self.token_0_mint {
-            // L'input est le token 0, donc la réserve d'entrée est reserve_a
-            (self.reserve_a, self.reserve_b)
+        // --- 1. Appliquer les frais de transfert sur l'INPUT ---
+        let (in_mint_fee_bps, out_mint_fee_bps, in_reserve, out_reserve) = if *token_in_mint == self.token_0_mint {
+            (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps, self.reserve_a, self.reserve_b)
         } else if *token_in_mint == self.token_1_mint {
-            // L'input est le token 1, donc la réserve d'entrée est reserve_b
-            (self.reserve_b, self.reserve_a)
+            (self.mint_b_transfer_fee_bps, self.mint_a_transfer_fee_bps, self.reserve_b, self.reserve_a)
         } else {
             return Err(anyhow!("Input token does not belong to this pool."));
         };
 
-        // --- MATHÉMATIQUES OPTIMISÉES AVEC u128 (identique à AMM V4) ---
-        const PRECISION: u128 = 1_000_000;
+        let fee_on_input = (amount_in as u128 * in_mint_fee_bps as u128) / 10000;
+        let amount_in_after_transfer_fee = amount_in.saturating_sub(fee_on_input as u64);
 
-        let fee_numerator = (self.total_fee_percent * PRECISION as f64) as u128;
-
-        let amount_in_with_fee = amount_in as u128 * (PRECISION - fee_numerator) / PRECISION;
-
-        let numerator = amount_in_with_fee * out_reserve as u128;
-        let denominator = in_reserve as u128 + amount_in_with_fee;
-
-        if denominator == 0 {
+        if in_reserve == 0 || out_reserve == 0 {
             return Ok(0);
         }
 
-        Ok((numerator / denominator) as u64)
+        // --- 2. Calculer le swap avec le montant NET ---
+        const PRECISION: u128 = 1_000_000;
+        let pool_fee_numerator = (self.total_fee_percent * PRECISION as f64) as u128;
+        let amount_in_with_fees = (amount_in_after_transfer_fee as u128 * (PRECISION - pool_fee_numerator)) / PRECISION;
+
+        let numerator = amount_in_with_fees * out_reserve as u128;
+        let denominator = in_reserve as u128 + amount_in_with_fees;
+        if denominator == 0 { return Ok(0); }
+        let gross_amount_out = (numerator / denominator) as u64;
+
+        // --- 3. Appliquer les frais de transfert sur l'OUTPUT ---
+        let fee_on_output = (gross_amount_out as u128 * out_mint_fee_bps as u128) / 10000;
+        let final_amount_out = gross_amount_out.saturating_sub(fee_on_output as u64);
+
+        Ok(final_amount_out)
     }
+}
+
+pub async fn hydrate(pool: &mut DecodedCpmmPool, rpc_client: &RpcClient) -> Result<()> {
+    // Lance les 3 appels réseau indépendants (config, vault A, vault B) en parallèle
+    let (config_res, vault_a_res, vault_b_res, mint_a_res, mint_b_res) = tokio::join!(
+        rpc_client.get_account_data(&pool.amm_config),
+        rpc_client.get_account_data(&pool.token_0_vault),
+        rpc_client.get_account_data(&pool.token_1_vault),
+        rpc_client.get_account_data(&pool.token_0_mint), // <-- NOUVEAU
+        rpc_client.get_account_data(&pool.token_1_mint)
+    );
+
+    // Traite le résultat de la config pour obtenir les frais de pool
+    let config_data = config_res?;
+    let decoded_config = amm_config::decode_config(&config_data)?;
+    pool.total_fee_percent = decoded_config.trade_fee_rate as f64 / 1_000_000.0;
+
+    // Traite les résultats des vaults pour obtenir les réserves
+    let vault_a_data = vault_a_res?;
+    pool.reserve_a = u64::from_le_bytes(vault_a_data[64..72].try_into()?);
+    let vault_b_data = vault_b_res?;
+    pool.reserve_b = u64::from_le_bytes(vault_b_data[64..72].try_into()?);
+
+    // --- AJOUT DE LA LOGIQUE D'HYDRATATION DES MINTS ---
+    let mint_a_data = mint_a_res?;
+    let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.token_0_mint, &mint_a_data)?;
+    // On pourrait stocker les décimales dans le pool si nécessaire, mais pour l'instant on ne s'en sert pas
+    pool.mint_a_transfer_fee_bps = decoded_mint_a.transfer_fee_basis_points;
+
+    let mint_b_data = mint_b_res?;
+    let decoded_mint_b = spl_token_decoders::mint::decode_mint(&pool.token_1_mint, &mint_b_data)?;
+    pool.mint_b_transfer_fee_bps = decoded_mint_b.transfer_fee_basis_points;
+    // --- FIN DE L'AJOUT ---
+
+    Ok(())
 }
