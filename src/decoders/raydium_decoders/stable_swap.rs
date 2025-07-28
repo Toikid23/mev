@@ -73,7 +73,7 @@ struct StableSwapAmmInfoData {
 
 /// Décode le compte principal d'un pool Stable Swap.
 /// Retourne une structure PARTIELLE qui doit être complétée par le ModelDataAccount.
-pub fn decode_pool_info(address: &Pubkey, data: &[u8]) -> Result<(StableSwapAmmInfoData, f64)> {
+pub fn decode_pool_info(_address: &Pubkey, data: &[u8]) -> Result<(StableSwapAmmInfoData, f64)> {
     if data.len() != std::mem::size_of::<StableSwapAmmInfoData>() {
         bail!("Stable Swap Pool data length mismatch.");
     }

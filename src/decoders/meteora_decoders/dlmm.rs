@@ -1,6 +1,6 @@
 // src/decoders/meteora_decoders/dlmm.rs
 
-use crate::decoders::pool_operations::PoolOperations; // On importe le contrat
+use crate::decoders::pool_operations::PoolOperations;
 use bytemuck::{from_bytes, Pod, Zeroable};
 use solana_sdk::pubkey::Pubkey;
 use anyhow::{bail, Result, anyhow};
@@ -10,17 +10,16 @@ use solana_client::nonblocking::rpc_client::RpcClient;
 use crate::decoders::spl_token_decoders;
 use std::collections::BTreeSet;
 
-// Le VRAI discriminator que nous avons trouvé.
+// Discriminators
 const DLMM_LBPAIR_DISCRIMINATOR: [u8; 8] = [33, 11, 49, 98, 181, 101, 177, 13];
+const BIN_ARRAY_DISCRIMINATOR: [u8; 8] = [92, 142, 92, 220, 5, 148, 70, 181];
 
-// --- CONSTANTES (tirées de l'IDL) ---
+// Constantes du programme
 const MAX_BIN_PER_ARRAY: i32 = 70;
 const BIN_ARRAY_SEED: &[u8] = b"bin_array";
 
+// --- STRUCTURES DE SORTIE PROPRES ---
 
-
-// --- STRUCTURES PUBLIQUES ---
-/// Renommée pour plus de clarté
 #[derive(Debug, Clone)]
 pub struct DecodedDlmmPool {
     pub address: Pubkey,
@@ -32,281 +31,209 @@ pub struct DecodedDlmmPool {
     pub active_bin_id: i32,
     pub bin_step: u16,
     pub base_fee_rate: u64,
-    pub reserve_a: u64,
-    pub reserve_b: u64,
     pub mint_a_transfer_fee_bps: u16,
     pub mint_b_transfer_fee_bps: u16,
-    // ----------------------------
-    // Ce champ contiendra les BinArrays chargés par le graph_engine
+    pub parameters: StaticParameters,
+    pub v_parameters: VariableParameters,
     pub hydrated_bin_arrays: Option<BTreeMap<i64, Vec<u8>>>,
 }
 
 impl DecodedDlmmPool {
-    /// Calcule et retourne les frais de pool sous forme de pourcentage lisible.
     pub fn fee_as_percent(&self) -> f64 {
-        // La valeur base_fee_rate est en millionièmes (10^-6).
-        // Pour un pourcentage, on divise par 1,000,000 et on multiplie par 100.
-        (self.base_fee_rate as f64 / 1_000_000.0) * 100.0
+        (self.base_fee_rate as f64 / 1_000_000_000.0) * 100.0
     }
 }
-
 
 #[derive(Debug, Clone)]
 pub struct DecodedBin {
     pub amount_a: u64,
     pub amount_b: u64,
+    pub price: u128,
 }
 
-// --- STRUCTURES BRUTES (Traduction 1:1 de l'IDL) ---
+// --- STRUCTURES BRUTES (TRADUCTION EXACTE DE L'IDL v0.10.0) ---
 
 #[repr(C, packed)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
-struct StaticParameters {
-    pub base_factor: u16,
-    pub filter_period: u16,
-    pub decay_period: u16,
-    pub reduction_factor: u16,
-    pub variable_fee_control: u32,
-    pub max_volatility_accumulator: u32,
-    pub min_bin_id: i32,
-    pub max_bin_id: i32,
-    pub protocol_share: u16,
-    pub base_fee_power_factor: u8,
-    pub padding: [u8; 5],
+pub struct StaticParameters {
+    pub base_factor: u16, pub filter_period: u16, pub decay_period: u16, pub reduction_factor: u16,
+    pub variable_fee_control: u32, pub max_volatility_accumulator: u32, pub min_bin_id: i32, pub max_bin_id: i32,
+    pub protocol_share: u16, pub base_fee_power_factor: u8, pub padding: [u8; 5],
 }
 
 #[repr(C, packed)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
-struct VariableParameters {
-    pub volatility_accumulator: u32,
-    pub volatility_reference: u32,
-    pub index_reference: i32,
-    pub padding: [u8; 4],
-    pub last_update_timestamp: i64,
-    pub padding1: [u8; 8],
+pub struct VariableParameters {
+    pub volatility_accumulator: u32, pub volatility_reference: u32, pub index_reference: i32, pub padding: [u8; 4],
+    pub last_update_timestamp: i64, pub padding1: [u8; 8],
 }
 
 #[repr(C, packed)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
-struct ProtocolFee {
-    pub amount_x: u64,
-    pub amount_y: u64,
-}
+struct ProtocolFee { pub amount_x: u64, pub amount_y: u64 }
 
 #[repr(C, packed)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 struct RewardInfo {
-    pub mint: Pubkey,
-    pub vault: Pubkey,
-    pub funder: Pubkey,
-    pub reward_duration: u64,
-    pub reward_duration_end: u64,
-    pub reward_rate: u128,
-    pub last_update_time: u64,
-    pub cumulative_seconds_with_empty_liquidity_reward: u64,
+    pub mint: Pubkey, pub vault: Pubkey, pub funder: Pubkey, pub reward_duration: u64, pub reward_duration_end: u64,
+    pub reward_rate: u128, pub last_update_time: u64, pub cumulative_seconds_with_empty_liquidity_reward: u64,
 }
 
 #[repr(C, packed)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 struct LbPairData {
-    pub parameters: StaticParameters,
-    pub v_parameters: VariableParameters,
-    pub bump_seed: [u8; 1],
-    pub bin_step_seed: [u8; 2],
-    pub pair_type: u8,
-    pub active_id: i32,
-    pub bin_step: u16,
-    pub status: u8,
-    pub require_base_factor_seed: u8,
-    pub base_factor_seed: [u8; 2],
-    pub activation_type: u8,
-    pub creator_pool_on_off_control: u8,
-    pub token_x_mint: Pubkey,
-    pub token_y_mint: Pubkey,
-    pub reserve_x: Pubkey,
-    pub reserve_y: Pubkey,
-    pub protocol_fee: ProtocolFee,
-    pub padding1: [u8; 32],
-    pub reward_infos: [RewardInfo; 2],
-    pub oracle: Pubkey,
-    pub bin_array_bitmap: [u64; 16],
-    pub last_updated_at: i64,
-    pub padding2: [u8; 32],
-    pub pre_activation_swap_address: Pubkey,
-    pub base_key: Pubkey,
-    pub activation_point: u64,
-    pub pre_activation_duration: u64,
-    pub padding3: [u8; 8],
-    pub padding4: u64,
-    pub creator: Pubkey,
-    pub token_mint_x_program_flag: u8,
-    pub token_mint_y_program_flag: u8,
-    pub reserved: [u8; 22],
+    pub parameters: StaticParameters, pub v_parameters: VariableParameters, pub bump_seed: [u8; 1], pub bin_step_seed: [u8; 2],
+    pub pair_type: u8, pub active_id: i32, pub bin_step: u16, pub status: u8, pub require_base_factor_seed: u8,
+    pub base_factor_seed: [u8; 2], pub activation_type: u8, pub creator_pool_on_off_control: u8,
+    pub token_x_mint: Pubkey, pub token_y_mint: Pubkey, pub reserve_x: Pubkey, pub reserve_y: Pubkey,
+    pub protocol_fee: ProtocolFee, pub padding1: [u8; 32], pub reward_infos: [RewardInfo; 2], pub oracle: Pubkey,
+    pub bin_array_bitmap: [u64; 16], pub last_updated_at: i64, pub padding2: [u8; 32],
+    pub pre_activation_swap_address: Pubkey, pub base_key: Pubkey, pub activation_point: u64,
+    pub pre_activation_duration: u64, pub padding3: [u8; 8], pub padding4: u64, pub creator: Pubkey,
+    pub token_mint_x_program_flag: u8, pub token_mint_y_program_flag: u8, pub reserved: [u8; 22],
 }
 
 #[repr(C, packed)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 pub struct Bin {
-    pub amount_x: u64,
-    pub amount_y: u64,
-    pub price: u128,
-    pub liquidity_supply: u128,
-    pub reward_per_token_stored: [u128; 2],
-    pub fee_amount_x_per_token_stored: u128,
-    pub fee_amount_y_per_token_stored: u128,
-    pub amount_x_in: u128,
-    pub amount_y_in: u128,
+    pub amount_x: u64, pub amount_y: u64, pub price: u128, pub liquidity_supply: u128,
+    pub reward_per_token_stored: [u128; 2], pub fee_amount_x_per_token_stored: u128,
+    pub fee_amount_y_per_token_stored: u128, pub amount_x_in: u128, pub amount_y_in: u128,
 }
 
-// --- FONCTIONS PUBLIQUES ---
+// --- FONCTIONS DE DÉCODAGE ---
 
-/// Décode le compte principal LbPair.
 pub fn decode_lb_pair(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Result<DecodedDlmmPool> {
-    if data.get(..8) != Some(&DLMM_LBPAIR_DISCRIMINATOR) {
-        bail!("Invalid discriminator.");
-    }
+    if data.get(..8) != Some(&DLMM_LBPAIR_DISCRIMINATOR) { bail!("Invalid LbPair discriminator"); }
     let data_slice = &data[8..];
-    if data_slice.len() != std::mem::size_of::<LbPairData>() {
-        bail!(
-            "LbPair data length mismatch. Expected {}, got {}.",
-            std::mem::size_of::<LbPairData>(),
-            data_slice.len()
-        );
-    }
-
+    if data_slice.len() != std::mem::size_of::<LbPairData>() { bail!("LbPairData size mismatch"); }
     let pool_struct: &LbPairData = from_bytes(data_slice);
-
-    // --- LA FORMULE DE FRAIS EXACTE, TIRÉE DE L'IDL ---
-    let power_factor = pool_struct.parameters.base_fee_power_factor as u32;
-    let multiplier = 10u64.pow(power_factor).saturating_mul(10);
-
-    let base_fee_rate = (pool_struct.parameters.base_factor as u64)
-        .saturating_mul(pool_struct.bin_step as u64)
-        .saturating_mul(multiplier);
+    let base_fee_rate = (pool_struct.parameters.base_factor as u64).saturating_mul(pool_struct.bin_step as u64);
 
     Ok(DecodedDlmmPool {
-        address: *address,
-        program_id: *program_id, // On initialise le program_id
-        mint_a: pool_struct.token_x_mint,
-        mint_b: pool_struct.token_y_mint,
-        vault_a: pool_struct.reserve_x,
-        vault_b: pool_struct.reserve_y,
-        active_bin_id: pool_struct.active_id,
-        bin_step: pool_struct.bin_step,
-        base_fee_rate,
-        reserve_a: 0,
-        reserve_b: 0,
-        mint_a_transfer_fee_bps: 0,
-        mint_b_transfer_fee_bps: 0,
-        hydrated_bin_arrays: None, // On initialise le champ à None
+        address: *address, program_id: *program_id, mint_a: pool_struct.token_x_mint,
+        mint_b: pool_struct.token_y_mint, vault_a: pool_struct.reserve_x, vault_b: pool_struct.reserve_y,
+        active_bin_id: pool_struct.active_id, bin_step: pool_struct.bin_step, base_fee_rate,
+        mint_a_transfer_fee_bps: 0, mint_b_transfer_fee_bps: 0, parameters: pool_struct.parameters,
+        v_parameters: pool_struct.v_parameters, hydrated_bin_arrays: None,
     })
 }
 
+pub fn decode_bin_from_bin_array(bin_id: i32, bin_array_data: &[u8]) -> Result<DecodedBin> {
+    if bin_array_data.get(..8) != Some(&BIN_ARRAY_DISCRIMINATOR) { bail!("Invalid BinArray discriminator"); }
+    let data_slice = &bin_array_data[8..];
+    const BINS_FIELD_OFFSET: usize = 48; // 8+1+7+32
+    let bin_index_in_array = (bin_id % MAX_BIN_PER_ARRAY + MAX_BIN_PER_ARRAY) % MAX_BIN_PER_ARRAY;
+    let bin_offset = BINS_FIELD_OFFSET + (bin_index_in_array as usize * std::mem::size_of::<Bin>());
 
-/// Calcule l'adresse du compte BinArray contenant un bin_id.
-pub fn get_bin_array_address(lb_pair: &Pubkey, bin_id: i32) -> Pubkey {
-    // Le calcul de l'index doit gérer les nombres négatifs correctement.
+    if data_slice.len() < bin_offset + std::mem::size_of::<Bin>() { bail!("BinArray data slice too short"); }
+    let bin_struct: &Bin = from_bytes(&data_slice[bin_offset..bin_offset + std::mem::size_of::<Bin>()]);
+
+    Ok(DecodedBin { amount_a: bin_struct.amount_x, amount_b: bin_struct.amount_y, price: bin_struct.price })
+}
+
+pub fn get_bin_array_address(lb_pair: &Pubkey, bin_id: i32, program_id: &Pubkey) -> Pubkey {
     let bin_array_index = (bin_id as i64 / MAX_BIN_PER_ARRAY as i64) - if bin_id < 0 && bin_id % MAX_BIN_PER_ARRAY != 0 { 1 } else { 0 };
-
-    let (pda, _) = Pubkey::find_program_address(
-        &[
-            BIN_ARRAY_SEED,
-            &lb_pair.to_bytes(),
-            &bin_array_index.to_le_bytes(),
-        ],
-        &crate::decoders::meteora_decoders::ID,
-    );
+    let (pda, _) = Pubkey::find_program_address(&[BIN_ARRAY_SEED, &lb_pair.to_bytes(), &bin_array_index.to_le_bytes()], program_id);
     pda
 }
 
-/// Décode la liquidité d'un bin spécifique depuis les données d'un BinArray.
-pub fn decode_bin_from_bin_array(bin_id: i32, bin_array_data: &[u8]) -> Result<DecodedBin> {
-    const BINS_OFFSET: usize = 8 + 1 + 7 + 32;
-    let bin_index_in_array = (bin_id % MAX_BIN_PER_ARRAY + MAX_BIN_PER_ARRAY) % MAX_BIN_PER_ARRAY;
-    let bin_offset = BINS_OFFSET + (bin_index_in_array as usize) * std::mem::size_of::<Bin>();
 
-    if bin_array_data.len() < bin_offset + std::mem::size_of::<Bin>() {
-        bail!("BinArray data is too short.");
-    }
-
-    let bin_struct: &Bin = from_bytes(&bin_array_data[bin_offset..bin_offset + std::mem::size_of::<Bin>()]);
-
-    Ok(DecodedBin {
-        amount_a: bin_struct.amount_x,
-        amount_b: bin_struct.amount_y,
-    })
-}
-
+// --- LOGIQUE DE POOL ---
 
 impl PoolOperations for DecodedDlmmPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
 
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64) -> Result<u64> {
-        // --- 1. Appliquer les frais de transfert sur l'INPUT ---
-        let (in_mint_fee_bps, out_mint_fee_bps) = if *token_in_mint == self.mint_a {
-            (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps)
-        } else {
-            (self.mint_b_transfer_fee_bps, self.mint_a_transfer_fee_bps)
-        };
-
+        let (in_mint_fee_bps, out_mint_fee_bps) = if *token_in_mint == self.mint_a {(self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps)} else {(self.mint_b_transfer_fee_bps, self.mint_a_transfer_fee_bps)};
         let fee_on_input = (amount_in as u128 * in_mint_fee_bps as u128) / 10000;
         let amount_in_after_transfer_fee = amount_in.saturating_sub(fee_on_input as u64);
 
-        // --- 2. Calculer le swap BRUT avec le montant NET ---
-        let bin_arrays = self.hydrated_bin_arrays.as_ref()
-            .ok_or_else(|| anyhow!("DLMM pool is not hydrated with BinArrays"))?;
+        let (gross_amount_out, bins_crossed) = get_dlmm_quote_with_bins(self, amount_in_after_transfer_fee, token_in_mint)?;
 
-        let gross_amount_out = get_dlmm_quote_with_bins(
-            self,
-            amount_in_after_transfer_fee,
-            token_in_mint,
-            bin_arrays
-        )?;
+        let dynamic_fee_rate = dlmm_math::calculate_dynamic_fee(bins_crossed, self.v_parameters.volatility_accumulator, self.v_parameters.last_update_timestamp, self.bin_step, self.parameters.base_factor, self.parameters.filter_period, self.parameters.decay_period, self.parameters.reduction_factor, self.parameters.variable_fee_control, self.parameters.max_volatility_accumulator)?;
 
-        // --- 3. Appliquer les frais de transfert sur l'OUTPUT ---
-        // NOTE: Les frais de pool sont déjà inclus dans get_dlmm_quote_with_bins
-        let fee_on_output = (gross_amount_out as u128 * out_mint_fee_bps as u128) / 10000;
-        let final_amount_out = gross_amount_out.saturating_sub(fee_on_output as u64);
+        let total_fee_rate = self.base_fee_rate.saturating_add(dynamic_fee_rate);
+        const FEE_PRECISION: u128 = 1_000_000_000;
+        let total_fee_amount = (gross_amount_out as u128 * total_fee_rate as u128) / FEE_PRECISION;
+        let amount_out_after_pool_fee = gross_amount_out.saturating_sub(total_fee_amount as u64);
+
+        let fee_on_output = (amount_out_after_pool_fee as u128 * out_mint_fee_bps as u128) / 10000;
+        let final_amount_out = amount_out_after_pool_fee.saturating_sub(fee_on_output as u64);
+
+        println!("--- DEBUG DLMM Quote ---");
+        println!("Montant d'entrée (net): {}", amount_in_after_transfer_fee);
+        println!("Montant brut de sortie: {}", gross_amount_out);
+        println!("Bins traversés: {}", bins_crossed);
+        println!("Taux frais de base: {}", self.base_fee_rate);
+        println!("Taux frais dynamique: {}", dynamic_fee_rate);
+        println!("Taux frais total: {}", total_fee_rate);
+        println!("Montant total des frais (pool): {}", total_fee_amount);
+        println!("Montant de sortie (après frais pool): {}", amount_out_after_pool_fee);
+        println!("Montant de sortie final: {}", final_amount_out);
+        println!("------------------------");
 
         Ok(final_amount_out)
     }
 }
 
+// Dans src/decoders/meteora_decoders/dlmm.rs
+// REMPLACEZ UNIQUEMENT CETTE FONCTION
 
-/// Calcule le montant de sortie pour un swap DLMM, en gérant le passage de plusieurs bins.
+// Dans src/decoders/meteora_decoders/dlmm.rs
+
 fn get_dlmm_quote_with_bins(
     pool: &DecodedDlmmPool,
     amount_in: u64,
     token_in_mint: &Pubkey,
-    bin_arrays: &BTreeMap<i64, Vec<u8>>,
-) -> Result<u64> {
-    // --- LA PRÉCISION DES FRAIS, TIRÉE DE L'IDL ---
-    const FEE_PRECISION: u128 = 1_000_000_000;
+) -> Result<(u64, u64)> {
+    let bin_arrays = pool.hydrated_bin_arrays.as_ref().ok_or_else(|| anyhow!("Pool not hydrated"))?;
+
     let mut amount_remaining = amount_in as u128;
     let mut total_amount_out: u128 = 0;
     let mut current_bin_id = pool.active_bin_id;
     let is_base_input = *token_in_mint == pool.mint_a;
+    let mut bins_used_count = 0u64;
+
+    println!("\n--- Début de la Simulation de Swap ---");
+    println!("Montant d'entrée total: {}", amount_in);
 
     while amount_remaining > 0 {
-        let bin_array_idx = (current_bin_id as i64 / MAX_BIN_PER_ARRAY as i64)
-            - if current_bin_id < 0 && current_bin_id % MAX_BIN_PER_ARRAY != 0 { 1 } else { 0 };
+        if current_bin_id < pool.parameters.min_bin_id || current_bin_id > pool.parameters.max_bin_id {
+            println!("-> [STOP] Atteint la limite des bins du pool ({}).", current_bin_id);
+            break;
+        }
+
+        let bin_array_idx = (current_bin_id as i64 / MAX_BIN_PER_ARRAY as i64) - if current_bin_id < 0 && current_bin_id % MAX_BIN_PER_ARRAY != 0 { 1 } else { 0 };
+
+        println!("\nItération: Bin ID {}, Cherche BinArray Index {}", current_bin_id, bin_array_idx);
 
         let bin_array_data = match bin_arrays.get(&bin_array_idx) {
-            Some(data) => data, None => break,
-        };
-        let current_bin = match decode_bin_from_bin_array(current_bin_id, bin_array_data) {
-            Ok(bin) => bin, Err(_) => break,
+            Some(data) => {
+                println!("-> [OK] BinArray trouvé.");
+                data
+            },
+            None => {
+                println!("-> [STOP] BinArray non trouvé dans les données hydratées. Fin du swap.");
+                break;
+            }
         };
 
-        let (in_reserve, out_reserve) = if is_base_input {
-            (current_bin.amount_a as u128, current_bin.amount_b as u128)
-        } else {
-            (current_bin.amount_b as u128, current_bin.amount_a as u128)
+        let current_bin = match decode_bin_from_bin_array(current_bin_id, bin_array_data) {
+            Ok(bin) => bin,
+            Err(_) => {
+                println!("-> [SKIP] Bin {} non initialisé ou erreur de lecture. Passage au suivant.", current_bin_id);
+                current_bin_id = if is_base_input { current_bin_id.saturating_sub(1) } else { current_bin_id.saturating_add(1) };
+                continue;
+            }
         };
+
+        let in_reserve = if is_base_input { current_bin.amount_a as u128 } else { current_bin.amount_b as u128 };
 
         if in_reserve == 0 {
-            current_bin_id = if is_base_input { current_bin_id - 1 } else { current_bin_id + 1 };
+            println!("-> [SKIP] Bin {} vide (réserve de {}). Passage au suivant.", current_bin_id, in_reserve);
+            current_bin_id = if is_base_input { current_bin_id.saturating_sub(1) } else { current_bin_id.saturating_add(1) };
             continue;
         }
 
@@ -314,65 +241,94 @@ fn get_dlmm_quote_with_bins(
 
         let amount_out_chunk = dlmm_math::get_amount_out(
             amount_to_process as u64,
-            in_reserve,
-            out_reserve,
+            current_bin.price,
+            is_base_input,
         )?;
+
+        println!("-> [CALCUL] Bin {}: reserve={}, à traiter={}, sortie={}, restant={}", current_bin_id, in_reserve, amount_to_process, amount_out_chunk, amount_remaining.saturating_sub(amount_to_process));
 
         total_amount_out = total_amount_out.saturating_add(amount_out_chunk as u128);
         amount_remaining = amount_remaining.saturating_sub(amount_to_process);
+        bins_used_count += 1;
 
-        if amount_remaining > 0 {
-            current_bin_id = if is_base_input { current_bin_id - 1 } else { current_bin_id + 1 };
+        if amount_to_process < in_reserve {
+            println!("-> [STOP] Swap terminé. Montant d'entrée entièrement utilisé.");
+            break;
         }
+
+        current_bin_id = if is_base_input {
+            current_bin_id.saturating_sub(1)
+        } else {
+            current_bin_id.saturating_add(1)
+        };
     }
 
-    // --- APPLICATION DES FRAIS AVEC LA BONNE PRÉCISION ---
-    let fee = (total_amount_out * pool.base_fee_rate as u128) / FEE_PRECISION;
-    Ok(total_amount_out.saturating_sub(fee) as u64)
+    println!("--- Fin de la Simulation de Swap ---");
+    let effective_bins_crossed = if bins_used_count > 0 { bins_used_count - 1 } else { 0 };
+    Ok((total_amount_out as u64, effective_bins_crossed))
 }
 
 pub async fn hydrate(pool: &mut DecodedDlmmPool, rpc_client: &RpcClient) -> Result<()> {
-    // --- 1. Hydrater les frais de transfert des mints ---
+    // La partie sur les frais de transfert est correcte, on la garde.
     let (mint_a_res, mint_b_res) = tokio::join!(
         rpc_client.get_account_data(&pool.mint_a),
         rpc_client.get_account_data(&pool.mint_b)
     );
-
     let mint_a_data = mint_a_res?;
     let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_data)?;
     pool.mint_a_transfer_fee_bps = decoded_mint_a.transfer_fee_basis_points;
-
     let mint_b_data = mint_b_res?;
     let decoded_mint_b = spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_data)?;
     pool.mint_b_transfer_fee_bps = decoded_mint_b.transfer_fee_basis_points;
 
-    // --- 2. Hydrater les BinArrays pertinents ---
-    // On va charger le BinArray actif, ainsi que les deux voisins de chaque côté.
-    // C'est un bon compromis entre exhaustivité et performance.
+    // --- DÉBUT DU MODE DIAGNOSTIC ---
+
+    println!("\n--- DIAGNOSTIC D'HYDRATATION ---");
+    println!("Pool: {}", pool.address);
+    println!("Programme ID: {}", pool.program_id);
+    println!("Bin Actif ID: {}", pool.active_bin_id);
+
     let mut bin_array_indices_to_fetch = BTreeSet::new();
     let active_array_idx = (pool.active_bin_id as i64 / MAX_BIN_PER_ARRAY as i64)
         - if pool.active_bin_id < 0 && pool.active_bin_id % MAX_BIN_PER_ARRAY != 0 { 1 } else { 0 };
 
-    for i in -2..=2 {
+    println!("Index du BinArray Actif (calculé): {}", active_array_idx);
+
+    // On charge une large plage pour être sûr
+    for i in -10..=10 {
         bin_array_indices_to_fetch.insert(active_array_idx + i);
     }
 
     let mut addresses_to_fetch = vec![];
+    println!("\nCalcul des adresses PDA des BinArray à charger :");
     for idx in &bin_array_indices_to_fetch {
-        addresses_to_fetch.push(get_bin_array_address(&pool.address, (idx * MAX_BIN_PER_ARRAY as i64) as i32));
+        let address = get_bin_array_address(&pool.address, (idx * MAX_BIN_PER_ARRAY as i64) as i32, &pool.program_id);
+        addresses_to_fetch.push(address);
+        // On affiche l'adresse calculée !
+        println!("-> Index {}: {}", idx, address);
     }
+    println!("------------------------------------");
+
 
     let accounts = rpc_client.get_multiple_accounts(&addresses_to_fetch).await?;
 
     let mut hydrated_bin_arrays = BTreeMap::new();
+    println!("\nRésultats du chargement des comptes :");
     for (i, account) in accounts.iter().enumerate() {
         if let Some(acc) = account {
-            let idx = bin_array_indices_to_fetch.iter().nth(i).unwrap();
-            hydrated_bin_arrays.insert(*idx, acc.data.clone());
+            if let Some(idx) = bin_array_indices_to_fetch.iter().nth(i) {
+                println!("-> [OK] Compte pour Index {} trouvé (Taille: {} octets)", idx, acc.data.len());
+                hydrated_bin_arrays.insert(*idx, acc.data.clone());
+            }
+        } else {
+            if let Some(idx) = bin_array_indices_to_fetch.iter().nth(i) {
+                println!("-> [ÉCHEC] Compte pour Index {} NON trouvé (adresse probablement non initialisée)", idx);
+            }
         }
     }
+    println!("-------------------------------------\n");
+
 
     pool.hydrated_bin_arrays = Some(hydrated_bin_arrays);
-
     Ok(())
 }

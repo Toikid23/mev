@@ -82,7 +82,7 @@ async fn test_launchpad(rpc_client: &RpcClient) -> Result<()> {
 }
 
 async fn test_dlmm(rpc_client: &RpcClient) -> Result<()> {
-    const POOL_ADDRESS: &str = "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6"; // JUP-USDC
+    const POOL_ADDRESS: &str = "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6"; // WSOL-USDC
     const PROGRAM_ID: &str = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo";
     println!("\n--- Test Meteora DLMM ({}) ---", POOL_ADDRESS);
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
@@ -92,13 +92,22 @@ async fn test_dlmm(rpc_client: &RpcClient) -> Result<()> {
 
     println!("[1/2] Hydratation...");
     dlmm::hydrate(&mut pool, rpc_client).await?;
-    println!("-> Hydratation terminée. Frais: {:.4}%. Trouvé {} BinArray(s).",
-        pool.fee_as_percent(),
-        pool.hydrated_bin_arrays.as_ref().unwrap().len()
+    println!("-> Hydratation terminée. Frais de base: {:.4}%. Trouvé {} BinArray(s).",
+             pool.fee_as_percent(),
+             pool.hydrated_bin_arrays.as_ref().unwrap().len()
     );
-    let amount_in = 1_000_000; // 1 USDC
-    println!("[2/2] Calcul du quote pour 1 USDC...");
-    print_quote_result(&pool, &pool.mint_b, 6, 6, amount_in)
+
+    // --- TEST A : Petit montant ---
+    let small_amount_in = 1_000_000; // 1 USDC
+    println!("\n[2/3] Calcul du quote pour 1 USDC...");
+    print_quote_result(&pool, &pool.mint_b, 6, 9, small_amount_in)?;
+
+    // --- TEST B : Gros montant ---
+    let large_amount_in = 500_000_000_000; // 10,000 USDC
+    println!("\n[3/3] Calcul du quote pour 10,000 USDC...");
+    print_quote_result(&pool, &pool.mint_b, 6, 9, large_amount_in)?;
+
+    Ok(())
 }
 
 #[tokio::main]
