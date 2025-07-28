@@ -5,7 +5,7 @@ use uint::construct_uint;
 
 construct_uint! { pub struct U256(4); }
 
-/// Calcule le montant de sortie pour un swap dans un seul bin DLMM.
+
 pub fn get_amount_out(
     amount_in: u64,
     price: u128,
@@ -22,6 +22,37 @@ pub fn get_amount_out(
     };
     Ok(amount_out_u256.as_u64())
 }
+
+/// Calcule le montant de sortie pour un swap dans un seul bin DLMM.
+pub fn get_amount_y(sqrt_price_a: u128, sqrt_price_b: u128, liquidity: u128) -> u128 {
+    let (sqrt_price_a, sqrt_price_b) = if sqrt_price_a > sqrt_price_b { (sqrt_price_b, sqrt_price_a) } else { (sqrt_price_a, sqrt_price_b) };
+
+    let delta_price = U256::from(sqrt_price_b - sqrt_price_a);
+    let liquidity_u256 = U256::from(liquidity);
+
+    // Formule: floor(liquidity * (sqrt_price_b - sqrt_price_a) / 2^64)
+    ((liquidity_u256 * delta_price) >> 64).as_u128()
+}
+
+// REMPLACEZ get_amount_x par ceci
+pub fn get_amount_x(sqrt_price_a: u128, sqrt_price_b: u128, liquidity: u128) -> u128 {
+    let (sqrt_price_a, sqrt_price_b) = if sqrt_price_a > sqrt_price_b { (sqrt_price_b, sqrt_price_a) } else { (sqrt_price_a, sqrt_price_b) };
+
+    if sqrt_price_a == 0 { return 0; } // Évite la division par zéro
+
+    let liquidity_u256 = U256::from(liquidity);
+    let numerator = liquidity_u256 << 64;
+    let denominator = U256::from(sqrt_price_b);
+
+    // Formule: floor(liquidity * 2^64 * (sqrt_price_b - sqrt_price_a) / (sqrt_price_b * sqrt_price_a))
+    // C'est équivalent à: floor( ( (liquidity * 2^64 / sqrt_price_b) * (sqrt_price_b - sqrt_price_a) ) / sqrt_price_a )
+    let ratio = numerator / denominator;
+    let delta_price = U256::from(sqrt_price_b - sqrt_price_a);
+    let result = (ratio * delta_price) / U256::from(sqrt_price_a);
+
+    result.as_u128()
+}
+
 
 /// Calcule le taux de frais dynamique brut pour un bin spécifique.
 pub fn calculate_dynamic_fee(

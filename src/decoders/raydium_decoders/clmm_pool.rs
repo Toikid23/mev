@@ -1,5 +1,3 @@
-// Fichier COMPLET et FINAL : src/decoders/raydium_decoders/clmm_pool.rs
-
 use crate::decoders::pool_operations::PoolOperations;
 use crate::decoders::raydium_decoders::tick_array::{self, TickArrayState};
 use crate::math::clmm_math;
@@ -13,13 +11,10 @@ use solana_client::{
 };
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_account_decoder::UiAccountEncoding;
-use bytemuck::{from_bytes, Pod, Zeroable}; // <-- La dépendance clé
+use bytemuck::{from_bytes, Pod, Zeroable};
 use crate::decoders::spl_token_decoders;
 
-// ======================================================================================
-// 1. VOTRE STRUCTURE DE SORTIE "PROPRE" (NE CHANGE PAS)
-// C'est ce que le reste de votre application utilise.
-// ======================================================================================
+// Structure de sortie
 #[derive(Debug, Clone)]
 pub struct DecodedClmmPool {
     pub address: Pubkey,
@@ -29,7 +24,7 @@ pub struct DecodedClmmPool {
     pub mint_b: Pubkey,
     pub mint_a_decimals: u8,
     pub mint_b_decimals: u8,
-    pub mint_a_transfer_fee_bps: u16, // bps = Basis Points (100 = 1%)
+    pub mint_a_transfer_fee_bps: u16,
     pub mint_b_transfer_fee_bps: u16,
     pub vault_a: Pubkey,
     pub vault_b: Pubkey,
@@ -43,20 +38,13 @@ pub struct DecodedClmmPool {
     pub tick_arrays: Option<BTreeMap<i32, TickArrayState>>,
 }
 
-// Dans clmm_pool.rs, après la struct DecodedClmmPool
 impl DecodedClmmPool {
-    /// Calcule et retourne les frais de pool sous forme de pourcentage lisible.
     pub fn fee_as_percent(&self) -> f64 {
-        // total_fee_percent est un ratio
         self.total_fee_percent * 100.0
     }
 }
 
-
-// ======================================================================================
-// 2. LE "GABARIT DE DÉCODAGE" (L'OUTIL INTERNE)
-// Son seul rôle est de mapper la structure de données brutes on-chain.
-// ======================================================================================
+// Structure de décodage (simple et qui fonctionnait)
 #[repr(C, packed)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 struct PoolStateData {
@@ -74,29 +62,23 @@ struct PoolStateData {
     pub liquidity: u128,
     pub sqrt_price_x64: u128,
     pub tick_current: i32,
-    // Le reste de la structure on-chain est immense, mais nous n'avons pas besoin de la mapper
-    // entièrement car nous ne lisons que le début du compte.
 }
 
-
-// ======================================================================================
-// 3. LA FONCTION DE DÉCODAGE (MAINTENANT CORRECTE ET ROBUSTE)
-// ======================================================================================
+// Fonction de décodage
 pub fn decode_pool(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Result<DecodedClmmPool> {
     const DISCRIMINATOR: [u8; 8] = [247, 237, 227, 245, 215, 195, 222, 70];
     if data.get(..8) != Some(&DISCRIMINATOR) {
-        bail!("Discriminator de PoolState invalide.");
+        bail!("Invalid PoolState discriminator.");
     }
-
-    // On ne lit que la partie des données brutes qui correspond à notre gabarit
     let data_slice = &data[8..];
+
+    // On utilise la méthode qui prend en compte la taille de notre structure
     let pool_struct: &PoolStateData = from_bytes(&data_slice[..std::mem::size_of::<PoolStateData>()]);
 
-    // On utilise le gabarit pour remplir notre structure PROPRE.
     Ok(DecodedClmmPool {
         address: *address,
         program_id: *program_id,
-        amm_config: pool_struct.amm_config, // <--- LECTURE CORRECTE
+        amm_config: pool_struct.amm_config,
         mint_a: pool_struct.token_mint_0,
         mint_b: pool_struct.token_mint_1,
         vault_a: pool_struct.token_vault_0,
@@ -105,7 +87,6 @@ pub fn decode_pool(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Result
         liquidity: pool_struct.liquidity,
         sqrt_price_x64: pool_struct.sqrt_price_x64,
         tick_current: pool_struct.tick_current,
-        // Champs qui seront remplis par `hydrate`
         mint_a_decimals: 0,
         mint_b_decimals: 0,
         mint_a_transfer_fee_bps: 0,
@@ -117,38 +98,29 @@ pub fn decode_pool(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Result
     })
 }
 
-// ======================================================================================
-// LE RESTE DU FICHIER (HYDRATE, SCAN, IMPL TRAIT) NE CHANGE PAS
-// ======================================================================================
-
-// Remplacez votre fonction hydrate actuelle par celle-ci :
-
+// Fonction d'hydratation (version lente mais fonctionnelle)
 pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &RpcClient) -> Result<()> {
-    // --- On lance les appels réseau indépendants EN PARALLÈLE ---
     let (config_res, mint_a_res, mint_b_res) = tokio::join!(
         rpc_client.get_account_data(&pool.amm_config),
         rpc_client.get_account_data(&pool.mint_a),
         rpc_client.get_account_data(&pool.mint_b)
     );
 
-    // --- Le reste ne change pas, car les .await sont déjà là ---
     let config_account_data = config_res?;
-    pool.total_fee_percent = clmm_config::decode_config(&config_account_data)?.trade_fee_rate as f64 / 1_000_000.0;
+    let decoded_config = clmm_config::decode_config(&config_account_data)?;
+    pool.tick_spacing = decoded_config.tick_spacing;
+    pool.total_fee_percent = decoded_config.trade_fee_rate as f64 / 1_000_000.0;
 
-    // 2. Hydrater les décimales ET les frais de transfert
     let mint_a_data = mint_a_res?;
-    // On utilise notre décodeur complet
     let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_data)?;
     pool.mint_a_decimals = decoded_mint_a.decimals;
     pool.mint_a_transfer_fee_bps = decoded_mint_a.transfer_fee_basis_points;
 
     let mint_b_data = mint_b_res?;
-    // On utilise notre décodeur complet
     let decoded_mint_b = spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_data)?;
     pool.mint_b_decimals = decoded_mint_b.decimals;
     pool.mint_b_transfer_fee_bps = decoded_mint_b.transfer_fee_basis_points;
 
-    // Cet appel doit maintenant être attendu (await)
     let tick_array_accounts = find_tick_arrays_for_pool(rpc_client, &pool.program_id, &pool.address).await?;
 
     let mut tick_arrays = BTreeMap::new();
@@ -167,14 +139,13 @@ async fn find_tick_arrays_for_pool(
     program_id: &Pubkey,
     pool_id: &Pubkey,
 ) -> Result<Vec<(Pubkey, solana_sdk::account::Account)>> {
-    const POOL_ID_OFFSET: usize = 33; // Offset de 8 (disc) + 1 (bump) + 32 (amm_config) + 32 (owner) - FAUX. Le bon est 41
+    const POOL_ID_OFFSET: usize = 8;
     const TICK_ARRAY_ACCOUNT_SIZE: u64 = (8 + std::mem::size_of::<TickArrayState>()) as u64;
 
     let filters = vec![
         RpcFilterType::DataSize(TICK_ARRAY_ACCOUNT_SIZE),
         RpcFilterType::Memcmp(Memcmp::new_base58_encoded(
-            // Le champ `pool_id` dans un TickArray est à l'offset 8 (après le discriminator)
-            8,
+            POOL_ID_OFFSET,
             &pool_id.to_bytes(),
         )),
     ];
@@ -185,14 +156,14 @@ async fn find_tick_arrays_for_pool(
             filters: Some(filters),
             account_config: RpcAccountInfoConfig {
                 encoding: Some(UiAccountEncoding::Base64),
-                ..RpcAccountInfoConfig::default()
+                ..RpcAccountInfoConfig::default() // <--- LIGNE CORRECTE
             },
+            with_context: Some(false), // C'est une bonne pratique de l'ajouter
             ..RpcProgramAccountsConfig::default()
         },
     ).await?;
     Ok(accounts)
 }
-
 
 impl PoolOperations for DecodedClmmPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }

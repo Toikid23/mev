@@ -32,7 +32,7 @@ pub struct DecodedLaunchpadPool {
     pub global_config: Pubkey,
     pub virtual_base: u64,
     pub virtual_quote: u64,
-    pub total_fee_percent: f64,
+    pub trade_fee_rate: u64,
     pub mint_a_transfer_fee_bps: u16,
     pub mint_b_transfer_fee_bps: u16,
     pub reserve_a: u64,
@@ -47,7 +47,7 @@ impl DecodedLaunchpadPool {
     /// Calcule et retourne les frais de pool sous forme de pourcentage lisible.
     pub fn fee_as_percent(&self) -> f64 {
         // total_fee_percent est un ratio
-        self.total_fee_percent * 100.0
+        (self.trade_fee_rate as f64 / 1_000_000.0) * 100.0
     }
 }
 
@@ -97,7 +97,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedLaunchpadPool
         global_config: pool_struct.global_config,
         virtual_base: pool_struct.virtual_base,
         virtual_quote: pool_struct.virtual_quote,
-        total_fee_percent: 0.0,
+        trade_fee_rate: 0,
         reserve_a: pool_struct.real_base,
         reserve_b: pool_struct.real_quote,
         // --- NOUVEAU CHAMP INITIALISÉ ---
@@ -170,10 +170,10 @@ impl PoolOperations for DecodedLaunchpadPool {
         };
 
         // --- 3. Appliquer les frais de POOL ---
-        const PRECISION: u128 = 1_000_000;
-        let pool_fee_numerator = (self.total_fee_percent * PRECISION as f64) as u128;
+        const FEE_PRECISION: u128 = 1_000_000;
         let amount_out_after_pool_fee = (gross_amount_out as u128)
-            .saturating_mul(PRECISION.saturating_sub(pool_fee_numerator)) / PRECISION;
+            .saturating_mul(FEE_PRECISION.saturating_sub(self.trade_fee_rate as u128))
+            / FEE_PRECISION;
 
         // --- 4. Appliquer les frais de transfert sur l'OUTPUT ---
         let fee_on_output = (amount_out_after_pool_fee * out_mint_fee_bps as u128) / 10000;
@@ -194,7 +194,7 @@ pub async fn hydrate(pool: &mut DecodedLaunchpadPool, rpc_client: &RpcClient) ->
     // --- Traitement de la config ---
     let config_data = config_res?;
     let config = global_config::decode_global_config(&config_data)?;
-    pool.total_fee_percent = config.trade_fee_rate as f64 / 1_000_000.0;
+    pool.trade_fee_rate = config.trade_fee_rate;
     pool.curve_type = match config.curve_type {
         0 => CurveType::ConstantProduct,
         1 => CurveType::FixedPrice,

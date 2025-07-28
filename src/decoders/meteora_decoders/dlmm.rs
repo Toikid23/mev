@@ -161,7 +161,7 @@ impl PoolOperations for DecodedDlmmPool {
         let fee_on_output = (net_amount_out as u128 * out_mint_fee_bps as u128) / 10000;
         let final_amount_out = net_amount_out.saturating_sub(fee_on_output as u64);
 
-        // --- BLOC DE DÉBOGAGE FINAL ---
+        /*// --- BLOC DE DÉBOGAGE FINAL ---
         println!("--- DEBUG DLMM Quote ---");
         println!("Montant d'entrée (net): {}", amount_in_after_transfer_fee);
         println!("Montant brut de sortie (avant frais pool): {}", gross_amount_out);
@@ -176,7 +176,7 @@ impl PoolOperations for DecodedDlmmPool {
         println!("Montant total des frais (pool): {}", total_fee_amount);
         println!("Montant de sortie (après frais pool): {}", net_amount_out);
         println!("Montant de sortie final (après frais SPL): {}", final_amount_out);
-        println!("------------------------");
+        println!("------------------------");*/
 
         Ok(final_amount_out)
     }
@@ -217,7 +217,7 @@ pub fn get_bin_array_address(lb_pair: &Pubkey, bin_id: i32, program_id: &Pubkey)
     Pubkey::find_program_address(&[BIN_ARRAY_SEED, &lb_pair.to_bytes(), &bin_array_index.to_le_bytes()], program_id).0
 }
 
-pub async fn hydrate(pool: &mut DecodedDlmmPool, rpc_client: &RpcClient) -> Result<()> {
+pub async fn hydrate(pool: &mut DecodedDlmmPool, rpc_client: &RpcClient, bin_array_fetch_range: i32) -> Result<()> {
     let (mint_a_res, mint_b_res) = tokio::join!(
         rpc_client.get_account_data(&pool.mint_a),
         rpc_client.get_account_data(&pool.mint_b)
@@ -236,7 +236,9 @@ pub async fn hydrate(pool: &mut DecodedDlmmPool, rpc_client: &RpcClient) -> Resu
     let mut bin_array_indices_to_fetch = BTreeSet::new();
     let active_array_idx = (pool.active_bin_id as i64 / MAX_BIN_PER_ARRAY as i64) - if pool.active_bin_id < 0 && pool.active_bin_id % MAX_BIN_PER_ARRAY != 0 { 1 } else { 0 };
     println!("Index du BinArray Actif (calculé): {}", active_array_idx);
-    for i in -10..=10 { bin_array_indices_to_fetch.insert(active_array_idx + i); }
+    for i in -bin_array_fetch_range..=bin_array_fetch_range {
+        bin_array_indices_to_fetch.insert(active_array_idx + i as i64);
+    }
     let mut addresses_to_fetch = vec![];
     println!("\nCalcul des adresses PDA des BinArray à charger :");
     for idx in &bin_array_indices_to_fetch {

@@ -18,7 +18,8 @@ pub struct DecodedAmmPool {
     pub mint_b_transfer_fee_bps: u16,
     pub vault_a: Pubkey,
     pub vault_b: Pubkey,
-    pub total_fee_percent: f64,
+    pub trade_fee_numerator: u64,
+    pub trade_fee_denominator: u64,
     // Étape 2.2 : On ajoute les champs pour les réserves.
     // Ils seront mis à jour par le graph_engine avant tout calcul.
     pub reserve_a: u64,
@@ -29,8 +30,8 @@ pub struct DecodedAmmPool {
 impl DecodedAmmPool {
     /// Calcule et retourne les frais de pool sous forme de pourcentage lisible.
     pub fn fee_as_percent(&self) -> f64 {
-        // total_fee_percent est déjà un ratio (ex: 0.0025 pour 0.25%)
-        self.total_fee_percent * 100.0
+        if self.trade_fee_denominator == 0 { return 0.0; }
+        (self.trade_fee_numerator as f64 / self.trade_fee_denominator as f64) * 100.0
     }
 }
 
@@ -83,7 +84,6 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedAmmPool> {
         );
     }
     let pool_struct: &AmmInfoData = from_bytes(data);
-    let total_fee_percent = pool_struct.fees.trade_fee_numerator as f64 / pool_struct.fees.trade_fee_denominator as f64;
 
     Ok(DecodedAmmPool {
         address: *address,
@@ -91,7 +91,8 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedAmmPool> {
         mint_b: pool_struct.pc_mint,
         vault_a: pool_struct.token_coin,
         vault_b: pool_struct.token_pc,
-        total_fee_percent,
+        trade_fee_numerator: pool_struct.fees.trade_fee_numerator,
+        trade_fee_denominator: pool_struct.fees.trade_fee_denominator,
         mint_a_transfer_fee_bps: 0,
         mint_b_transfer_fee_bps: 0,
         reserve_a: 0, // Les réserves sont initialisées à 0
@@ -127,9 +128,9 @@ impl PoolOperations for DecodedAmmPool {
         }
 
         // --- 2. Calculer le swap avec le montant NET ---
-        const PRECISION: u128 = 1_000_000;
-        let pool_fee_numerator = (self.total_fee_percent * PRECISION as f64) as u128;
-        let amount_in_with_fees = (amount_in_after_transfer_fee as u128 * (PRECISION - pool_fee_numerator)) / PRECISION;
+        let amount_in_with_fees = (amount_in_after_transfer_fee as u128)
+            .saturating_mul(self.trade_fee_denominator.saturating_sub(self.trade_fee_numerator) as u128)
+            / (self.trade_fee_denominator as u128);
 
         let numerator = amount_in_with_fees * out_reserve as u128;
         let denominator = in_reserve as u128 + amount_in_with_fees;

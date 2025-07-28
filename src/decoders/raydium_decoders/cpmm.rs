@@ -26,7 +26,7 @@ pub struct DecodedCpmmPool {
     pub mint_b_transfer_fee_bps: u16,
     pub status: u8,
     // Les champs "intelligents"
-    pub total_fee_percent: f64, // Les frais seront stockés ici après lecture du config
+    pub trade_fee_rate: u64,
     pub reserve_a: u64,
     pub reserve_b: u64,
 }
@@ -34,7 +34,7 @@ pub struct DecodedCpmmPool {
 // Dans cpmm.rs, après la struct DecodedCpmmPool
 impl DecodedCpmmPool {
     pub fn fee_as_percent(&self) -> f64 {
-        self.total_fee_percent * 100.0
+        (self.trade_fee_rate as f64 / 1_000_000.0) * 100.0
     }
 }
 
@@ -100,7 +100,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedCpmmPool> {
         mint_a_transfer_fee_bps: 0,
         mint_b_transfer_fee_bps: 0,
         // Les champs "intelligents" sont initialisés à 0
-        total_fee_percent: 0.0,
+        trade_fee_rate: 0,
         reserve_a: 0,
         reserve_b: 0,
     })
@@ -134,9 +134,10 @@ impl PoolOperations for DecodedCpmmPool {
         }
 
         // --- 2. Calculer le swap avec le montant NET ---
-        const PRECISION: u128 = 1_000_000;
-        let pool_fee_numerator = (self.total_fee_percent * PRECISION as f64) as u128;
-        let amount_in_with_fees = (amount_in_after_transfer_fee as u128 * (PRECISION - pool_fee_numerator)) / PRECISION;
+        const FEE_PRECISION: u128 = 1_000_000;
+        let amount_in_with_fees = (amount_in_after_transfer_fee as u128)
+            .saturating_mul(FEE_PRECISION.saturating_sub(self.trade_fee_rate as u128))
+            / FEE_PRECISION;
 
         let numerator = amount_in_with_fees * out_reserve as u128;
         let denominator = in_reserve as u128 + amount_in_with_fees;
@@ -164,7 +165,7 @@ pub async fn hydrate(pool: &mut DecodedCpmmPool, rpc_client: &RpcClient) -> Resu
     // Traite le résultat de la config pour obtenir les frais de pool
     let config_data = config_res?;
     let decoded_config = amm_config::decode_config(&config_data)?;
-    pool.total_fee_percent = decoded_config.trade_fee_rate as f64 / 1_000_000.0;
+    pool.trade_fee_rate = decoded_config.trade_fee_rate;
 
     // Traite les résultats des vaults pour obtenir les réserves
     let vault_a_data = vault_a_res?;
