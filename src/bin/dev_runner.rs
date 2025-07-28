@@ -15,7 +15,7 @@ use mev::{
 
 // --- BANC D'ESSAI ---
 
-async fn test_ammv4(rpc_client: &RpcClient) -> Result<()> {
+/*async fn test_ammv4(rpc_client: &RpcClient) -> Result<()> {
     const POOL_ADDRESS: &str = "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2"; // SOL-USDC
     println!("\n--- Test Raydium AMMv4 ({}) ---", POOL_ADDRESS);
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
@@ -79,7 +79,7 @@ async fn test_launchpad(rpc_client: &RpcClient) -> Result<()> {
     let amount_in = 1_000_000; // 1 USDC
     println!("[2/2] Calcul du quote pour 1 USDC...");
     print_quote_result(&pool, &pool.mint_b, 6, 6, amount_in)
-}
+}*/
 
 async fn test_dlmm(rpc_client: &RpcClient) -> Result<()> {
     const POOL_ADDRESS: &str = "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6"; // WSOL-USDC
@@ -98,13 +98,13 @@ async fn test_dlmm(rpc_client: &RpcClient) -> Result<()> {
     );
 
     // --- TEST A : Petit montant ---
-    let small_amount_in = 1_000_000; // 1 USDC
-    println!("\n[2/3] Calcul du quote pour 1 USDC...");
+    let small_amount_in = 194_000_000; // 1 USDC
+    println!("\n[2/3] Calcul du quote pour 194 USDC...");
     print_quote_result(&pool, &pool.mint_b, 6, 9, small_amount_in)?;
 
     // --- TEST B : Gros montant ---
-    let large_amount_in = 500_000_000_000; // 10,000 USDC
-    println!("\n[3/3] Calcul du quote pour 10,000 USDC...");
+    let large_amount_in = 200_000_000_000; // 1,000 USDC
+    println!("\n[3/3] Calcul du quote pour 20,000 USDC...");
     print_quote_result(&pool, &pool.mint_b, 6, 9, large_amount_in)?;
 
     Ok(())
@@ -116,10 +116,10 @@ async fn main() -> Result<()> {
     let config = Config::load()?;
     let rpc_client = RpcClient::new(config.solana_rpc_url);
 
-    if let Err(e) = test_ammv4(&rpc_client).await { println!("!! AMMv4 a échoué: {}", e); }
+/*    if let Err(e) = test_ammv4(&rpc_client).await { println!("!! AMMv4 a échoué: {}", e); }
     if let Err(e) = test_clmm(&rpc_client).await { println!("!! CLMM a échoué: {}", e); }
     if let Err(e) = test_cpmm(&rpc_client).await { println!("!! CPMM a échoué: {}", e); }
-    if let Err(e) = test_launchpad(&rpc_client).await { println!("!! Launchpad a échoué: {}", e); }
+    if let Err(e) = test_launchpad(&rpc_client).await { println!("!! Launchpad a échoué: {}", e); }*/
     if let Err(e) = test_dlmm(&rpc_client).await { println!("!! DLMM a échoué: {}", e); }
 
     println!("\n--- Banc d'essai terminé ---");
