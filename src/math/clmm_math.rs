@@ -1,13 +1,19 @@
-// src/math/clmm_math.rs
+// DANS : src/math/clmm_math.rs
 
-use anyhow::Result;
 use uint::construct_uint;
+use anyhow::{anyhow, Result};
 
 construct_uint! { pub struct U256(4); }
 const BITS: u32 = 64;
 const U128_MAX: u128 = 340282366920938463463374607431768211455;
 
-/// Calcule sqrt_price à partir d'un tick. Traduction de la logique du SDK.
+// On définit nos constantes ici pour que tout soit au même endroit.
+mod tick_math {
+    pub const MIN_TICK: i32 = -443636;
+    pub const MAX_TICK: i32 = 443636;
+}
+
+/// Calcule sqrt_price à partir d'un tick. (votre fonction, inchangée)
 pub fn tick_to_sqrt_price_x64(tick: i32) -> u128 {
     let abs_tick = tick.unsigned_abs();
     let mut ratio = if (abs_tick & 0x1) != 0 { 0xfffb023273ab_u128 } else { 0x1000000000000_u128 };
@@ -36,16 +42,35 @@ pub fn tick_to_sqrt_price_x64(tick: i32) -> u128 {
     ratio << 32
 }
 
-fn get_next_sqrt_price(price: u128, liquidity: u128, amount: u128, is_add: bool) -> u128 {
-    if is_add {
-        let amount_x = (amount << BITS) / liquidity;
-        price + amount_x
-    } else {
-        let amount_x = (amount << BITS) / liquidity;
-        price - amount_x
+// --- LA FONCTION DE CONVERSION SÉCURISÉE ET ROBUSTE ---
+pub fn sqrt_price_x64_to_tick(sqrt_price_x64: u128) -> Result<i32> {
+    // La formule est : prix = (sqrt_price / 2^64)^2
+    // Et tick = log(base 1.0001, prix)
+
+    // On convertit le prix en f64 pour le calcul du log, mais de manière SÉCURISÉE
+    let price_f64 = (sqrt_price_x64 as f64) / ((1u64 << 32) as f64);
+    let price_f64 = price_f64 * price_f64 / ( (1u64 << 32) as f64 * (1u64 << 32) as f64 );
+
+    // GARDE-FOU n°1 : Gérer les cas où le prix devient invalide (trop grand ou trop petit)
+    if !price_f64.is_finite() {
+        return Ok(tick_math::MAX_TICK);
     }
+    if price_f64 <= 0.0 {
+        return Ok(tick_math::MIN_TICK);
+    }
+
+    // Calcul avec le logarithme
+    let log_price = price_f64.log(1.0001);
+
+    // On convertit en i128 pour avoir de la marge et éviter les overflows
+    let final_tick = log_price.round() as i128;
+
+    // GARDE-FOU n°2 : On s'assure que le résultat final est TOUJOURS dans les bornes valides
+    Ok(final_tick.clamp(tick_math::MIN_TICK as i128, tick_math::MAX_TICK as i128) as i32)
 }
 
+
+// --- LE RESTE DES FONCTIONS MATHÉMATIQUES (inchangées) ---
 pub fn get_amount_y(sqrt_price_a: u128, sqrt_price_b: u128, liquidity: u128) -> u128 {
     let (sqrt_price_a, sqrt_price_b) = if sqrt_price_a > sqrt_price_b { (sqrt_price_b, sqrt_price_a) } else { (sqrt_price_a, sqrt_price_b) };
     (U256::from(liquidity) * U256::from(sqrt_price_b - sqrt_price_a) >> BITS).as_u128()
@@ -70,7 +95,6 @@ pub fn get_next_sqrt_price_from_amount_y_in(sqrt_price: u128, liquidity: u128, a
     sqrt_price + (amount_in << BITS) / liquidity
 }
 
-
 pub fn compute_swap_step(
     sqrt_price_current_x64: u128,
     sqrt_price_target_x64: u128,
@@ -83,13 +107,11 @@ pub fn compute_swap_step(
     let next_sqrt_price_x64: u128;
 
     if is_base_input {
-        // On vend du token 0 pour acheter du token 1 (le prix baisse)
         let amount_to_reach_target = get_amount_x(sqrt_price_target_x64, sqrt_price_current_x64, liquidity);
         amount_in = amount_in.min(amount_to_reach_target);
         next_sqrt_price_x64 = get_next_sqrt_price_from_amount_x_in(sqrt_price_current_x64, liquidity, amount_in);
         amount_out = get_amount_y(next_sqrt_price_x64, sqrt_price_current_x64, liquidity);
     } else {
-        // On vend du token 1 pour acheter du token 0 (le prix monte)
         let amount_to_reach_target = get_amount_y(sqrt_price_current_x64, sqrt_price_target_x64, liquidity);
         amount_in = amount_in.min(amount_to_reach_target);
         next_sqrt_price_x64 = get_next_sqrt_price_from_amount_y_in(sqrt_price_current_x64, liquidity, amount_in);

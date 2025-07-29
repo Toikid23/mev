@@ -17,3 +17,5 @@ pub trait PoolOperations {
     /// C'est la fonction la plus importante.
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64) -> Result<u64>;
 }
+
+

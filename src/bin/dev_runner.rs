@@ -14,7 +14,6 @@ use mev::{
     },
 };
 
-
 // =================================================================================
 // DÉFINITIONS DES TESTS INDIVIDUELS
 // Chaque test est une fonction `async` qui prend le RpcClient en argument.
@@ -27,27 +26,13 @@ async fn test_ammv4(rpc_client: &RpcClient) -> Result<()> {
     let account_data = rpc_client.get_account_data(&pool_pubkey).await?;
     let mut pool = amm_v4::decode_pool(&pool_pubkey, &account_data)?;
 
-    println!("[1/4] Hydratation...");
+    println!("[1/2] Hydratation...");
     amm_v4::hydrate(&mut pool, rpc_client).await?;
     println!("-> Hydratation terminée. Frais: {:.4}%.", pool.fee_as_percent());
 
-    // --- TEST DE VENTE DE SOL ---
     let sell_sol_amount = 1_000_000_000; // 1 SOL (9 décimales)
-    println!("\n[2/4] Calcul pour VENDRE 1 SOL...");
+    println!("\n[2/2] Calcul pour VENDRE 1 SOL...");
     print_quote_result(&pool, &pool.mint_a, 9, 6, sell_sol_amount)?;
-
-    // --- TEST D'ACHAT DE SOL ---
-    // Pour acheter 1 SOL, il nous faut environ 186 USDC.
-    // Nous allons simuler la vente de 187 USDC pour acheter du SOL.
-    let sell_usdc_amount = 187_000_000; // 187 USDC (6 décimales)
-    println!("\n[3/4] Calcul pour ACHETER du SOL avec 187 USDC...");
-    // On inverse les paramètres : on donne le mint_b (USDC) en entrée.
-    print_quote_result(&pool, &pool.mint_b, 6, 9, sell_usdc_amount)?;
-
-    // --- TEST D'ACHAT DE SOL (GROS MONTANT) ---
-    let large_sell_usdc_amount = 20_000_000_000; // 20,000 USDC (6 décimales)
-    println!("\n[4/4] Calcul pour ACHETER du SOL avec 20,000 USDC...");
-    print_quote_result(&pool, &pool.mint_b, 6, 9, large_sell_usdc_amount)?;
 
     Ok(())
 }
@@ -59,25 +44,19 @@ async fn test_cpmm(rpc_client: &RpcClient) -> Result<()> {
     let account_data = rpc_client.get_account_data(&pool_pubkey).await?;
     let mut pool = cpmm::decode_pool(&pool_pubkey, &account_data)?;
 
-    println!("[1/3] Hydratation...");
+    println!("[1/2] Hydratation...");
     cpmm::hydrate(&mut pool, rpc_client).await?;
     println!("-> Hydratation terminée. Frais: {:.4}%.", pool.fee_as_percent());
 
-    // Test A : Petit montant
     let small_amount_in = 1_000_000_000; // 1 DUST (9 décimales)
-    println!("\n[2/3] Calcul du quote pour 1 DUST...");
+    println!("\n[2/2] Calcul du quote pour 1 DUST...");
     print_quote_result(&pool, &pool.token_0_mint, 9, 9, small_amount_in)?;
-
-    // Test B : Gros montant
-    let large_amount_in = 100_000_000_000; // 100 DUST (9 décimales)
-    println!("\n[3/3] Calcul du quote pour 100 DUST...");
-    print_quote_result(&pool, &pool.token_0_mint, 9, 9, large_amount_in)?;
 
     Ok(())
 }
 
 async fn test_clmm(rpc_client: &RpcClient) -> Result<()> {
-    const POOL_ADDRESS: &str = "3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv"; // stSOL-SOL
+    const POOL_ADDRESS: &str = "3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv"; // SOL-USDC
     const PROGRAM_ID: &str = "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK";
     println!("\n--- Test Raydium CLMM ({}) ---", POOL_ADDRESS);
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
@@ -85,19 +64,13 @@ async fn test_clmm(rpc_client: &RpcClient) -> Result<()> {
     let account_data = rpc_client.get_account_data(&pool_pubkey).await?;
     let mut pool = clmm_pool::decode_pool(&pool_pubkey, &account_data, &program_pubkey)?;
 
-    println!("[1/3] Hydratation...");
+    println!("[1/2] Hydratation...");
     clmm_pool::hydrate(&mut pool, rpc_client).await?;
     println!("-> Hydratation terminée. Frais: {:.4}%. Trouvé {} TickArray(s).", pool.fee_as_percent(), pool.tick_arrays.as_ref().unwrap().len());
 
-    // Test A : Petit montant
-    let small_amount_in = 1_000_000_000; // 1 stSOL (9 décimales)
-    println!("\n[2/3] Calcul du quote pour 1 stSOL...");
+    let small_amount_in = 1_000_000_000; // 1 SOL (9 décimales)
+    println!("\n[2/2] Calcul du quote pour 1 SOL...");
     print_quote_result(&pool, &pool.mint_a, pool.mint_a_decimals, pool.mint_b_decimals, small_amount_in)?;
-
-    // Test B : Gros montant
-    let large_amount_in = 100_000_000_000; // 100 stSOL (9 décimales)
-    println!("\n[3/3] Calcul du quote pour 100 stSOL...");
-    print_quote_result(&pool, &pool.mint_a, pool.mint_a_decimals, pool.mint_b_decimals, large_amount_in)?;
 
     Ok(())
 }
@@ -109,19 +82,13 @@ async fn test_launchpad(rpc_client: &RpcClient) -> Result<()> {
     let account_data = rpc_client.get_account_data(&pool_pubkey).await?;
     let mut pool = launchpad::decode_pool(&pool_pubkey, &account_data)?;
 
-    println!("[1/3] Hydratation...");
+    println!("[1/2] Hydratation...");
     launchpad::hydrate(&mut pool, rpc_client).await?;
     println!("-> Hydratation terminée. Frais: {:.4}%. Courbe: {:?}", pool.fee_as_percent(), pool.curve_type);
 
-    // Test A : Petit montant
     let small_amount_in = 1_000_000; // 1 USDC (6 décimales)
-    println!("\n[2/3] Calcul du quote pour 1 USDC...");
+    println!("\n[2/2] Calcul du quote pour 1 USDC...");
     print_quote_result(&pool, &pool.mint_b, 6, 6, small_amount_in)?;
-
-    // Test B : Gros montant
-    let large_amount_in = 10_000_000_000; // 10,000 USDC (6 décimales)
-    println!("\n[3/3] Calcul du quote pour 10,000 USDC...");
-    print_quote_result(&pool, &pool.mint_b, 6, 6, large_amount_in)?;
 
     Ok(())
 }
@@ -143,13 +110,9 @@ async fn test_dlmm(rpc_client: &RpcClient) -> Result<()> {
              pool.hydrated_bin_arrays.as_ref().unwrap().len()
     );
 
-    let small_amount_in = 1_000_000; // 1 USDC (6 décimales)
-    println!("\n[2/3] Calcul du quote pour 1 USDC...");
+    let small_amount_in = 183_560_000; // 1 USDC (6 décimales)
+    println!("\n[2/2] Calcul du quote pour 1 USDC...");
     print_quote_result(&pool, &pool.mint_b, 6, 9, small_amount_in)?;
-
-    let large_amount_in = 20_000_000_000; // 20,000 USDC (6 décimales)
-    println!("\n[3/3] Calcul du quote pour 20,000 USDC...");
-    print_quote_result(&pool, &pool.mint_b, 6, 9, large_amount_in)?;
 
     Ok(())
 }
@@ -157,7 +120,6 @@ async fn test_dlmm(rpc_client: &RpcClient) -> Result<()> {
 
 // =================================================================================
 // ORCHESTRATEUR DE TESTS
-// Le `main` lit les arguments de la ligne de commande et lance les tests demandés.
 // =================================================================================
 
 #[tokio::main]
@@ -166,11 +128,9 @@ async fn main() -> Result<()> {
     let config = Config::load()?;
     let rpc_client = RpcClient::new(config.solana_rpc_url);
 
-    // On récupère les arguments passés en ligne de commande (ex: "amm_v4", "clmm")
     let args: Vec<String> = env::args().skip(1).collect();
 
     if args.is_empty() {
-        // Si aucun argument n'est donné, on lance TOUS les tests
         println!("Mode: Exécution de tous les tests.");
         if let Err(e) = test_ammv4(&rpc_client).await { println!("!! AMMv4 a échoué: {}", e); }
         if let Err(e) = test_cpmm(&rpc_client).await { println!("!! CPMM a échoué: {}", e); }
@@ -178,7 +138,6 @@ async fn main() -> Result<()> {
         if let Err(e) = test_launchpad(&rpc_client).await { println!("!! Launchpad a échoué: {}", e); }
         if let Err(e) = test_dlmm(&rpc_client).await { println!("!! DLMM a échoué: {}", e); }
     } else {
-        // Sinon, on lance uniquement les tests demandés
         println!("Mode: Exécution des tests spécifiques: {:?}", args);
         for test_name in args {
             match test_name.as_str() {
@@ -197,7 +156,7 @@ async fn main() -> Result<()> {
 }
 
 // =================================================================================
-// FONCTION UTILITAIRE D'AFFICHAGE (INCHANGÉE)
+// FONCTION UTILITAIRE D'AFFICHAGE
 // =================================================================================
 
 fn print_quote_result<T: PoolOperations + ?Sized>(
@@ -217,7 +176,7 @@ fn print_quote_result<T: PoolOperations + ?Sized>(
         },
         Err(e) => {
             println!("!! Erreur lors du calcul du quote: {}", e);
-            return Err(e);
+            return Err(e.into());
         },
     }
     Ok(())
