@@ -2,7 +2,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use solana_sdk::pubkey::Pubkey;
-use anyhow::{Result, ensure, anyhow};
+use anyhow::{Result, ensure};
 use std::mem;
 
 pub const TICK_ARRAY_SIZE: usize = 88;

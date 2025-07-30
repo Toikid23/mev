@@ -13,7 +13,7 @@ use mev::{
         meteora_decoders::dlmm,
     },
 };
-use mev::decoders::orca_decoders::{whirlpool_decoder, tick_array};
+use mev::decoders::orca_decoders::{whirlpool_decoder, tick_array, token_swap_v2, token_swap_v1};
 
 // =================================================================================
 // DÉFINITIONS DES TESTS INDIVIDUELS
@@ -195,6 +195,80 @@ async fn test_whirlpool(rpc_client: &RpcClient) -> Result<()> {
 
     Ok(())
 }
+
+
+async fn test_orca_amm_v1(rpc_client: &RpcClient) -> Result<()> {
+    // VEUILLEZ REMPLACER CECI PAR UNE ADRESSE DE POOL ORCA AMM V1
+    const POOL_ADDRESS: &str = "6fTRDD7sYxCN7oyoSQaN1AWC3P2m8A6gVZzGrpej9DvL";
+    println!("\n--- Test Orca AMM V1 ({}) ---", POOL_ADDRESS);
+
+    let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
+
+    // 1. Décodage initial à partir des données brutes
+    let account_data = rpc_client.get_account_data(&pool_pubkey).await?;
+    let mut pool = token_swap_v1::decode_pool(&pool_pubkey, &account_data)?;
+    println!("-> Décodage initial V1 réussi. Courbe type: {}.", pool.curve_type);
+
+    // 2. Hydratation pour charger les réserves et les frais de transfert
+    println!("[1/2] Hydratation V1...");
+    token_swap_v1::hydrate(&mut pool, rpc_client).await?;
+    println!("-> Hydratation V1 terminée. Frais: {:.4}%.", pool.fee_as_percent());
+    println!("   -> Réserve A ({}) : {} (décimales: {})", pool.mint_a, pool.reserve_a, pool.mint_a_decimals);
+    println!("   -> Réserve B ({}) : {} (décimales: {})", pool.mint_b, pool.reserve_b, pool.mint_b_decimals);
+
+    // 3. Simulation d'un swap avec `get_quote`
+    // On va simuler un swap de 1 unité du token A.
+    let amount_in = 1 * 10u64.pow(pool.mint_a_decimals as u32);
+    println!("\n[2/2] Calcul du quote pour 1 Token A...");
+
+    print_quote_result(
+        &pool,
+        &pool.mint_a,         // On entre du token A
+        pool.mint_a_decimals, // Décimales de l'input
+        pool.mint_b_decimals, // Décimales de l'output
+        amount_in
+    )?;
+
+    Ok(())
+}
+
+
+async fn test_orca_amm_v2(rpc_client: &RpcClient) -> Result<()> {
+    // REMPLACEZ CECI PAR UNE ADRESSE DE POOL ORCA AMM V2 (PAS WHIRLPOOL)
+    // Exemple de format (ce n'est PAS une vraie adresse) : "Fk9y...p8s"
+    const POOL_ADDRESS: &str = "EGZ7tiLeH62TPV1gL8WwbXGzEPa9zmcpVnnkPKKnrE2U"; // Exemple : SAMO/USDC
+    println!("\n--- Test Orca AMM V2 ({}) ---", POOL_ADDRESS);
+
+    let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
+
+    // 1. Décodage initial à partir des données brutes
+    let account_data = rpc_client.get_account_data(&pool_pubkey).await?;
+    let mut pool = token_swap_v2::decode_pool(&pool_pubkey, &account_data)?;
+    println!("-> Décodage initial réussi. Courbe type: {}.", pool.curve_type);
+
+    // 2. Hydratation pour charger les réserves et les frais de transfert
+    println!("[1/2] Hydratation...");
+    token_swap_v2::hydrate(&mut pool, rpc_client).await?;
+    println!("-> Hydratation terminée. Frais: {:.4}%.", pool.fee_as_percent());
+    println!("   -> Réserve A ({}): {} (décimales: {})", pool.mint_a, pool.reserve_a, pool.mint_a_decimals);
+    println!("   -> Réserve B ({}): {} (décimales: {})", pool.mint_b, pool.reserve_b, pool.mint_b_decimals);
+
+    // 3. Simulation d'un swap avec `get_quote`
+    let amount_in = 1_000_000; // 1 USDC si USDC a 6 décimales
+    println!("\n[2/2] Calcul du quote pour 1 USDC (en supposant que c'est le token B)...");
+
+    // On utilise les décimales hydratées pour un affichage correct.
+    // Pour SAMO/USDC, USDC est généralement le `mint_b`.
+    print_quote_result(
+        &pool,
+        &pool.mint_b,         // On entre du USDC (mint_b)
+        pool.mint_b_decimals, // Décimales de l'input (USDC)
+        pool.mint_a_decimals, // Décimales de l'output (SAMO)
+        amount_in as u64
+    )?;
+
+    Ok(())
+}
 // =================================================================================
 // ORCHESTRATEUR DE TESTS
 // =================================================================================
@@ -215,6 +289,8 @@ async fn main() -> Result<()> {
         if let Err(e) = test_launchpad(&rpc_client).await { println!("!! Launchpad a échoué: {}", e); }
         if let Err(e) = test_dlmm(&rpc_client).await { println!("!! DLMM a échoué: {}", e); }
         if let Err(e) = test_whirlpool(&rpc_client).await { println!("!! Whirlpool a échoué: {}", e); }
+        if let Err(e) = test_orca_amm_v2(&rpc_client).await { println!("!! Orca AMM V2 a échoué: {}", e); }
+        if let Err(e) = test_orca_amm_v1(&rpc_client).await { println!("!! Orca AMM V1 a échoué: {}", e); }
     } else {
         println!("Mode: Exécution des tests spécifiques: {:?}", args);
         for test_name in args {
@@ -225,6 +301,8 @@ async fn main() -> Result<()> {
                 "launchpad" => if let Err(e) = test_launchpad(&rpc_client).await { println!("!! Launchpad a échoué: {}", e); },
                 "dlmm" => if let Err(e) = test_dlmm(&rpc_client).await { println!("!! DLMM a échoué: {}", e); },
                 "whirlpool" => if let Err(e) = test_whirlpool(&rpc_client).await { println!("!! Whirlpool a échoué: {}", e); },
+                "orca_amm_v2" => if let Err(e) = test_orca_amm_v2(&rpc_client).await { println!("!! Orca AMM V2 a échoué: {}", e); },
+                "orca_amm_v1" => if let Err(e) = test_orca_amm_v1(&rpc_client).await { println!("!! Orca AMM V1 a échoué: {}", e); },
                 _ => println!("!! Test inconnu: '{}'", test_name),
             }
         }
@@ -233,6 +311,9 @@ async fn main() -> Result<()> {
     println!("\n--- Banc d'essai terminé ---");
     Ok(())
 }
+
+
+
 
 // =================================================================================
 // FONCTION UTILITAIRE D'AFFICHAGE

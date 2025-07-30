@@ -51,7 +51,7 @@ struct OutPutData {
 
 #[repr(C, packed)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
-struct StableSwapAmmInfoData {
+pub struct StableSwapAmmInfoData {
     pub account_type: u64, pub status: u64, pub nonce: u64,
     pub order_num: u64, pub depth: u64, pub coin_decimals: u64,
     pub pc_decimals: u64, pub state: u64, pub reset_flag: u64,

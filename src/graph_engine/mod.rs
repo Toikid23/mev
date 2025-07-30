@@ -1,7 +1,9 @@
 use crate::decoders::{Pool, PoolOperations}; // On importe juste Pool et le trait
-use crate::decoders::raydium_decoders::{launchpad, clmm_pool, amm_v4, cpmm}; // Outils
-use crate::decoders::meteora_decoders::dlmm;
-use crate::decoders::orca_decoders::whirlpool_decoder;
+use crate::decoders::{
+    raydium_decoders::{launchpad, clmm_pool, amm_v4, cpmm},
+    meteora_decoders::dlmm,
+    orca_decoders::{whirlpool_decoder, token_swap_v2, token_swap_v1} // On importe le nouveau module ici
+};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::{HashMap};
@@ -29,6 +31,20 @@ impl Graph {
                 println!("Hydrating Orca Whirlpool: {}", p.address);
                 whirlpool_decoder::hydrate(&mut p, rpc_client).await?;
                 Ok(Pool::OrcaWhirlpool(p))
+            },
+
+
+            Pool::OrcaAmmV1(mut p) => { // <--- AJOUTER
+                println!("Hydrating Orca AMM V1: {}", p.address);
+                token_swap_v1::hydrate(&mut p, rpc_client).await?;
+                Ok(Pool::OrcaAmmV1(p))
+            },
+
+
+            Pool::OrcaAmmV2(mut p) => { // <--- AJOUTER
+                println!("Hydrating Orca AMM V2: {}", p.address);
+                token_swap_v2::hydrate(&mut p, rpc_client).await?;
+                Ok(Pool::OrcaAmmV2(p))
             },
 
 
@@ -86,6 +102,8 @@ impl Graph {
             Pool::RaydiumLaunchpad(p) => p.address,
             Pool::MeteoraDlmm(p) => p.address,
             Pool::OrcaWhirlpool(p) => p.address,
+            Pool::OrcaAmmV2(p) => p.address,
+            Pool::OrcaAmmV1(p) => p.address,
             _ => return,
         };
 
