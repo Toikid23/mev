@@ -22,6 +22,7 @@ pub enum Pool {
     RaydiumStableSwap(raydium_decoders::stable_swap::DecodedStableSwapPool),
     RaydiumLaunchpad(raydium_decoders::launchpad::DecodedLaunchpadPool),
     MeteoraDlmm(meteora_decoders::dlmm::DecodedDlmmPool),
+    OrcaWhirlpool(orca_decoders::whirlpool_decoder::DecodedWhirlpoolPool),
 }
 
 // --- 4. Implémenter le trait pour l'enum ---
@@ -34,6 +35,7 @@ impl PoolOperations for Pool {
             Pool::RaydiumStableSwap(p) => p.get_mints(),
             Pool::RaydiumLaunchpad(p) => p.get_mints(),
             Pool::MeteoraDlmm(p) => p.get_mints(),
+            Pool::OrcaWhirlpool(p) => p.get_mints(),
         }
     }
 
@@ -45,6 +47,7 @@ impl PoolOperations for Pool {
             Pool::RaydiumStableSwap(p) => p.get_vaults(),
             Pool::RaydiumLaunchpad(p) => p.get_vaults(),
             Pool::MeteoraDlmm(p) => p.get_vaults(),
+            Pool::OrcaWhirlpool(p) => p.get_vaults(),
         }
     }
 
@@ -56,6 +59,7 @@ impl PoolOperations for Pool {
             Pool::RaydiumStableSwap(p) => p.get_quote(token_in_mint, amount_in),
             Pool::RaydiumLaunchpad(p) => p.get_quote(token_in_mint, amount_in),
             Pool::MeteoraDlmm(p) => p.get_quote(token_in_mint, amount_in),
+            Pool::OrcaWhirlpool(p) => p.get_quote(token_in_mint, amount_in),
         }
     }
 }

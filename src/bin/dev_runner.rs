@@ -13,6 +13,7 @@ use mev::{
         meteora_decoders::dlmm,
     },
 };
+use mev::decoders::orca_decoders::{whirlpool_decoder, tick_array};
 
 // =================================================================================
 // DÉFINITIONS DES TESTS INDIVIDUELS
@@ -118,6 +119,82 @@ async fn test_dlmm(rpc_client: &RpcClient) -> Result<()> {
 }
 
 
+
+/*async fn test_whirlpool(rpc_client: &RpcClient) -> Result<()> {
+    const POOL_ADDRESS: &str = "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE"; // WSOL-USDC
+
+    println!("\n--- Test Orca Whirlpool ({}) ---", POOL_ADDRESS);
+
+    let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
+
+    // 1. Décodage initial à partir des données du compte
+    let account_data = rpc_client.get_account_data(&pool_pubkey).await?;
+    let mut pool = whirlpool_decoder::decode_pool(&pool_pubkey, &account_data)?;
+    println!("-> Décodage initial réussi.");
+
+    // 2. Hydratation pour charger les données annexes (TickArrays, Mints)
+    println!("[1/2] Hydratation...");
+    whirlpool_decoder::hydrate(&mut pool, rpc_client).await?;
+    println!("-> Hydratation terminée. Frais: {:.4}%. Trouvé {} TickArray(s).",
+             pool.fee_as_percent(),
+             pool.tick_arrays.as_ref().unwrap().len());
+
+    // 3. Simulation d'un swap avec `get_quote`
+    let usdc_amount_in = 1_000_000; // 1 USDC (a 6 décimales)
+    println!("\n[2/2] Calcul du quote pour 1 USDC...");
+
+    // On utilise les décimales hydratées pour un affichage correct.
+    // Pour WSOL/USDC, USDC est généralement le `mint_b`.
+    print_quote_result(
+        &pool,
+        &pool.mint_b, // On entre du USDC (mint_b)
+        pool.mint_b_decimals, // Décimales de l'input
+        pool.mint_a_decimals, // Décimales de l'output (WSOL)
+        usdc_amount_in
+    )?;
+
+    Ok(())
+}*/
+
+
+async fn test_whirlpool(rpc_client: &RpcClient) -> Result<()> {
+    const POOL_ADDRESS: &str = "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE"; // WSOL-USDC
+    println!("\n--- Test Orca Whirlpool ({}) ---", POOL_ADDRESS);
+
+    let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
+
+    // 1. Décodage initial
+    let account_data = rpc_client.get_account_data(&pool_pubkey).await?;
+    let mut pool = whirlpool_decoder::decode_pool(&pool_pubkey, &account_data)?;
+    println!("-> Décodage initial réussi (tick_current: {}, tick_spacing: {}).", pool.tick_current_index, pool.tick_spacing);
+
+    // 2. Hydratation
+    println!("[1/2] Hydratation...");
+    whirlpool_decoder::hydrate(&mut pool, rpc_client).await?;
+
+    let tick_arrays_found = pool.tick_arrays.as_ref().map_or(0, |arrays| arrays.len());
+    println!("-> Hydratation terminée. Frais: {:.4}%. Trouvé {} TickArray(s).",
+             pool.fee_as_percent(),
+             tick_arrays_found);
+
+    if tick_arrays_found == 0 {
+        println!("\n[AVERTISSEMENT] Aucun TickArray trouvé. Le calcul de quote sera 0.");
+    }
+
+    // 3. Simulation d'un swap
+    let usdc_amount_in = 1_000_000; // 1 USDC
+    println!("\n[2/2] Calcul du quote pour 1 USDC...");
+
+    print_quote_result(
+        &pool,
+        &pool.mint_b,
+        pool.mint_b_decimals,
+        pool.mint_a_decimals,
+        usdc_amount_in
+    )?;
+
+    Ok(())
+}
 // =================================================================================
 // ORCHESTRATEUR DE TESTS
 // =================================================================================
@@ -137,6 +214,7 @@ async fn main() -> Result<()> {
         if let Err(e) = test_clmm(&rpc_client).await { println!("!! CLMM a échoué: {}", e); }
         if let Err(e) = test_launchpad(&rpc_client).await { println!("!! Launchpad a échoué: {}", e); }
         if let Err(e) = test_dlmm(&rpc_client).await { println!("!! DLMM a échoué: {}", e); }
+        if let Err(e) = test_whirlpool(&rpc_client).await { println!("!! Whirlpool a échoué: {}", e); }
     } else {
         println!("Mode: Exécution des tests spécifiques: {:?}", args);
         for test_name in args {
@@ -146,6 +224,7 @@ async fn main() -> Result<()> {
                 "clmm" => if let Err(e) = test_clmm(&rpc_client).await { println!("!! CLMM a échoué: {}", e); },
                 "launchpad" => if let Err(e) = test_launchpad(&rpc_client).await { println!("!! Launchpad a échoué: {}", e); },
                 "dlmm" => if let Err(e) = test_dlmm(&rpc_client).await { println!("!! DLMM a échoué: {}", e); },
+                "whirlpool" => if let Err(e) = test_whirlpool(&rpc_client).await { println!("!! Whirlpool a échoué: {}", e); },
                 _ => println!("!! Test inconnu: '{}'", test_name),
             }
         }

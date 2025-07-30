@@ -1,7 +1,7 @@
 // DANS : src/math/clmm_math.rs
 
 use uint::construct_uint;
-use anyhow::{anyhow, Result};
+use anyhow::{Result};
 
 construct_uint! { pub struct U256(4); }
 const BITS: u32 = 64;

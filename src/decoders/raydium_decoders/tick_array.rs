@@ -39,12 +39,13 @@ unsafe impl Pod for TickArrayState {}
 
 /// Calcule l'adresse d'un compte TickArray (PDA).
 /// **LA VERSION PROUVÉE CORRECTE**
-pub fn get_tick_array_address(pool_id: &Pubkey, start_tick_index: i32, program_id: &Pubkey) -> Pubkey {
+pub fn get_tick_array_address(whirlpool: &Pubkey, start_tick_index: i32, program_id: &Pubkey) -> Pubkey {
     let (pda, _) = Pubkey::find_program_address(
         &[
             b"tick_array",
-            &pool_id.to_bytes(),
-            &start_tick_index.to_be_bytes(), // <--- LA CORRECTION CRUCIALE
+            whirlpool.as_ref(),
+            // LA CORRECTION CRUCIALE : Big Endian, comme pour Raydium CLMM
+            &start_tick_index.to_be_bytes(),
         ],
         program_id,
     );

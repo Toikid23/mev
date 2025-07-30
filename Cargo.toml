@@ -101,3 +101,4 @@ spl-token-2022 = "9.0.0"
 uint = "0.10.0"
 
 num-integer = "0.1.46"
+futures = "0.3.31"

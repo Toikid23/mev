@@ -1,7 +1,7 @@
 // src/math/launchpad_math.rs
 
 use uint::construct_uint;
-use anyhow::{Result, anyhow};
+use anyhow::{Result};
 
 // Définit un type d'entier non signé de 256 bits
 construct_uint! { pub struct U256(4); }
