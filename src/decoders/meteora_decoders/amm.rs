@@ -130,46 +130,25 @@ pub async fn hydrate(pool: &mut DecodedMeteoraSbpPool, rpc_client: &RpcClient) -
 impl PoolOperations for DecodedMeteoraSbpPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
+
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64) -> Result<u64> {
-        println!("\n--- PHASE 3: CALCUL DU QUOTE ---");
-        println!("[3.1] Input: {} lamports de {}", amount_in, token_in_mint);
-
         if !self.enabled || amount_in == 0 { return Ok(0); }
-
-        let (in_reserve, out_reserve) = if *token_in_mint == self.mint_a {
-            (self.reserve_a, self.reserve_b)
-        } else { (self.reserve_b, self.reserve_a) };
-        println!("[3.2] Réserves utilisées: In={}, Out={}", in_reserve, out_reserve);
-
-        if in_reserve == 0 || out_reserve == 0 {
-            println!("[3.3] ERREUR: Une des réserves est nulle. Swap impossible.");
-            return Ok(0);
-        }
+        let (in_reserve, out_reserve) = if *token_in_mint == self.mint_a { (self.reserve_a, self.reserve_b) } else { (self.reserve_b, self.reserve_a) };
+        if in_reserve == 0 || out_reserve == 0 { return Ok(0); }
 
         let gross_amount_out = match &self.curve_type {
             MeteoraCurveType::ConstantProduct => {
-                println!("[3.3] Logique: ConstantProduct");
-                let fee_num = self.fees.trade_fee_numerator.saturating_add(self.fees.protocol_trade_fee_numerator);
+                // CORRECTION FINALE : On utilise UNIQUEMENT les frais de trading pour le calcul payé par l'utilisateur.
+                let fee_num = self.fees.trade_fee_numerator;
                 let fee_den = self.fees.trade_fee_denominator;
-                println!("    -> Frais: Numerator={}, Denominator={}", fee_num, fee_den);
 
                 if fee_den == 0 { return Ok(0); }
-
                 let fee_amount = (amount_in as u128 * fee_num as u128) / fee_den as u128;
                 let net_in = (amount_in as u128).saturating_sub(fee_amount);
-                println!("    -> Montant net en entrée (après frais): {}", net_in);
-
-                let numerator = net_in.saturating_mul(out_reserve as u128);
-                let denominator = (in_reserve as u128).saturating_add(net_in);
-                println!("    -> Calcul: ({} * {}) / {}", net_in, out_reserve, denominator);
-
-                if denominator == 0 { return Ok(0); }
-                let result = numerator / denominator;
-                println!("[3.4] Montant brut en sortie: {}", result);
-                result
+                (net_in * out_reserve as u128) / (in_reserve as u128 + net_in)
             }
             MeteoraCurveType::Stable { amp, token_multiplier } => {
-                // ... (la logique stable peut être débuggée plus tard si nécessaire)
+                // CORRECTION FINALE : On utilise UNIQUEMENT les frais de trading.
                 let (norm_in_reserve, norm_out_reserve, in_mult, out_mult) = if *token_in_mint == self.mint_a {
                     (self.reserve_a as u128 * token_multiplier.token_a_multiplier as u128,
                      self.reserve_b as u128 * token_multiplier.token_b_multiplier as u128,
@@ -184,7 +163,7 @@ impl PoolOperations for DecodedMeteoraSbpPool {
                 let norm_in = amount_in as u128 * in_mult as u128;
                 let norm_out = meteora_stableswap_math::get_quote(norm_in as u64, norm_in_reserve as u64, norm_out_reserve as u64, *amp)? as u128;
                 let amount_out = norm_out / out_mult as u128;
-                let fee_num = self.fees.trade_fee_numerator + self.fees.protocol_trade_fee_numerator;
+                let fee_num = self.fees.trade_fee_numerator;
                 let fee_den = self.fees.trade_fee_denominator;
                 let fee = (amount_out * fee_num as u128) / fee_den as u128;
                 amount_out - fee

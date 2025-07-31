@@ -275,8 +275,8 @@ async fn test_meteora_amm(rpc_client: &RpcClient) -> Result<()> {
     //
     // <<< MODIFIEZ L'ADRESSE ICI POUR CHANGER DE POOL À TESTER >>>
     //
-    const POOL_ADDRESS: &str = "9rrBRrPQ83KHYXjfg22wLfcb85m95Mk6B6NC4hRhGgRz"; // Stable (USDC-USDT)
-    // const POOL_ADDRESS: &str = "7rQd8FhC1rimV3v9edCRZ6RNFsJN1puXM9UmjaURJRNj"; // Constant Product (WSOL-NOBODY)
+    // const POOL_ADDRESS: &str = "32D4zRxNc1EssbJieVHfPhZM3rH6CzfUPrWUuWxD9prG"; // Stable (USDC-USDT)
+    const POOL_ADDRESS: &str = "7rQd8FhC1rimV3v9edCRZ6RNFsJN1puXM9UmjaURJRNj"; // Constant Product (WSOL-USELESS)
 
     println!("\n--- Test Meteora AMM ({}) ---", POOL_ADDRESS);
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
@@ -287,12 +287,12 @@ async fn test_meteora_amm(rpc_client: &RpcClient) -> Result<()> {
 
     println!("[1/2] Hydratation...");
     meteora_amm::hydrate(&mut pool, rpc_client).await?;
-    let total_fees = (pool.fees.trade_fee_numerator + pool.fees.protocol_trade_fee_numerator) * 100;
-    let fee_percent = total_fees as f64 / pool.fees.trade_fee_denominator as f64;
-    println!("-> Hydratation terminée. Frais: {:.4}%.", fee_percent);
+
+    // CORRECTION FINALE : Calculer et afficher le VRAI pourcentage de frais payé par l'utilisateur.
+    let fee_percent = (pool.fees.trade_fee_numerator as f64 * 100.0) / pool.fees.trade_fee_denominator as f64;
+    println!("-> Hydratation terminée. Frais de trading: {:.4}%.", fee_percent);
 
     // Le test s'adapte automatiquement au pool testé.
-    // Il swappe toujours 1 token UI de mint_a.
     let amount_in = 1 * 10u64.pow(pool.mint_a_decimals as u32);
     let token_in_name = if POOL_ADDRESS == "32D4zRxNc1EssbJieVHfPhZM3rH6CzfUPrWUuWxD9prG" {
         "USDC"
