@@ -6,7 +6,6 @@ use uint::construct_uint;
 construct_uint! { pub struct U256(4); }
 
 // Constante pour la précision des sqrt_price (64 bits de partie fractionnaire).
-const Q64: u128 = 1 << 64;
 const U128_MAX: u128 = u128::MAX;
 
 /// Calcule la racine carrée du prix (sqrt_price) à partir d'un index de tick.

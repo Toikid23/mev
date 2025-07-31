@@ -26,7 +26,7 @@ pub struct DecodedStableSwapPool {
 
 #[repr(C, packed)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
-struct Fees {
+pub struct Fees {
     pub min_separate_numerator: u64,
     pub min_separate_denominator: u64,
     pub trade_fee_numerator: u64,
@@ -39,7 +39,7 @@ struct Fees {
 
 #[repr(C, packed)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
-struct OutPutData {
+pub struct OutPutData {
     pub need_take_pnl_coin: u64, pub need_take_pnl_pc: u64,
     pub total_pnl_pc: u64, pub total_pnl_coin: u64,
     pub pool_open_time: u64, pub punish_pc_amount: u64,

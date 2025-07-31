@@ -1,7 +1,7 @@
 use crate::decoders::{Pool, PoolOperations}; // On importe juste Pool et le trait
 use crate::decoders::{
     raydium_decoders::{launchpad, clmm_pool, amm_v4, cpmm},
-    meteora_decoders::dlmm,
+    meteora_decoders::{dlmm, amm as meteora_amm},
     orca_decoders::{whirlpool_decoder, token_swap_v2, token_swap_v1} // On importe le nouveau module ici
 };
 use solana_client::nonblocking::rpc_client::RpcClient;
@@ -80,6 +80,13 @@ impl Graph {
             },
 
 
+            Pool::MeteoraAmm(mut p) => {
+                println!("Hydrating Meteora AMM: {}", p.address);
+                meteora_amm::hydrate(&mut p, rpc_client).await?;
+                Ok(Pool::MeteoraAmm(p))
+            },
+
+
             Pool::MeteoraDlmm(mut p) => {
                 println!("Hydrating Meteora DLMM: {}", p.address);
                 // On délègue le travail à l'expert DLMM
@@ -100,6 +107,7 @@ impl Graph {
             Pool::RaydiumCpmm(p) => p.address, // <--- AJOUTEZ CETTE LIGNE
             Pool::RaydiumClmm(p) => p.address,
             Pool::RaydiumLaunchpad(p) => p.address,
+            Pool::MeteoraAmm(p) => p.address,
             Pool::MeteoraDlmm(p) => p.address,
             Pool::OrcaWhirlpool(p) => p.address,
             Pool::OrcaAmmV2(p) => p.address,
