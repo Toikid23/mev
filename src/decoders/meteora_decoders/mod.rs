@@ -4,6 +4,7 @@ use solana_sdk::pubkey;
 
 pub mod dlmm;
 pub mod amm;
+pub mod damm_v2;
 
 // On définit l'adresse du programme ici pour qu'elle soit accessible
 // par tous les décodeurs Meteora.

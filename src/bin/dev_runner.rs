@@ -10,7 +10,7 @@ use mev::{
     decoders::{
         pool_operations::PoolOperations,
         raydium_decoders::{amm_v4, clmm_pool, cpmm, launchpad},
-        meteora_decoders::{dlmm, amm as meteora_amm}
+        meteora_decoders::{dlmm, amm as meteora_amm, damm_v2}
     },
 };
 use mev::decoders::orca_decoders::{whirlpool_decoder, token_swap_v2, token_swap_v1};
@@ -306,6 +306,32 @@ async fn test_meteora_amm(rpc_client: &RpcClient) -> Result<()> {
     Ok(())
 }
 
+async fn test_damm_v2(rpc_client: &RpcClient) -> Result<()> {
+    const POOL_ADDRESS: &str = "DufUudXe8EH663DFwX16N8LuFCaNYEseqwgvodosHzXC"; // BUBBLE-USDC
+
+    println!("\n--- Test Meteora DAMM v2 (BUBBLE/USDC: {}) ---", POOL_ADDRESS);
+    let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
+    let account_data = rpc_client.get_account_data(&pool_pubkey).await?;
+
+    // 1. Decodage initial
+    let mut pool = damm_v2::decode_pool(&pool_pubkey, &account_data)?;
+    println!("-> Decodage initial reussi.");
+
+    // 2. Hydratation
+    println!("[1/2] Hydratation...");
+    damm_v2::hydrate(&mut pool, rpc_client).await?;
+    println!("-> Hydratation terminee. Frais de base: {:.4}%.", pool.fee_as_percent());
+    println!("   -> Decimale A (BUBBLE): {}, Decimale B (USDC): {}", pool.mint_a_decimals, pool.mint_b_decimals);
+
+    // 3. Test de quote (Vente de BUBBLE pour USDC)
+    // Les deux tokens ont 6 decimales.
+    let amount_in = 10_000_000_000; // 10,000 BUBBLE
+    println!("\n[2/2] Calcul du quote pour 10,000 BUBBLE...");
+    print_quote_result(&pool, &pool.mint_a, pool.mint_a_decimals, pool.mint_b_decimals, amount_in)?;
+
+    Ok(())
+}
+
 
 // =================================================================================
 // ORCHESTRATEUR DE TESTS
@@ -326,6 +352,7 @@ async fn main() -> Result<()> {
         if let Err(e) = test_clmm(&rpc_client).await { println!("!! CLMM a échoué: {}", e); }
         if let Err(e) = test_launchpad(&rpc_client).await { println!("!! Launchpad a échoué: {}", e); }
         if let Err(e) = test_meteora_amm(&rpc_client).await { println!("!! Meteora AMM a échoué: {}", e); }
+        if let Err(e) = test_damm_v2(&rpc_client).await { println!("!! Meteora DAMM v2 a echoue: {}", e); }
         if let Err(e) = test_dlmm(&rpc_client).await { println!("!! DLMM a échoué: {}", e); }
         if let Err(e) = test_whirlpool(&rpc_client).await { println!("!! Whirlpool a échoué: {}", e); }
         if let Err(e) = test_orca_amm_v2(&rpc_client).await { println!("!! Orca AMM V2 a échoué: {}", e); }
@@ -339,6 +366,7 @@ async fn main() -> Result<()> {
                 "clmm" => if let Err(e) = test_clmm(&rpc_client).await { println!("!! CLMM a échoué: {}", e); },
                 "launchpad" => if let Err(e) = test_launchpad(&rpc_client).await { println!("!! Launchpad a échoué: {}", e); },
                 "meteora_amm" => if let Err(e) = test_meteora_amm(&rpc_client).await { println!("!! Meteora AMM a échoué: {}", e); },
+                "damm_v2" => if let Err(e) = test_damm_v2(&rpc_client).await { println!("!! Meteora DAMM v2 a echoue: {}", e); },
                 "dlmm" => if let Err(e) = test_dlmm(&rpc_client).await { println!("!! DLMM a échoué: {}", e); },
                 "whirlpool" => if let Err(e) = test_whirlpool(&rpc_client).await { println!("!! Whirlpool a échoué: {}", e); },
                 "orca_amm_v2" => if let Err(e) = test_orca_amm_v2(&rpc_client).await { println!("!! Orca AMM V2 a échoué: {}", e); },

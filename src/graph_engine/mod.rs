@@ -1,7 +1,7 @@
 use crate::decoders::{Pool, PoolOperations}; // On importe juste Pool et le trait
 use crate::decoders::{
     raydium_decoders::{launchpad, clmm_pool, amm_v4, cpmm},
-    meteora_decoders::{dlmm, amm as meteora_amm},
+    meteora_decoders::{dlmm, amm as meteora_amm, damm_v2},
     orca_decoders::{whirlpool_decoder, token_swap_v2, token_swap_v1} // On importe le nouveau module ici
 };
 use solana_client::nonblocking::rpc_client::RpcClient;
@@ -86,6 +86,12 @@ impl Graph {
                 Ok(Pool::MeteoraAmm(p))
             },
 
+            Pool::MeteoraDammV2(mut p) => {
+                println!("Hydrating Meteora DAMM v2: {}", p.address);
+                damm_v2::hydrate(&mut p, rpc_client).await?;
+                Ok(Pool::MeteoraDammV2(p))
+            },
+
 
             Pool::MeteoraDlmm(mut p) => {
                 println!("Hydrating Meteora DLMM: {}", p.address);
@@ -108,6 +114,7 @@ impl Graph {
             Pool::RaydiumClmm(p) => p.address,
             Pool::RaydiumLaunchpad(p) => p.address,
             Pool::MeteoraAmm(p) => p.address,
+            Pool::MeteoraDammV2(p) => p.address,
             Pool::MeteoraDlmm(p) => p.address,
             Pool::OrcaWhirlpool(p) => p.address,
             Pool::OrcaAmmV2(p) => p.address,
