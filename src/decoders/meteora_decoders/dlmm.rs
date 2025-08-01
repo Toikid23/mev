@@ -88,8 +88,8 @@ impl DecodedDlmmPool {
                 (current_bin_id % (MAX_BIN_PER_ARRAY as i32) + (MAX_BIN_PER_ARRAY as i32))
                     % (MAX_BIN_PER_ARRAY as i32);
             let current_bin = &bin_array.bins[bin_index_in_array as usize];
-
-            let (in_reserve, out_reserve) = if swap_for_y {
+            //undescore !!!
+            let (in_reserve, _out_reserve) = if swap_for_y {
                 (current_bin.amount_a, current_bin.amount_b)
             } else {
                 (current_bin.amount_b, current_bin.amount_a)
