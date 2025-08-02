@@ -28,7 +28,7 @@ pub struct DecodedClmmPool {
     pub sqrt_price_x64: u128,
     pub tick_current: i32,
     pub tick_spacing: u16,
-    pub total_fee_percent: f64,
+    pub trade_fee_rate: u32,
     pub min_tick: i32,
     pub max_tick: i32,
     pub tick_arrays: Option<BTreeMap<i32, TickArrayState>>,
@@ -36,7 +36,10 @@ pub struct DecodedClmmPool {
 
 impl DecodedClmmPool {
     pub fn fee_as_percent(&self) -> f64 {
-        self.total_fee_percent * 100.0
+        // La trade_fee_rate est en parts par million.
+        // Pour la convertir en pourcentage, on divise par 1,000,000 puis on multiplie par 100.
+        // Ce qui revient à diviser par 10,000.
+        self.trade_fee_rate as f64 / 10_000.0
     }
 }
 
@@ -129,12 +132,11 @@ fn get_clmm_quote_calculation(
         }
     }
 
-    const PRECISION: u128 = 1_000_000;
-    let fee_numerator = (pool.total_fee_percent * PRECISION as f64) as u128;
-    let fee_to_deduct = (total_amount_out * fee_numerator) / PRECISION;
-    let gross_amount_out = total_amount_out.saturating_sub(fee_to_deduct) as u64;
+    const FEE_DENOMINATOR: u128 = 1_000_000;
+    let fee_to_deduct = (total_amount_out * pool.trade_fee_rate as u128) / FEE_DENOMINATOR;
+    let net_amount_out = total_amount_out.saturating_sub(fee_to_deduct);
 
-    Ok(gross_amount_out)
+    Ok(net_amount_out as u64)
 }
 
 fn find_next_initialized_tick(
@@ -178,7 +180,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Result
         tick_spacing: pool_struct.tick_spacing, liquidity: pool_struct.liquidity,
         sqrt_price_x64: pool_struct.sqrt_price_x64, tick_current: pool_struct.tick_current,
         mint_a_decimals: 0, mint_b_decimals: 0, mint_a_transfer_fee_bps: 0,
-        mint_b_transfer_fee_bps: 0, total_fee_percent: 0.0, min_tick: -443636,
+        mint_b_transfer_fee_bps: 0, trade_fee_rate: 0, min_tick: -443636,
         max_tick: 443636, tick_arrays: None,
     })
 }
@@ -192,7 +194,7 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &RpcClient) -> Resu
     let config_account_data = config_res?;
     let decoded_config = clmm_config::decode_config(&config_account_data)?;
     pool.tick_spacing = decoded_config.tick_spacing;
-    pool.total_fee_percent = decoded_config.trade_fee_rate as f64 / 1_000_000.0;
+    pool.trade_fee_rate = decoded_config.trade_fee_rate;
     let mint_a_data = mint_a_res?;
     let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_data)?;
     pool.mint_a_decimals = decoded_mint_a.decimals;

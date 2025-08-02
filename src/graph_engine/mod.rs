@@ -2,7 +2,8 @@ use crate::decoders::{Pool, PoolOperations}; // On importe juste Pool et le trai
 use crate::decoders::{
     raydium_decoders::{launchpad, clmm_pool, amm_v4, cpmm},
     meteora_decoders::{dlmm, amm as meteora_amm, damm_v2},
-    orca_decoders::{whirlpool_decoder, token_swap_v2, token_swap_v1} // On importe le nouveau module ici
+    orca_decoders::{whirlpool_decoder, token_swap_v2, token_swap_v1}, // On importe le nouveau module ici
+    pump_decoders
 };
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
@@ -34,6 +35,7 @@ impl Graph {
             },
 
 
+
             Pool::OrcaAmmV1(mut p) => { // <--- AJOUTER
                 println!("Hydrating Orca AMM V1: {}", p.address);
                 token_swap_v1::hydrate(&mut p, rpc_client).await?;
@@ -41,11 +43,13 @@ impl Graph {
             },
 
 
+
             Pool::OrcaAmmV2(mut p) => { // <--- AJOUTER
                 println!("Hydrating Orca AMM V2: {}", p.address);
                 token_swap_v2::hydrate(&mut p, rpc_client).await?;
                 Ok(Pool::OrcaAmmV2(p))
             },
+
 
 
             Pool::RaydiumAmmV4(mut p) => {
@@ -56,12 +60,14 @@ impl Graph {
             },
 
 
+
             Pool::RaydiumCpmm(mut p) => {
                 println!("Hydrating Raydium CPMM: {}", p.address);
                 // On délègue tout le travail à l'expert CPMM
                 cpmm::hydrate(&mut p, rpc_client).await?;
                 Ok(Pool::RaydiumCpmm(p))
             },
+
 
 
             Pool::RaydiumClmm(mut p) => {
@@ -72,6 +78,7 @@ impl Graph {
             },
 
 
+
             Pool::RaydiumLaunchpad(mut p) => {
                 println!("Hydrating Raydium Launchpad: {}", p.address);
                 // On délègue le travail à l'expert Launchpad
@@ -80,11 +87,14 @@ impl Graph {
             },
 
 
+
             Pool::MeteoraAmm(mut p) => {
                 println!("Hydrating Meteora AMM: {}", p.address);
                 meteora_amm::hydrate(&mut p, rpc_client).await?;
                 Ok(Pool::MeteoraAmm(p))
             },
+
+
 
             Pool::MeteoraDammV2(mut p) => {
                 println!("Hydrating Meteora DAMM v2: {}", p.address);
@@ -93,11 +103,20 @@ impl Graph {
             },
 
 
+
             Pool::MeteoraDlmm(mut p) => {
                 println!("Hydrating Meteora DLMM: {}", p.address);
                 // On délègue le travail à l'expert DLMM
                 dlmm::hydrate(&mut p, rpc_client, 10).await?;
                 Ok(Pool::MeteoraDlmm(p))
+            },
+
+
+
+            Pool::PumpAmm(mut p) => {
+                println!("Hydrating pump.fun AMM: {}", p.address);
+                pump_decoders::amm::hydrate(&mut p, rpc_client).await?;
+                Ok(Pool::PumpAmm(p))
             },
 
 
@@ -119,6 +138,7 @@ impl Graph {
             Pool::OrcaWhirlpool(p) => p.address,
             Pool::OrcaAmmV2(p) => p.address,
             Pool::OrcaAmmV1(p) => p.address,
+            Pool::PumpAmm(p) => p.address,
             _ => return,
         };
 

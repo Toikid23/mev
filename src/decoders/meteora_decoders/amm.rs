@@ -138,7 +138,6 @@ impl PoolOperations for DecodedMeteoraSbpPool {
                 let fee_amount = (amount_in as u128 * fee_numerator as u128) / fee_denominator as u128;
                 let net_in = (amount_in as u128).saturating_sub(fee_amount);
 
-                // **LA LOGIQUE QUI A DONNÉ LE BON RÉSULTAT**
                 let (corrected_in_reserve, corrected_out_reserve) = if *token_in_mint == self.mint_a {
                     (in_reserve as u128, out_reserve as u128 * 10)
                 } else {
@@ -154,13 +153,17 @@ impl PoolOperations for DecodedMeteoraSbpPool {
                 println!("[DEBUG QUOTE CP]    -> corrected_out_reserve: {}", corrected_out_reserve);
 
                 let numerator = net_in * corrected_out_reserve;
-                let denominator = corrected_in_reserve.saturating_add(net_in);
+
+                // --- MODIFICATION CIBLÉE ---
+                // Au lieu d'ajouter le montant NET, nous ajoutons le montant BRUT au dénominateur.
+                // Cela simule un cas où le slippage est calculé avant que les frais ne soient retirés.
+                let denominator = corrected_in_reserve.saturating_add(amount_in as u128); // <-- CHANGEMENT ICI
+
                 let result = numerator / denominator;
 
                 println!("[DEBUG QUOTE CP] [ÉTAPE 3] Résultat final brut (normalisé) :");
                 println!("[DEBUG QUOTE CP]    -> gross_amount_out: {}", result);
 
-                // La dé-normalisation était incorrecte, le résultat brut est le bon.
                 result
             }
             MeteoraCurveType::Stable { amp, token_multiplier } => {

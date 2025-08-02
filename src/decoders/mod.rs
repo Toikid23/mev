@@ -9,6 +9,7 @@ pub mod raydium_decoders;
 pub mod orca_decoders;
 pub mod meteora_decoders;
 pub mod spl_token_decoders;
+pub mod pump_decoders;
 
 
 // --- 2. Importer le trait ---
@@ -28,6 +29,7 @@ pub enum Pool {
     OrcaWhirlpool(orca_decoders::whirlpool_decoder::DecodedWhirlpoolPool),
     OrcaAmmV2(orca_decoders::token_swap_v2::DecodedOrcaAmmPool),
     OrcaAmmV1(orca_decoders::token_swap_v1::DecodedOrcaAmmV1Pool),
+    PumpAmm(pump_decoders::amm::DecodedPumpAmmPool),
 
 }
 
@@ -46,6 +48,7 @@ impl PoolOperations for Pool {
             Pool::OrcaWhirlpool(p) => p.get_mints(),
             Pool::OrcaAmmV2(p) => p.get_mints(),
             Pool::OrcaAmmV1(p) => p.get_mints(),
+            Pool::PumpAmm(p) => p.get_mints(),
         }
     }
 
@@ -62,6 +65,7 @@ impl PoolOperations for Pool {
             Pool::OrcaWhirlpool(p) => p.get_vaults(),
             Pool::OrcaAmmV2(p) => p.get_vaults(),
             Pool::OrcaAmmV1(p) => p.get_vaults(),
+            Pool::PumpAmm(p) => p.get_vaults(),
         }
     }
 
@@ -78,6 +82,7 @@ impl PoolOperations for Pool {
             Pool::OrcaWhirlpool(p) => p.get_quote(token_in_mint, amount_in),
             Pool::OrcaAmmV2(p) => p.get_quote(token_in_mint, amount_in),
             Pool::OrcaAmmV1(p) => p.get_quote(token_in_mint, amount_in),
+            Pool::PumpAmm(p) => p.get_quote(token_in_mint, amount_in),
         }
     }
 }

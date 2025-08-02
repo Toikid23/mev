@@ -30,8 +30,12 @@ pub struct DecodedOrcaAmmV1Pool {
 
 impl DecodedOrcaAmmV1Pool {
     pub fn fee_as_percent(&self) -> f64 {
-        if self.trade_fee_denominator == 0 { 0.0 }
-        else { (self.trade_fee_numerator as f64 / self.trade_fee_denominator as f64) * 100.0 }
+        if self.trade_fee_denominator == 0 {
+            0.0
+        } else {
+            // On fait la multiplication par 100.0 en premier pour préserver la précision lors de la division
+            (self.trade_fee_numerator as f64 * 100.0) / self.trade_fee_denominator as f64
+        }
     }
 }
 

@@ -56,12 +56,18 @@ pub fn get_next_sqrt_price_x_down(sqrt_price: u128, liquidity: u128, amount_in: 
     let p = U256::from(sqrt_price);
     let a_in = U256::from(amount_in);
 
-    let numerator = l * p;
-    let denominator = (l << 64) + a_in * p;
+    // CORRECTION : On shift la liquidité de 64 bits AVANT de la multiplier par le prix.
+    // Cela transforme le numérateur en un nombre au format X128.
+    let numerator = (l << 64) * p; // Calcule X64 * X64 = X128
+    let denominator = (l << 64) + a_in * p; // Calcule X64 + X64 = X64
 
+    if denominator.is_zero() {
+        return 0;
+    }
+
+    // Le résultat de X128 / X64 est bien un nombre au format X64, ce qui est correct.
     (numerator / denominator).as_u128()
 }
-
 /// Calcule le prochain sqrt_price en ajoutant du token Y (le prix monte).
 pub fn get_next_sqrt_price_y_up(sqrt_price: u128, liquidity: u128, amount_in: u128) -> u128 {
     let l = U256::from(liquidity);

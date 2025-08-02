@@ -45,10 +45,10 @@ pub struct DecodedWhirlpoolPool {
 }
 
 impl DecodedWhirlpoolPool {
-    /// Retourne les frais du pool en pourcentage.
-    /// La `fee_rate` d'Orca est en points par million (1/1,000,000).
     pub fn fee_as_percent(&self) -> f64 {
-        (self.fee_rate as f64 / 1_000_000.0) * 100.0
+        // La fee_rate est en parts par million.
+        // Pour la convertir en pourcentage, on divise par 10,000.
+        self.fee_rate as f64 / 10_000.0
     }
 }
 // --- STRUCTURES BRUTES (INCHANGÉES) ---

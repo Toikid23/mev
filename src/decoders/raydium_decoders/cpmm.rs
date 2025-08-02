@@ -88,6 +88,8 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedCpmmPool> {
     // Étape 3: "Caster" les données
     let pool_struct: &CpmmPoolStateData = from_bytes(data_slice);
 
+
+
     // Étape 4: Créer la sortie propre et unifiée
     Ok(DecodedCpmmPool {
         address: *address,

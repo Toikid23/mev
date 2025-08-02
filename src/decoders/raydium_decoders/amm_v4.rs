@@ -85,6 +85,10 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedAmmPool> {
     }
     let pool_struct: &AmmInfoData = from_bytes(data);
 
+    if pool_struct.status == 0 {
+        bail!("Pool {} is not initialized (status is 0).", address);
+    }
+
     Ok(DecodedAmmPool {
         address: *address,
         mint_a: pool_struct.coin_mint,

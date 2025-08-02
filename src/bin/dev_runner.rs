@@ -10,7 +10,8 @@ use mev::{
     decoders::{
         pool_operations::PoolOperations,
         raydium_decoders::{amm_v4, clmm_pool, cpmm, launchpad},
-        meteora_decoders::{dlmm, amm as meteora_amm, damm_v2}
+        meteora_decoders::{dlmm, amm as meteora_amm, damm_v2},
+        pump_decoders
     },
 };
 use mev::decoders::orca_decoders::{whirlpool_decoder, token_swap_v2, token_swap_v1};
@@ -39,7 +40,7 @@ async fn test_ammv4(rpc_client: &RpcClient) -> Result<()> {
 }
 
 async fn test_cpmm(rpc_client: &RpcClient) -> Result<()> {
-    const POOL_ADDRESS: &str = "4XFxwYkzeXaaToxgdHoYE3powjJwZFy2bSk2Aq4bwFge"; // DUST-SOL
+    const POOL_ADDRESS: &str = "Q2sPHPdUWFMg7M7wwrQKLrn619cAucfRsmhVJffodSp"; // DUST-SOL
     println!("\n--- Test Raydium CPMM ({}) ---", POOL_ADDRESS);
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
     let account_data = rpc_client.get_account_data(&pool_pubkey).await?;
@@ -102,22 +103,31 @@ async fn test_dlmm(rpc_client: &RpcClient) -> Result<()> {
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
     let program_pubkey = Pubkey::from_str(PROGRAM_ID)?;
     let account_data = rpc_client.get_account_data(&pool_pubkey).await?;
+
     let mut pool = dlmm::decode_lb_pair(&pool_pubkey, &account_data, &program_pubkey)?;
 
     println!("[1/2] Hydratation...");
     dlmm::hydrate(&mut pool, rpc_client, 10).await?;
-    println!("-> Hydratation terminée. Frais de base: {:.4}%. Trouvé {} BinArray(s).",
+
+    println!("-> Hydratation terminée. Frais de base (non représentatif): {:.4}%. Trouvé {} BinArray(s).",
              pool.fee_as_percent(),
              pool.hydrated_bin_arrays.as_ref().unwrap().len()
     );
+    println!("   -> Decimale A (WSOL): {}, Decimale B (USDC): {}", pool.mint_a_decimals, pool.mint_b_decimals);
 
-    let small_amount_in = 183_560_000; // 1 USDC (6 décimales)
-    println!("\n[2/2] Calcul du quote pour 1 USDC...");
-    print_quote_result(&pool, &pool.mint_b, 6, 9, small_amount_in)?;
+    let sol_amount_in = 1_000_000_000; // 1 SOL
+    println!("\n[2/2] Calcul pour VENDRE 1 SOL...");
+
+    print_quote_result(
+        &pool,
+        &pool.mint_a,
+        pool.mint_a_decimals,
+        pool.mint_b_decimals,
+        sol_amount_in
+    )?;
 
     Ok(())
 }
-
 
 
 /*async fn test_whirlpool(rpc_client: &RpcClient) -> Result<()> {
@@ -181,16 +191,17 @@ async fn test_whirlpool(rpc_client: &RpcClient) -> Result<()> {
         println!("\n[AVERTISSEMENT] Aucun TickArray trouvé. Le calcul de quote sera 0.");
     }
 
-    // 3. Simulation d'un swap
-    let usdc_amount_in = 1_000_000; // 1 USDC
-    println!("\n[2/2] Calcul du quote pour 1 USDC...");
+    // 3. Simulation d'un swap de 1 SOL
+    // Pour ce pool, mint_a est WSOL (9 décimales) et mint_b est USDC (6 décimales).
+    let sol_amount_in = 1_000_000_000; // 1 SOL
+    println!("\n[2/2] Calcul pour VENDRE 1 SOL...");
 
     print_quote_result(
         &pool,
-        &pool.mint_b,
-        pool.mint_b_decimals,
-        pool.mint_a_decimals,
-        usdc_amount_in
+        &pool.mint_a,         // On entre du SOL (mint_a)
+        pool.mint_a_decimals, // Décimales de l'input (SOL)
+        pool.mint_b_decimals, // Décimales de l'output (USDC)
+        sol_amount_in
     )?;
 
     Ok(())
@@ -234,37 +245,35 @@ async fn test_orca_amm_v1(rpc_client: &RpcClient) -> Result<()> {
 
 
 async fn test_orca_amm_v2(rpc_client: &RpcClient) -> Result<()> {
-    // REMPLACEZ CECI PAR UNE ADRESSE DE POOL ORCA AMM V2 (PAS WHIRLPOOL)
-    // Exemple de format (ce n'est PAS une vraie adresse) : "Fk9y...p8s"
-    const POOL_ADDRESS: &str = "EGZ7tiLeH62TPV1gL8WwbXGzEPa9zmcpVnnkPKKnrE2U"; // Exemple : SAMO/USDC
+    // On utilise un pool SOL/USDC pour la cohérence
+    const POOL_ADDRESS: &str = "EGZ7tiLeH62TPV1gL8WwbXGzEPa9zmcpVnnkPKKnrE2U"; // SOL/USDC
     println!("\n--- Test Orca AMM V2 ({}) ---", POOL_ADDRESS);
 
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
 
-    // 1. Décodage initial à partir des données brutes
+    // 1. Décodage
     let account_data = rpc_client.get_account_data(&pool_pubkey).await?;
     let mut pool = token_swap_v2::decode_pool(&pool_pubkey, &account_data)?;
     println!("-> Décodage initial réussi. Courbe type: {}.", pool.curve_type);
 
-    // 2. Hydratation pour charger les réserves et les frais de transfert
+    // 2. Hydratation
     println!("[1/2] Hydratation...");
     token_swap_v2::hydrate(&mut pool, rpc_client).await?;
     println!("-> Hydratation terminée. Frais: {:.4}%.", pool.fee_as_percent());
     println!("   -> Réserve A ({}): {} (décimales: {})", pool.mint_a, pool.reserve_a, pool.mint_a_decimals);
     println!("   -> Réserve B ({}): {} (décimales: {})", pool.mint_b, pool.reserve_b, pool.mint_b_decimals);
 
-    // 3. Simulation d'un swap avec `get_quote`
-    let amount_in = 1_000_000; // 1 USDC si USDC a 6 décimales
-    println!("\n[2/2] Calcul du quote pour 1 USDC (en supposant que c'est le token B)...");
+    // 3. Simulation d'un swap de 1 SOL
+    // D'après les logs, mint_a est le SOL (9 décimales)
+    let amount_in_sol = 1_000_000_000;
+    println!("\n[2/2] Calcul pour VENDRE 1 SOL...");
 
-    // On utilise les décimales hydratées pour un affichage correct.
-    // Pour SAMO/USDC, USDC est généralement le `mint_b`.
     print_quote_result(
         &pool,
-        &pool.mint_b,         // On entre du USDC (mint_b)
-        pool.mint_b_decimals, // Décimales de l'input (USDC)
-        pool.mint_a_decimals, // Décimales de l'output (SAMO)
-        amount_in as u64
+        &pool.mint_a,         // On entre du SOL (mint_a)
+        pool.mint_a_decimals, // Décimales de l'input (SOL)
+        pool.mint_b_decimals, // Décimales de l'output (USDC)
+        amount_in_sol
     )?;
 
     Ok(())
@@ -307,13 +316,14 @@ async fn test_meteora_amm(rpc_client: &RpcClient) -> Result<()> {
 }
 
 async fn test_damm_v2(rpc_client: &RpcClient) -> Result<()> {
-    const POOL_ADDRESS: &str = "DufUudXe8EH663DFwX16N8LuFCaNYEseqwgvodosHzXC"; // BUBBLE-USDC
+    // On teste le pool BAG/WSOL pour correspondre au screenshot
+    const POOL_ADDRESS: &str = "BnpqhBcR8jUXZjtZ8GrT1YyXPggfvtUonwHcHvu8LKj9"; // BAG-WSOL
 
-    println!("\n--- Test Meteora DAMM v2 (BUBBLE/USDC: {}) ---", POOL_ADDRESS);
+    println!("\n--- Test Meteora DAMM v2 (BAG/WSOL: {}) ---", POOL_ADDRESS);
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
     let account_data = rpc_client.get_account_data(&pool_pubkey).await?;
 
-    // 1. Decodage initial
+    // 1. Decodage
     let mut pool = damm_v2::decode_pool(&pool_pubkey, &account_data)?;
     println!("-> Decodage initial reussi.");
 
@@ -321,13 +331,56 @@ async fn test_damm_v2(rpc_client: &RpcClient) -> Result<()> {
     println!("[1/2] Hydratation...");
     damm_v2::hydrate(&mut pool, rpc_client).await?;
     println!("-> Hydratation terminee. Frais de base: {:.4}%.", pool.fee_as_percent());
-    println!("   -> Decimale A (BUBBLE): {}, Decimale B (USDC): {}", pool.mint_a_decimals, pool.mint_b_decimals);
+    println!("   -> Decimale A (BAG): {}, Decimale B (WSOL): {}", pool.mint_a_decimals, pool.mint_b_decimals);
 
-    // 3. Test de quote (Vente de BUBBLE pour USDC)
-    // Les deux tokens ont 6 decimales.
-    let amount_in = 10_000_000_000; // 10,000 BUBBLE
-    println!("\n[2/2] Calcul du quote pour 10,000 BUBBLE...");
-    print_quote_result(&pool, &pool.mint_a, pool.mint_a_decimals, pool.mint_b_decimals, amount_in)?;
+    // 3. Test de quote (Vente de BAG pour WSOL)
+    // On simule la vente de 10,000 BAG. D'après les logs, BAG (mint_a) a 9 décimales.
+    let amount_in = 10_000 * 10u64.pow(pool.mint_a_decimals as u32);
+    let ui_amount_in = 10_000.0;
+
+    println!("\n[2/2] Calcul du quote pour {} BAG...", ui_amount_in);
+    print_quote_result(
+        &pool,
+        &pool.mint_a,         // On entre du BAG (mint_a)
+        pool.mint_a_decimals, // Décimales de l'input (BAG)
+        pool.mint_b_decimals, // Décimales de l'output (WSOL)
+        amount_in
+    )?;
+
+    Ok(())
+}
+
+
+async fn test_pump_amm(rpc_client: &RpcClient) -> Result<()> {
+    const POOL_ADDRESS: &str = "2H87WiHP7gMcBGodhRtzgmVc3MYqEx1xPcGdoVUHNQhj"; // DEPI-SOL
+
+    println!("\n--- Test pump.fun AMM ({}) ---", POOL_ADDRESS);
+    let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
+    let account_data = rpc_client.get_account_data(&pool_pubkey).await?;
+
+    // 1. Décodage initial
+    let mut pool = pump_decoders::amm::decode_pool(&pool_pubkey, &account_data)?;
+    println!("-> Décodage initial réussi.");
+
+    // 2. Hydratation
+    println!("[1/2] Hydratation...");
+    pump_decoders::amm::hydrate(&mut pool, rpc_client).await?;
+    println!("-> Hydratation terminée. Frais totaux: {:.4}%.", pool.fee_as_percent());
+    println!("   -> Réserve A ({}): {}", pool.mint_a, pool.reserve_a);
+    println!("   -> Réserve B (SOL): {}", pool.reserve_b);
+
+    // 3. Simulation (Achat de DEPI avec 0.1 SOL)
+    // SOL est le quote_mint (mint_b), il a 9 décimales.
+    let amount_in_sol = (0.1 * 1_000_000_000.0) as u64;
+    println!("\n[2/2] Calcul du quote pour 0.1 SOL...");
+
+    print_quote_result(
+        &pool,
+        &pool.mint_b,         // On entre du SOL (mint_b)
+        pool.mint_b_decimals, // Décimales de l'input
+        pool.mint_a_decimals, // Décimales de l'output
+        amount_in_sol
+    )?;
 
     Ok(())
 }
@@ -357,6 +410,7 @@ async fn main() -> Result<()> {
         if let Err(e) = test_whirlpool(&rpc_client).await { println!("!! Whirlpool a échoué: {}", e); }
         if let Err(e) = test_orca_amm_v2(&rpc_client).await { println!("!! Orca AMM V2 a échoué: {}", e); }
         if let Err(e) = test_orca_amm_v1(&rpc_client).await { println!("!! Orca AMM V1 a échoué: {}", e); }
+        if let Err(e) = test_pump_amm(&rpc_client).await { println!("!! pump.fun AMM a échoué: {}", e); }
     } else {
         println!("Mode: Exécution des tests spécifiques: {:?}", args);
         for test_name in args {
@@ -371,6 +425,7 @@ async fn main() -> Result<()> {
                 "whirlpool" => if let Err(e) = test_whirlpool(&rpc_client).await { println!("!! Whirlpool a échoué: {}", e); },
                 "orca_amm_v2" => if let Err(e) = test_orca_amm_v2(&rpc_client).await { println!("!! Orca AMM V2 a échoué: {}", e); },
                 "orca_amm_v1" => if let Err(e) = test_orca_amm_v1(&rpc_client).await { println!("!! Orca AMM V1 a échoué: {}", e); },
+                "pump_amm" => if let Err(e) = test_pump_amm(&rpc_client).await { println!("!! pump.fun AMM a échoué: {}", e); },
                 _ => println!("!! Test inconnu: '{}'", test_name),
             }
         }
