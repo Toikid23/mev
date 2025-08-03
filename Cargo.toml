@@ -104,3 +104,5 @@ num-integer = "0.1.46"
 futures = "0.3.31"
 
 anchor-spl = "0.31.1"
+
+solana-program-pack = "2.2.1"

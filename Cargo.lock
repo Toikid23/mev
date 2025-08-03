@@ -2330,6 +2330,7 @@ dependencies = [
  "serde_json",
  "solana-account-decoder",
  "solana-client",
+ "solana-program-pack",
  "solana-sdk",
  "spl-math",
  "spl-token 8.0.0",

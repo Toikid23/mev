@@ -4,8 +4,11 @@ use crate::decoders::pool_operations::PoolOperations;
 use crate::math::meteora_stableswap_math;
 use bytemuck::{pod_read_unaligned, Pod, Zeroable};
 use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_sdk::program_pack::Pack;
 use solana_sdk::pubkey::Pubkey;
+use spl_token::state::{Account as SplTokenAccount, Mint as SplMint};
 use anyhow::{anyhow, bail, Result};
+
 
 // --- CONSTANTES ET STRUCTURES PUBLIQUES ---
 
@@ -26,8 +29,10 @@ pub struct DecodedMeteoraSbpPool {
     pub address: Pubkey,
     pub mint_a: Pubkey,
     pub mint_b: Pubkey,
-    pub vault_a: Pubkey, // Adresse du Proxy Vault A
-    pub vault_b: Pubkey, // Adresse du Proxy Vault B
+    pub vault_a: Pubkey,
+    pub vault_b: Pubkey,
+    pub a_vault_lp: Pubkey,
+    pub b_vault_lp: Pubkey,
     pub reserve_a: u64,
     pub reserve_b: u64,
     pub mint_a_decimals: u8,
@@ -61,6 +66,8 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraSbpPoo
     let token_b_mint: Pubkey = read_pod(data_slice, 64)?;
     let a_vault: Pubkey = read_pod(data_slice, 96)?;
     let b_vault: Pubkey = read_pod(data_slice, 128)?;
+    let a_vault_lp: Pubkey = read_pod(data_slice, 160)?;
+    let b_vault_lp: Pubkey = read_pod(data_slice, 192)?;
     let enabled: u8 = read_pod(data_slice, 225)?;
     const FEES_OFFSET: usize = 322;
     let fees: onchain_layouts::PoolFees = read_pod(data_slice, FEES_OFFSET)?;
@@ -82,58 +89,75 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraSbpPoo
         address: *address,
         mint_a: token_a_mint, mint_b: token_b_mint,
         vault_a: a_vault, vault_b: b_vault,
+        a_vault_lp, b_vault_lp,
         fees, curve_type, enabled: enabled == 1,
         reserve_a: 0, reserve_b: 0, mint_a_decimals: 0, mint_b_decimals: 0,
     })
 }
 
-// Fonction helper pour hydrater UNE SEULE réserve, comme dans votre code original
-async fn hydrate_reserve_from_proxy_vault(
-    rpc_client: &RpcClient,
-    proxy_vault_address: &Pubkey,
-) -> Result<u64> {
-    // 1. Lire les données du compte proxy
-    let proxy_vault_data = rpc_client.get_account_data(proxy_vault_address).await?;
-
-    // 2. Extraire l'adresse du VRAI vault à l'offset 19
-    const REAL_TOKEN_VAULT_ADDRESS_OFFSET: usize = 19;
-    let real_token_vault_address: Pubkey = read_pod(&proxy_vault_data, REAL_TOKEN_VAULT_ADDRESS_OFFSET)?;
-
-    // 3. Lire les données du VRAI vault (qui est un compte SPL Token standard)
-    let real_token_vault_data = rpc_client.get_account_data(&real_token_vault_address).await?;
-
-    // 4. Extraire le montant (`amount`) à l'offset 64 d'un compte SPL Token
-    const SPL_TOKEN_ACCOUNT_AMOUNT_OFFSET: usize = 64;
-    let amount = u64::from_le_bytes(real_token_vault_data[SPL_TOKEN_ACCOUNT_AMOUNT_OFFSET..SPL_TOKEN_ACCOUNT_AMOUNT_OFFSET+8].try_into()?);
-
-    Ok(amount)
-}
-
-// HYDRATE simplifié et corrigé
+// --- HYDRATE FINAL ET CORRECT ---
 pub async fn hydrate(pool: &mut DecodedMeteoraSbpPool, rpc_client: &RpcClient) -> Result<()> {
-    // On lance tout en parallèle
-    let (reserve_a_res, reserve_b_res, mint_a_res, mint_b_res) = tokio::join!(
-        hydrate_reserve_from_proxy_vault(rpc_client, &pool.vault_a),
-        hydrate_reserve_from_proxy_vault(rpc_client, &pool.vault_b),
+    // Étape 1 : Récupérer tous les comptes nécessaires en parallèle
+    let (vault_a_state_res, vault_b_state_res, pool_lp_a_res, pool_lp_b_res, mint_a_res, mint_b_res) = tokio::join!(
+        rpc_client.get_account_data(&pool.vault_a),
+        rpc_client.get_account_data(&pool.vault_b),
+        rpc_client.get_account_data(&pool.a_vault_lp),
+        rpc_client.get_account_data(&pool.b_vault_lp),
         rpc_client.get_account_data(&pool.mint_a),
         rpc_client.get_account_data(&pool.mint_b)
     );
 
-    // On assigne les résultats
-    pool.reserve_a = reserve_a_res?;
-    pool.reserve_b = reserve_b_res?;
+    // Étape 2 : Décoder les décimales des tokens
+    pool.mint_a_decimals = crate::decoders::spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_res?)?.decimals;
+    pool.mint_b_decimals = crate::decoders::spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_res?)?.decimals;
 
-    let mint_a_data = mint_a_res?;
-    let decoded_mint_a = crate::decoders::spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_data)?;
-    pool.mint_a_decimals = decoded_mint_a.decimals;
+    // Étape 3 : Lire la liquidité totale et les adresses des mints de LP depuis les comptes d'état des vaults
+    let vault_a_state_data = vault_a_state_res?;
+    let vault_b_state_data = vault_b_state_res?;
 
-    let mint_b_data = mint_b_res?;
-    let decoded_mint_b = crate::decoders::spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_data)?;
-    pool.mint_b_decimals = decoded_mint_b.decimals;
+    // OFFSETS CORRECTS pour la structure `Vault` du programme `dynamic-vault`
+    const TOTAL_AMOUNT_OFFSET: usize = 8 + 1 + 2; // discriminator + enabled + bumps = 11
+    const LP_MINT_OFFSET: usize = TOTAL_AMOUNT_OFFSET + 8 + 32 + 32 + 32; // + total_amount + token_vault + fee_vault + token_mint = 115
+
+    let total_amount_a: u64 = read_pod(&vault_a_state_data, TOTAL_AMOUNT_OFFSET)?;
+    let vault_a_lp_mint_addr: Pubkey = read_pod(&vault_a_state_data, LP_MINT_OFFSET)?;
+
+    let total_amount_b: u64 = read_pod(&vault_b_state_data, TOTAL_AMOUNT_OFFSET)?;
+    let vault_b_lp_mint_addr: Pubkey = read_pod(&vault_b_state_data, LP_MINT_OFFSET)?;
+
+    // Étape 4 : Récupérer les données des mints de LP
+    let lp_mints_res = rpc_client.get_multiple_accounts(&[vault_a_lp_mint_addr, vault_b_lp_mint_addr]).await?;
+
+    // Étape 5 : Désérialiser les comptes de parts et les mints de LP
+    let pool_lp_a_account = SplTokenAccount::unpack(&pool_lp_a_res?)?;
+    let pool_lp_b_account = SplTokenAccount::unpack(&pool_lp_b_res?)?;
+
+    let vault_a_lp_mint = SplMint::unpack(&lp_mints_res[0].as_ref().ok_or_else(||anyhow!("Vault A LP mint not found"))?.data)?;
+    let vault_b_lp_mint = SplMint::unpack(&lp_mints_res[1].as_ref().ok_or_else(||anyhow!("Vault B LP mint not found"))?.data)?;
+
+    // Étape 6 : Calcul final et exact des réserves du pool
+    if vault_a_lp_mint.supply > 0 {
+        pool.reserve_a = u64::try_from(
+            (total_amount_a as u128)
+                .checked_mul(pool_lp_a_account.amount as u128).unwrap_or(0)
+                .checked_div(vault_a_lp_mint.supply as u128).unwrap_or(0)
+        )?;
+    } else {
+        pool.reserve_a = 0;
+    }
+
+    if vault_b_lp_mint.supply > 0 {
+        pool.reserve_b = u64::try_from(
+            (total_amount_b as u128)
+                .checked_mul(pool_lp_b_account.amount as u128).unwrap_or(0)
+                .checked_div(vault_b_lp_mint.supply as u128).unwrap_or(0)
+        )?;
+    } else {
+        pool.reserve_b = 0;
+    }
 
     Ok(())
 }
-
 
 impl PoolOperations for DecodedMeteoraSbpPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
@@ -146,9 +170,6 @@ impl PoolOperations for DecodedMeteoraSbpPool {
 
         let gross_amount_out = match &self.curve_type {
             MeteoraCurveType::ConstantProduct => {
-                // Cette logique est la version simplifiée qui a donné les résultats les plus précis
-                // lors de nos tests précédents. Elle combine le calcul du slippage sur le montant brut
-                // et un facteur de compensation pour l'erreur de lecture des réserves.
                 let fee_numerator = self.fees.trade_fee_numerator;
                 let fee_denominator = self.fees.trade_fee_denominator;
                 if fee_denominator == 0 { return Ok(0); }
@@ -156,12 +177,12 @@ impl PoolOperations for DecodedMeteoraSbpPool {
                 let fee_amount = (amount_in as u128 * fee_numerator as u128) / fee_denominator as u128;
                 let net_in = (amount_in as u128).saturating_sub(fee_amount);
 
+                // Formule pure, car les réserves sont maintenant parfaites.
                 let numerator = net_in * out_reserve as u128;
-                let denominator = (in_reserve as u128).saturating_add(amount_in as u128);
+                let denominator = (in_reserve as u128).saturating_add(net_in);
                 if denominator == 0 { return Ok(0); }
 
-                // Le facteur de compensation qui corrige la lecture de la totalité du vault
-                (numerator / denominator) * 10
+                (numerator / denominator) as u64
             }
             MeteoraCurveType::Stable { amp, token_multiplier } => {
                 let total_fee_numerator = self.fees.trade_fee_numerator.saturating_add(self.fees.protocol_trade_fee_numerator);
@@ -179,9 +200,9 @@ impl PoolOperations for DecodedMeteoraSbpPool {
                 let norm_out = meteora_stableswap_math::get_quote(norm_in as u64, norm_in_reserve as u64, norm_out_reserve as u64, *amp)? as u128;
                 let amount_out = norm_out / out_mult as u128;
                 let fee = (amount_out * total_fee_numerator as u128) / fee_denominator as u128;
-                amount_out.saturating_sub(fee)
+                (amount_out.saturating_sub(fee)) as u64
             }
         };
-        Ok(gross_amount_out as u64)
+        Ok(gross_amount_out)
     }
 }
