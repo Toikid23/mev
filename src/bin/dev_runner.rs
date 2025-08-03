@@ -285,7 +285,7 @@ async fn test_meteora_amm(rpc_client: &RpcClient) -> Result<()> {
     // <<< MODIFIEZ L'ADRESSE ICI POUR CHANGER DE POOL À TESTER >>>
     //
     // const POOL_ADDRESS: &str = "32D4zRxNc1EssbJieVHfPhZM3rH6CzfUPrWUuWxD9prG"; // Stable (USDC-USDT)
-    const POOL_ADDRESS: &str = "7rQd8FhC1rimV3v9edCRZ6RNFsJN1puXM9UmjaURJRNj"; // Constant Product (WSOL-USELESS)
+    const POOL_ADDRESS: &str = "7rQd8FhC1rimV3v9edCRZ6RNFsJN1puXM9UmjaURJRNj"; // Constant Product (WSOL-NOBODY)
 
     println!("\n--- Test Meteora AMM ({}) ---", POOL_ADDRESS);
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;

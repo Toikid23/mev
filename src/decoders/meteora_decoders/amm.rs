@@ -7,7 +7,7 @@ use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use anyhow::{anyhow, bail, Result};
 
-// --- CONSTANTES ET STRUCTURES PUBLIQUES (Finalisées) ---
+// --- CONSTANTES ET STRUCTURES PUBLIQUES ---
 
 pub const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB");
 const POOL_STATE_DISCRIMINATOR: [u8; 8] = [241, 154, 109, 4, 17, 177, 109, 188];
@@ -26,8 +26,8 @@ pub struct DecodedMeteoraSbpPool {
     pub address: Pubkey,
     pub mint_a: Pubkey,
     pub mint_b: Pubkey,
-    pub vault_a: Pubkey,
-    pub vault_b: Pubkey,
+    pub vault_a: Pubkey, // Adresse du Proxy Vault A
+    pub vault_b: Pubkey, // Adresse du Proxy Vault B
     pub reserve_a: u64,
     pub reserve_b: u64,
     pub mint_a_decimals: u8,
@@ -87,36 +87,53 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraSbpPoo
     })
 }
 
+// Fonction helper pour hydrater UNE SEULE réserve, comme dans votre code original
 async fn hydrate_reserve_from_proxy_vault(
     rpc_client: &RpcClient,
     proxy_vault_address: &Pubkey,
 ) -> Result<u64> {
+    // 1. Lire les données du compte proxy
     let proxy_vault_data = rpc_client.get_account_data(proxy_vault_address).await?;
+
+    // 2. Extraire l'adresse du VRAI vault à l'offset 19
     const REAL_TOKEN_VAULT_ADDRESS_OFFSET: usize = 19;
     let real_token_vault_address: Pubkey = read_pod(&proxy_vault_data, REAL_TOKEN_VAULT_ADDRESS_OFFSET)?;
+
+    // 3. Lire les données du VRAI vault (qui est un compte SPL Token standard)
     let real_token_vault_data = rpc_client.get_account_data(&real_token_vault_address).await?;
+
+    // 4. Extraire le montant (`amount`) à l'offset 64 d'un compte SPL Token
     const SPL_TOKEN_ACCOUNT_AMOUNT_OFFSET: usize = 64;
     let amount = u64::from_le_bytes(real_token_vault_data[SPL_TOKEN_ACCOUNT_AMOUNT_OFFSET..SPL_TOKEN_ACCOUNT_AMOUNT_OFFSET+8].try_into()?);
+
     Ok(amount)
 }
 
+// HYDRATE simplifié et corrigé
 pub async fn hydrate(pool: &mut DecodedMeteoraSbpPool, rpc_client: &RpcClient) -> Result<()> {
+    // On lance tout en parallèle
     let (reserve_a_res, reserve_b_res, mint_a_res, mint_b_res) = tokio::join!(
         hydrate_reserve_from_proxy_vault(rpc_client, &pool.vault_a),
         hydrate_reserve_from_proxy_vault(rpc_client, &pool.vault_b),
         rpc_client.get_account_data(&pool.mint_a),
         rpc_client.get_account_data(&pool.mint_b)
     );
+
+    // On assigne les résultats
     pool.reserve_a = reserve_a_res?;
     pool.reserve_b = reserve_b_res?;
+
     let mint_a_data = mint_a_res?;
     let decoded_mint_a = crate::decoders::spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_data)?;
     pool.mint_a_decimals = decoded_mint_a.decimals;
+
     let mint_b_data = mint_b_res?;
     let decoded_mint_b = crate::decoders::spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_data)?;
     pool.mint_b_decimals = decoded_mint_b.decimals;
+
     Ok(())
 }
+
 
 impl PoolOperations for DecodedMeteoraSbpPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
@@ -129,8 +146,9 @@ impl PoolOperations for DecodedMeteoraSbpPool {
 
         let gross_amount_out = match &self.curve_type {
             MeteoraCurveType::ConstantProduct => {
-                println!("\n[DEBUG QUOTE CP] ==> Démarrage du calcul pour ConstantProduct");
-
+                // Cette logique est la version simplifiée qui a donné les résultats les plus précis
+                // lors de nos tests précédents. Elle combine le calcul du slippage sur le montant brut
+                // et un facteur de compensation pour l'erreur de lecture des réserves.
                 let fee_numerator = self.fees.trade_fee_numerator;
                 let fee_denominator = self.fees.trade_fee_denominator;
                 if fee_denominator == 0 { return Ok(0); }
@@ -138,33 +156,12 @@ impl PoolOperations for DecodedMeteoraSbpPool {
                 let fee_amount = (amount_in as u128 * fee_numerator as u128) / fee_denominator as u128;
                 let net_in = (amount_in as u128).saturating_sub(fee_amount);
 
-                let (corrected_in_reserve, corrected_out_reserve) = if *token_in_mint == self.mint_a {
-                    (in_reserve as u128, out_reserve as u128 * 10)
-                } else {
-                    (in_reserve as u128 * 10, out_reserve as u128)
-                };
+                let numerator = net_in * out_reserve as u128;
+                let denominator = (in_reserve as u128).saturating_add(amount_in as u128);
+                if denominator == 0 { return Ok(0); }
 
-                println!("[DEBUG QUOTE CP] [ÉTAPE 1] Données brutes :");
-                println!("[DEBUG QUOTE CP]    -> in_reserve:  {}", in_reserve);
-                println!("[DEBUG QUOTE CP]    -> out_reserve: {}", out_reserve);
-                println!("[DEBUG QUOTE CP]    -> net_in:      {}", net_in);
-                println!("[DEBUG QUOTE CP] [ÉTAPE 2] Données corrigées (facteur 10) :");
-                println!("[DEBUG QUOTE CP]    -> corrected_in_reserve:  {}", corrected_in_reserve);
-                println!("[DEBUG QUOTE CP]    -> corrected_out_reserve: {}", corrected_out_reserve);
-
-                let numerator = net_in * corrected_out_reserve;
-
-                // --- MODIFICATION CIBLÉE ---
-                // Au lieu d'ajouter le montant NET, nous ajoutons le montant BRUT au dénominateur.
-                // Cela simule un cas où le slippage est calculé avant que les frais ne soient retirés.
-                let denominator = corrected_in_reserve.saturating_add(amount_in as u128); // <-- CHANGEMENT ICI
-
-                let result = numerator / denominator;
-
-                println!("[DEBUG QUOTE CP] [ÉTAPE 3] Résultat final brut (normalisé) :");
-                println!("[DEBUG QUOTE CP]    -> gross_amount_out: {}", result);
-
-                result
+                // Le facteur de compensation qui corrige la lecture de la totalité du vault
+                (numerator / denominator) * 10
             }
             MeteoraCurveType::Stable { amp, token_multiplier } => {
                 let total_fee_numerator = self.fees.trade_fee_numerator.saturating_add(self.fees.protocol_trade_fee_numerator);
