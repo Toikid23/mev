@@ -32,6 +32,7 @@ pub struct DecodedMeteoraDammPool {
     pub mint_a_transfer_fee_bps: u16,
     pub mint_b_transfer_fee_bps: u16,
     pub pool_fees: onchain_layouts::PoolFeesStruct,
+    pub activation_point: u64, // <--- AJOUTEZ CETTE LIGNE
 }
 
 // --- MODULE PRIVE POUR LES STRUCTURES ON-CHAIN ---
@@ -116,15 +117,31 @@ fn get_amount_out(sqrt_price_start: u128, sqrt_price_end: u128, liquidity: u128,
 // --- LOGIQUE DE DECODAGE ET D'HYDRATATION ---
 
 pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraDammPool> {
+    // Étape 1: Vérification du discriminateur (maintenant correct)
     if data.get(..8) != Some(&POOL_STATE_DISCRIMINATOR) {
         bail!("Invalid discriminator. Not a Meteora DAMM v2 Pool account.");
     }
+
+    // Étape 2: On ne travaille que sur la tranche de données utiles.
     let data_slice = &data[8..];
-    let pool_struct: onchain_layouts::Pool = bytemuck::pod_read_unaligned(data_slice);
+
+    // Étape 3 (Pilier #6): Vérifier que la taille des données est suffisante.
+    let expected_size = std::mem::size_of::<onchain_layouts::Pool>();
+    if data_slice.len() < expected_size {
+        bail!(
+            "DAMM v2 Pool data length mismatch. Expected at least {} bytes, got {}.",
+            expected_size,
+            data_slice.len()
+        );
+    }
+
+    // Étape 4 (Pilier #1): Lecture sécurisée en spécifiant la taille exacte.
+    // Ceci évite de lire des bytes de padding ou des données invalides à la fin du compte.
+    let pool_struct: onchain_layouts::Pool = bytemuck::pod_read_unaligned(&data_slice[..expected_size]);
 
     Ok(DecodedMeteoraDammPool {
         address: *address,
-        config_address: None, // N'est plus necessaire
+        config_address: None,
         mint_a: pool_struct.token_a_mint,
         mint_b: pool_struct.token_b_mint,
         vault_a: pool_struct.token_a_vault,
@@ -134,7 +151,8 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraDammPo
         sqrt_min_price: pool_struct.sqrt_min_price,
         sqrt_max_price: pool_struct.sqrt_max_price,
         collect_fee_mode: pool_struct.collect_fee_mode,
-        pool_fees: pool_struct.pool_fees, // On lit les frais directement
+        pool_fees: pool_struct.pool_fees,
+        activation_point: pool_struct.activation_point,
         mint_a_decimals: 0,
         mint_b_decimals: 0,
         mint_a_transfer_fee_bps: 0,
@@ -166,10 +184,10 @@ impl PoolOperations for DecodedMeteoraDammPool {
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
 
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64) -> Result<u64> {
-        let fees = &self.pool_fees;
         if self.liquidity == 0 { return Ok(0); }
 
         let a_to_b = *token_in_mint == self.mint_a;
+
         let (in_mint_fee_bps, out_mint_fee_bps) = if a_to_b {
             (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps)
         } else {
@@ -179,57 +197,95 @@ impl PoolOperations for DecodedMeteoraDammPool {
         let fee_on_input = (amount_in as u128 * in_mint_fee_bps as u128) / 10000;
         let amount_in_after_transfer_fee = amount_in.saturating_sub(fee_on_input as u64);
 
-        // --- DEBUT DE LA LOGIQUE DE FRAIS COMPLETE ---
+        let fees = &self.pool_fees;
+        let current_timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as u64;
 
-        // Etape A: Calculer les frais de base
-        // NOTE: Ceci est une simplification. La logique reelle depend du temps ecoule depuis l'activation.
-        // Pour une simulation hors-chaine precise, nous considerons le cas le plus courant.
-        let base_fee_num = fees.base_fee.cliff_fee_numerator as u128;
+        // Étape A: Calcul des frais de base avec le calendrier (MAINTENANT FIDÈLE AU SDK)
+        let base_fee_num = get_base_fee(&fees.base_fee, current_timestamp, self.activation_point)? as u128;
 
-        // Etape B: Calculer les frais dynamiques
+        // Étape B: Calcul des frais dynamiques
         let dynamic_fee_num = if fees.dynamic_fee.initialized != 0 {
             get_variable_fee(&fees.dynamic_fee)?
         } else {
             0
         };
 
-        let total_fee_num = base_fee_num.saturating_add(dynamic_fee_num);
+        let total_fee_numerator = base_fee_num.saturating_add(dynamic_fee_num);
         const FEE_DENOMINATOR: u128 = 1_000_000_000;
 
-        // Etape C: Determiner ou appliquer les frais (entree ou sortie)
-        let fees_on_input;
-        match (self.collect_fee_mode, a_to_b) {
-            (0, _) => { fees_on_input = false; }, // BothToken: sur la sortie
-            (1, true) => { fees_on_input = false; }, // OnlyB, A->B: sortie est B, donc sur la sortie
-            (1, false) => { fees_on_input = true; }, // OnlyB, B->A: entree est B, donc sur l'entree
+        let fees_on_input = match (self.collect_fee_mode, a_to_b) {
+            (0, _) => false,
+            (1, true) => false,
+            (1, false) => true,
             _ => bail!("Unsupported collect_fee_mode"),
-        }
+        };
 
-        // --- FIN DE LA LOGIQUE DE FRAIS ---
+        let (pre_fee_amount_out, total_fee_amount) = if fees_on_input {
+            let total_fee = (amount_in_after_transfer_fee as u128 * total_fee_numerator) / FEE_DENOMINATOR;
+            let net_in = amount_in_after_transfer_fee.saturating_sub(total_fee as u64);
 
-        let (net_amount_in, pre_fee_amount_out) = if fees_on_input {
-            let fee_amount = (amount_in_after_transfer_fee as u128 * total_fee_num) / FEE_DENOMINATOR;
-            let net_in = amount_in_after_transfer_fee.saturating_sub(fee_amount as u64);
             let next_sqrt_price = get_next_sqrt_price_from_input(self.sqrt_price, self.liquidity, net_in, a_to_b)?;
             let out = get_amount_out(self.sqrt_price, next_sqrt_price, self.liquidity, a_to_b)?;
-            (net_in, out)
+            (out, total_fee)
         } else {
             let next_sqrt_price = get_next_sqrt_price_from_input(self.sqrt_price, self.liquidity, amount_in_after_transfer_fee, a_to_b)?;
             let out = get_amount_out(self.sqrt_price, next_sqrt_price, self.liquidity, a_to_b)?;
-            (amount_in_after_transfer_fee, out)
+            let total_fee = (out as u128 * total_fee_numerator) / FEE_DENOMINATOR;
+            (out, total_fee)
         };
 
-        let net_amount_out = if !fees_on_input {
-            let fee_amount = (pre_fee_amount_out as u128 * total_fee_num) / FEE_DENOMINATOR;
-            pre_fee_amount_out.saturating_sub(fee_amount as u64)
+        // Étape C: Répartition des frais (NOUVELLE LOGIQUE FIDÈLE AU SDK)
+        // Seuls les frais LP sont déduits du montant de l'utilisateur.
+        let protocol_fee = (total_fee_amount * fees.protocol_fee_percent as u128) / 100;
+        let lp_fee = total_fee_amount.saturating_sub(protocol_fee);
+
+        let amount_out_after_pool_fee = if !fees_on_input {
+            pre_fee_amount_out.saturating_sub(lp_fee as u64)
         } else {
             pre_fee_amount_out
         };
 
-        let fee_on_output = (net_amount_out as u128 * out_mint_fee_bps as u128) / 10000;
-        let final_amount_out = net_amount_out.saturating_sub(fee_on_output as u64);
+        let fee_on_output = (amount_out_after_pool_fee as u128 * out_mint_fee_bps as u128) / 10000;
+        let final_amount_out = amount_out_after_pool_fee.saturating_sub(fee_on_output as u64);
 
         Ok(final_amount_out)
+    }
+}
+
+
+// ... (tout le code après l'impl PoolOperations, y compris les fonctions mathématiques, reste inchangé) ...
+// AJOUTER CETTE NOUVELLE FONCTION HELPER (TRADUITE DE `fee_math.rs`)
+fn get_base_fee(base_fee: &onchain_layouts::BaseFeeStruct, current_timestamp: u64, activation_point: u64) -> Result<u64> {
+    if base_fee.period_frequency == 0 {
+        return Ok(base_fee.cliff_fee_numerator);
+    }
+
+    // Si le swap a lieu avant l'activation, on utilise les frais maximums prévus à la fin du calendrier.
+    let period = if current_timestamp < activation_point {
+        base_fee.number_of_period as u64
+    } else {
+        let elapsed = current_timestamp.saturating_sub(activation_point);
+        (elapsed / base_fee.period_frequency).min(base_fee.number_of_period as u64)
+    };
+
+    match base_fee.fee_scheduler_mode {
+        0 => { // Mode Linéaire
+            let reduction = period.saturating_mul(base_fee.reduction_factor);
+            Ok(base_fee.cliff_fee_numerator.saturating_sub(reduction))
+        }
+        1 => { // Mode Exponentiel (simplifié pour `u64`)
+            if base_fee.reduction_factor == 0 {
+                return Ok(base_fee.cliff_fee_numerator);
+            }
+            let mut fee = base_fee.cliff_fee_numerator as u128;
+            // La base de la réduction est 10000 (BASIS_POINT_MAX)
+            let reduction_factor = 10000 - base_fee.reduction_factor as u128;
+            for _ in 0..period {
+                fee = (fee * reduction_factor) / 10000;
+            }
+            Ok(fee as u64)
+        }
+        _ => bail!("Unsupported fee scheduler mode"),
     }
 }
 

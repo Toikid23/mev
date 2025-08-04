@@ -36,7 +36,7 @@ fn print_quote_result<T: PoolOperations + ?Sized>(
             let price = if ui_amount_in > 0.0 { ui_amount_out / ui_amount_in } else { 0.0 };
             println!("-> Succès ! Pour {} UI du token d'entrée, vous obtenez {} UI du token de sortie.", ui_amount_in, ui_amount_out);
             println!("   Token d'entrée: {}", token_in_mint);
-            println!("-> Prix effectif: {:.6}", price);
+            println!("-> Prix effectif: {:.9}", price);
         },
         Err(e) => {
             println!("!! Erreur lors du calcul du quote: {}", e);
@@ -80,7 +80,7 @@ async fn test_dlmm(rpc_client: &RpcClient) -> Result<()> {
         DlmmTestCase {
             pool_address: "9KUSnaqA7oWRfhHLut63aFCSdmybyFgnQBeJm9yudZXZ", // ANI-WSOL
             input_token_mint: "9tqjeRS1swj36Ee5C1iGiwAxjQJNGAVCzaTLwFY8bonk", // ANI
-            input_amount_ui: 1000.0,
+            input_amount_ui: 3600.0,
             description: "ANI-WSOL (Vente de 1000 ANI)",
         },
     ];

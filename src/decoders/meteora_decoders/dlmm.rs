@@ -46,84 +46,54 @@ impl DecodedDlmmPool {
         let mut temp_v_params = self.v_parameters;
         let current_timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
 
-        //println!("[DEBUG] === DEBUT SWAP ===");
-        //println!("[DEBUG] Initial State: active_id={}, v_params={:?}", self.active_bin_id, self.v_parameters);
-
+        // La mise à jour de référence n'est faite qu'une seule fois au début.
         update_references(&mut temp_v_params, &self.parameters, self.active_bin_id, current_timestamp)?;
 
         while amount_remaining > 0 {
-            //println!("\n[DEBUG] Loop Start: amount_remaining={}, current_bin_id={}", amount_remaining, current_bin_id);
-            if current_bin_id < self.parameters.min_bin_id || current_bin_id > self.parameters.max_bin_id {
-                //println!("[DEBUG] Stop: Bin ID out of pool range.");
-                break;
-            }
+            if current_bin_id < self.parameters.min_bin_id || current_bin_id > self.parameters.max_bin_id { break; }
 
             let bin_array_idx = get_bin_array_index_from_bin_id(current_bin_id);
-            let bin_array = match bin_arrays.get(&bin_array_idx) {
-                Some(array) => array,
-                None => {
-                    //println!("[DEBUG] Stop: BinArray index {} not found in hydrated map.", bin_array_idx);
-                    break;
-                }
-            };
+            let bin_array = match bin_arrays.get(&bin_array_idx) { Some(array) => array, None => break };
 
             let bin_index_in_array = (current_bin_id % (MAX_BIN_PER_ARRAY as i32) + (MAX_BIN_PER_ARRAY as i32)) % (MAX_BIN_PER_ARRAY as i32);
             let current_bin = &bin_array.bins[bin_index_in_array as usize];
+
             let (in_reserve, _) = if swap_for_y { (current_bin.amount_a, current_bin.amount_b) } else { (current_bin.amount_b, current_bin.amount_a) };
-
-            //println!("[DEBUG] Bin {}: reserve_a={}, reserve_b={}, price={}", current_bin_id, current_bin.amount_a, current_bin.amount_b, current_bin.price);
-
             if in_reserve == 0 {
-                //println!("[DEBUG] Bin a une réserve de 0. Passage au suivant.");
                 current_bin_id = if swap_for_y { current_bin_id.saturating_sub(1) } else { current_bin_id.saturating_add(1) };
                 continue;
             }
 
+            // --- CORRECTION FINALE DE LA LOGIQUE DE VOLATILITÉ ---
+            // 1. On met à jour l'accumulateur basé sur la distance parcourue.
             update_volatility_accumulator(&mut temp_v_params, &self.parameters, self.active_bin_id, current_bin_id)?;
-            //println!("[DEBUG] Updated v_params: {:?}", temp_v_params);
-
+            // 2. On calcule les frais avec CET état de volatilité.
             let total_fee_rate = get_total_fee(self.bin_step, &self.parameters, &temp_v_params)?;
-            //println!("[DEBUG] Calculated total_fee_rate: {} (sur une base de {})", total_fee_rate, FEE_PRECISION);
-
-            if total_fee_rate >= FEE_PRECISION {
-                //println!("[DEBUG] ERREUR: total_fee_rate >= FEE_PRECISION. Arrêt du swap.");
-                break;
-            }
 
             let max_amount_in_for_bin_with_fees = compute_amount_in_with_fees(in_reserve as u128, total_fee_rate)?;
-            //println!("[DEBUG] max_amount_in_for_bin_with_fees: {}", max_amount_in_for_bin_with_fees);
-
             let amount_to_process_with_fees = amount_remaining.min(max_amount_in_for_bin_with_fees);
-            //println!("[DEBUG] amount_to_process_with_fees: {}", amount_to_process_with_fees);
 
             let fee = (amount_to_process_with_fees * total_fee_rate) / FEE_PRECISION;
-            //println!("[DEBUG] fee: {}", fee);
-
             let net_amount_in = amount_to_process_with_fees.saturating_sub(fee);
-            //println!("[DEBUG] net_amount_in: {}", net_amount_in);
 
-            if net_amount_in == 0 {
-                //println!("[DEBUG] net_amount_in est 0, le swap ne peut pas progresser.");
-                break;
-            }
+            if net_amount_in == 0 { break; } // Prévention d'une boucle infinie si les frais sont trop élevés
 
             let amount_out_chunk = dlmm_math::get_amount_out(net_amount_in as u64, current_bin.price, swap_for_y)?;
-            //println!("[DEBUG] amount_out_chunk: {}", amount_out_chunk);
 
             total_amount_out += amount_out_chunk as u128;
             amount_remaining -= amount_to_process_with_fees;
 
-            //println!("[DEBUG] Loop End: total_amount_out={}, amount_remaining={}", total_amount_out, amount_remaining);
+            if amount_to_process_with_fees < max_amount_in_for_bin_with_fees { break; }
 
-            if amount_to_process_with_fees < max_amount_in_for_bin_with_fees {
-                //println!("[DEBUG] Stop: Swap partiel dans le bin, tout le montant a été traité.");
-                break;
-            }
+            // 3. LA CORRECTION CRUCIALE : On met à jour la référence de volatilité APRÈS avoir traité le bin.
+            //    Cela simule le programme qui change son état avant de passer à l'itération suivante.
+            temp_v_params.volatility_reference = temp_v_params.volatility_accumulator;
+            temp_v_params.index_reference = current_bin_id;
+            // --- FIN DE LA CORRECTION ---
+
             current_bin_id = if swap_for_y { current_bin_id.saturating_sub(1) } else { current_bin_id.saturating_add(1) };
         }
 
-        //println!("[DEBUG] === FIN SWAP ===");
-        //println!("[DEBUG] Final total_amount_out: {}", total_amount_out);
         Ok(total_amount_out as u64)
     }
 }
