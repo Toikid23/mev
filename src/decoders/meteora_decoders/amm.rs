@@ -36,9 +36,11 @@ mod onchain_vault_layouts {
         pub fee_vault: Pubkey,
         pub token_mint: Pubkey,
         pub lp_mint: Pubkey,
-        // Le reste de la structure n'est pas nécessaire
+        // Le reste de la structure n'est pas nécessaire pour nous.
     }
 }
+
+
 
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,8 +146,8 @@ pub async fn hydrate(pool: &mut DecodedMeteoraSbpPool, rpc_client: &RpcClient) -
     let vault_b_data = vault_b_state_res?;
 
     // On vérifie la taille avant de décoder pour éviter les panics
-    if vault_a_data.len() < 8 + std::mem::size_of::<onchain_vault_layouts::Vault>() ||
-        vault_b_data.len() < 8 + std::mem::size_of::<onchain_vault_layouts::Vault>() {
+    let expected_size = std::mem::size_of::<onchain_vault_layouts::Vault>();
+    if vault_a_data.len() < 8 + expected_size || vault_b_data.len() < 8 + expected_size {
         bail!("Vault account data is too short.");
     }
 
