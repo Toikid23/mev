@@ -4,6 +4,8 @@ use anyhow::Result;
 use uint::construct_uint;
 
 construct_uint! { pub struct U256(4); }
+// Pilier #1: Précision Mathématique - Utilisation de la constante de frais exacte du SDK.
+pub const FEE_PRECISION: u128 = 1_000_000_000;
 
 
 pub fn get_amount_out(
