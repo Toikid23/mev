@@ -15,6 +15,32 @@ use anyhow::{anyhow, bail, Result};
 pub const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB");
 const POOL_STATE_DISCRIMINATOR: [u8; 8] = [241, 154, 109, 4, 17, 177, 109, 188];
 
+
+mod onchain_vault_layouts {
+    use super::*;
+
+    #[repr(C, packed)]
+    #[derive(Clone, Copy, Pod, Zeroable, Debug)]
+    pub struct VaultBumps {
+        pub vault_bump: u8,
+        pub token_vault_bump: u8,
+    }
+
+    #[repr(C, packed)]
+    #[derive(Clone, Copy, Pod, Zeroable, Debug)]
+    pub struct Vault {
+        pub enabled: u8,
+        pub bumps: VaultBumps,
+        pub total_amount: u64,
+        pub token_vault: Pubkey,
+        pub fee_vault: Pubkey,
+        pub token_mint: Pubkey,
+        pub lp_mint: Pubkey,
+        // Le reste de la structure n'est pas nécessaire
+    }
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MeteoraCurveType {
     ConstantProduct,
@@ -97,7 +123,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraSbpPoo
 
 // --- HYDRATE FINAL ET CORRECT ---
 pub async fn hydrate(pool: &mut DecodedMeteoraSbpPool, rpc_client: &RpcClient) -> Result<()> {
-    // Étape 1 : Récupérer tous les comptes nécessaires en parallèle
+    // Étape 1 : Récupérer tous les comptes nécessaires en parallèle (inchangé)
     let (vault_a_state_res, vault_b_state_res, pool_lp_a_res, pool_lp_b_res, mint_a_res, mint_b_res) = tokio::join!(
         rpc_client.get_account_data(&pool.vault_a),
         rpc_client.get_account_data(&pool.vault_b),
@@ -107,40 +133,60 @@ pub async fn hydrate(pool: &mut DecodedMeteoraSbpPool, rpc_client: &RpcClient) -
         rpc_client.get_account_data(&pool.mint_b)
     );
 
-    // Étape 2 : Décoder les décimales des tokens
-    pool.mint_a_decimals = crate::decoders::spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_res?)?.decimals;
-    pool.mint_b_decimals = crate::decoders::spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_res?)?.decimals;
+    // Étape 2 : Décoder les décimales des tokens (inchangé)
+    pool.mint_a_decimals =
+        crate::decoders::spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_res?)?.decimals;
+    pool.mint_b_decimals =
+        crate::decoders::spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_res?)?.decimals;
 
-    // Étape 3 : Lire la liquidité totale et les adresses des mints de LP depuis les comptes d'état des vaults
-    let vault_a_state_data = vault_a_state_res?;
-    let vault_b_state_data = vault_b_state_res?;
+    // Étape 3 : Désérialiser les comptes Vault de manière robuste
+    let vault_a_data = vault_a_state_res?;
+    let vault_b_data = vault_b_state_res?;
 
-    // OFFSETS CORRECTS pour la structure `Vault` du programme `dynamic-vault`
-    const TOTAL_AMOUNT_OFFSET: usize = 8 + 1 + 2; // discriminator + enabled + bumps = 11
-    const LP_MINT_OFFSET: usize = TOTAL_AMOUNT_OFFSET + 8 + 32 + 32 + 32; // + total_amount + token_vault + fee_vault + token_mint = 115
+    // On vérifie la taille avant de décoder pour éviter les panics
+    if vault_a_data.len() < 8 + std::mem::size_of::<onchain_vault_layouts::Vault>() ||
+        vault_b_data.len() < 8 + std::mem::size_of::<onchain_vault_layouts::Vault>() {
+        bail!("Vault account data is too short.");
+    }
 
-    let total_amount_a: u64 = read_pod(&vault_a_state_data, TOTAL_AMOUNT_OFFSET)?;
-    let vault_a_lp_mint_addr: Pubkey = read_pod(&vault_a_state_data, LP_MINT_OFFSET)?;
+    // On ignore les 8 bytes du discriminateur d'Anchor et on "caste" les données
+    let vault_a_struct: &onchain_vault_layouts::Vault = bytemuck::from_bytes(&vault_a_data[8..]);
+    let vault_b_struct: &onchain_vault_layouts::Vault = bytemuck::from_bytes(&vault_b_data[8..]);
 
-    let total_amount_b: u64 = read_pod(&vault_b_state_data, TOTAL_AMOUNT_OFFSET)?;
-    let vault_b_lp_mint_addr: Pubkey = read_pod(&vault_b_state_data, LP_MINT_OFFSET)?;
+    let total_amount_a = vault_a_struct.total_amount;
+    let vault_a_lp_mint_addr = vault_a_struct.lp_mint;
 
-    // Étape 4 : Récupérer les données des mints de LP
-    let lp_mints_res = rpc_client.get_multiple_accounts(&[vault_a_lp_mint_addr, vault_b_lp_mint_addr]).await?;
+    let total_amount_b = vault_b_struct.total_amount;
+    let vault_b_lp_mint_addr = vault_b_struct.lp_mint;
 
-    // Étape 5 : Désérialiser les comptes de parts et les mints de LP
+    // Le reste de la logique est identique et déjà correcte
+    let lp_mints_res = rpc_client
+        .get_multiple_accounts(&[vault_a_lp_mint_addr, vault_b_lp_mint_addr])
+        .await?;
+
     let pool_lp_a_account = SplTokenAccount::unpack(&pool_lp_a_res?)?;
     let pool_lp_b_account = SplTokenAccount::unpack(&pool_lp_b_res?)?;
 
-    let vault_a_lp_mint = SplMint::unpack(&lp_mints_res[0].as_ref().ok_or_else(||anyhow!("Vault A LP mint not found"))?.data)?;
-    let vault_b_lp_mint = SplMint::unpack(&lp_mints_res[1].as_ref().ok_or_else(||anyhow!("Vault B LP mint not found"))?.data)?;
+    let vault_a_lp_mint = SplMint::unpack(
+        &lp_mints_res[0]
+            .as_ref()
+            .ok_or_else(|| anyhow!("Vault A LP mint not found"))?
+            .data,
+    )?;
+    let vault_b_lp_mint = SplMint::unpack(
+        &lp_mints_res[1]
+            .as_ref()
+            .ok_or_else(|| anyhow!("Vault B LP mint not found"))?
+            .data,
+    )?;
 
-    // Étape 6 : Calcul final et exact des réserves du pool
     if vault_a_lp_mint.supply > 0 {
         pool.reserve_a = u64::try_from(
             (total_amount_a as u128)
-                .checked_mul(pool_lp_a_account.amount as u128).unwrap_or(0)
-                .checked_div(vault_a_lp_mint.supply as u128).unwrap_or(0)
+                .checked_mul(pool_lp_a_account.amount as u128)
+                .unwrap_or(0)
+                .checked_div(vault_a_lp_mint.supply as u128)
+                .unwrap_or(0),
         )?;
     } else {
         pool.reserve_a = 0;
@@ -149,8 +195,10 @@ pub async fn hydrate(pool: &mut DecodedMeteoraSbpPool, rpc_client: &RpcClient) -
     if vault_b_lp_mint.supply > 0 {
         pool.reserve_b = u64::try_from(
             (total_amount_b as u128)
-                .checked_mul(pool_lp_b_account.amount as u128).unwrap_or(0)
-                .checked_div(vault_b_lp_mint.supply as u128).unwrap_or(0)
+                .checked_mul(pool_lp_b_account.amount as u128)
+                .unwrap_or(0)
+                .checked_div(vault_b_lp_mint.supply as u128)
+                .unwrap_or(0),
         )?;
     } else {
         pool.reserve_b = 0;
