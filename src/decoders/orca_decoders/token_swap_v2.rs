@@ -136,7 +136,7 @@ pub async fn hydrate(pool: &mut DecodedOrcaAmmPool, rpc_client: &RpcClient) -> R
 impl PoolOperations for DecodedOrcaAmmPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
-    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64) -> Result<u64> {
+    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
         if self.trade_fee_denominator == 0 || self.reserve_a == 0 || self.reserve_b == 0 { return Ok(0); }
         let (in_reserve, out_reserve, in_mint_fee_bps, out_mint_fee_bps) = if *token_in_mint == self.mint_a {
             (self.reserve_a, self.reserve_b, self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps)

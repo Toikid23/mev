@@ -106,7 +106,7 @@ impl PoolOperations for DecodedStableSwapPool {
         (self.vault_a, self.vault_b)
     }
 
-    fn get_quote(&self, _token_in_mint: &Pubkey, _amount_in: u64) -> Result<u64> {
+    fn get_quote(&self, _token_in_mint: &Pubkey, _amount_in: u64, _current_timestamp: i64) -> Result<u64> {
         // La logique de calcul pour un Stable Swap est très complexe et dépend de `amp`.
         // On la laisse en placeholder pour l'instant.
         Err(anyhow!("get_quote for Raydium Stable Swap is not implemented yet."))

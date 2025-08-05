@@ -118,7 +118,7 @@ impl PoolOperations for DecodedCpmmPool {
         (self.token_0_vault, self.token_1_vault)
     }
 
-    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64) -> Result<u64> {
+    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
         // --- 1. Appliquer les frais de transfert sur l'INPUT ---
         let (in_mint_fee_bps, out_mint_fee_bps, in_reserve, out_reserve) = if *token_in_mint == self.token_0_mint {
             (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps, self.reserve_a, self.reserve_b)

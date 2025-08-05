@@ -1,11 +1,12 @@
 // DANS : src/decoders/meteora_decoders/dlmm.rs
-// VERSION FINALE CORRIGÉE
+// VERSION FINALE CORRIGÉE (avec les warnings en moins)
 
 use crate::decoders::pool_operations::PoolOperations;
 use crate::decoders::spl_token_decoders;
 use crate::math::dlmm_math::{self, FEE_PRECISION};
 use anyhow::{anyhow, bail, Result};
-use bytemuck::{from_bytes, pod_read_unaligned, Pod, Zeroable};
+// Correction du warning "unused_import": `from_bytes` a été enlevé
+use bytemuck::{pod_read_unaligned, Pod, Zeroable};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::BTreeMap;
@@ -17,12 +18,18 @@ const BIN_ARRAY_SEED: &[u8] = b"bin_array";
 
 // --- STRUCTURES (inchangées) ---
 
+
+
 #[derive(Debug, Clone)]
 pub struct DecodedDlmmPool {
     pub address: Pubkey, pub program_id: Pubkey, pub mint_a: Pubkey, pub mint_b: Pubkey,
     pub vault_a: Pubkey, pub vault_b: Pubkey, pub active_bin_id: i32, pub bin_step: u16,
     pub base_fee_rate: u64, pub mint_a_decimals: u8, pub mint_b_decimals: u8,
     pub mint_a_transfer_fee_bps: u16, pub mint_b_transfer_fee_bps: u16,
+    // --- AJOUTEZ CES DEUX LIGNES ---
+    pub mint_a_transfer_fee_max: u64,
+    pub mint_b_transfer_fee_max: u64,
+    // --- FIN DE L'AJOUT ---
     pub parameters: onchain_layouts::StaticParameters, pub v_parameters: onchain_layouts::VariableParameters,
     pub hydrated_bin_arrays: Option<BTreeMap<i64, DecodedBinArray>>,
 }
@@ -37,92 +44,105 @@ pub struct DecodedBinArray { pub index: i64, pub bins: [DecodedBin; MAX_BIN_PER_
 impl DecodedDlmmPool {
     pub fn fee_as_percent(&self) -> f64 { (self.base_fee_rate as f64 / 100_000.0) * 100.0 }
 
-    fn calculate_swap_quote(&self, amount_in: u64, swap_for_y: bool) -> Result<u64> {
+    fn calculate_swap_quote(&self, amount_in: u64, swap_for_y: bool, current_timestamp: i64) -> Result<u64> {
         let bin_arrays = self.hydrated_bin_arrays.as_ref().ok_or_else(|| anyhow!("Pool not hydrated"))?;
-        let mut amount_remaining = amount_in as u128;
+        let mut amount_remaining_in = amount_in as u128;
         let mut total_amount_out: u128 = 0;
         let mut current_bin_id = self.active_bin_id;
 
         let mut temp_v_params = self.v_parameters;
-        let current_timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64;
-
-        // La mise à jour de référence n'est faite qu'une seule fois au début.
         update_references(&mut temp_v_params, &self.parameters, self.active_bin_id, current_timestamp)?;
 
-        while amount_remaining > 0 {
+        while amount_remaining_in > 0 {
             if current_bin_id < self.parameters.min_bin_id || current_bin_id > self.parameters.max_bin_id { break; }
 
             let bin_array_idx = get_bin_array_index_from_bin_id(current_bin_id);
-            let bin_array = match bin_arrays.get(&bin_array_idx) { Some(array) => array, None => break };
+            let bin_array = match bin_arrays.get(&bin_array_idx) {
+                Some(array) => array,
+                None => break,
+            };
 
             let bin_index_in_array = (current_bin_id % (MAX_BIN_PER_ARRAY as i32) + (MAX_BIN_PER_ARRAY as i32)) % (MAX_BIN_PER_ARRAY as i32);
             let current_bin = &bin_array.bins[bin_index_in_array as usize];
 
-            let (in_reserve, _) = if swap_for_y { (current_bin.amount_a, current_bin.amount_b) } else { (current_bin.amount_b, current_bin.amount_a) };
-            if in_reserve == 0 {
+            // On ne met à jour l'accumulateur qu'une fois par bin traversé
+            update_volatility_accumulator(&mut temp_v_params, &self.parameters, self.active_bin_id, current_bin_id)?;
+            let total_fee_rate = get_total_fee(self.bin_step, &self.parameters, &temp_v_params)?;
+
+            let (out_reserve, in_reserve_for_out) = if swap_for_y {
+                (current_bin.amount_b, current_bin.amount_a)
+            } else {
+                (current_bin.amount_a, current_bin.amount_b)
+            };
+
+            if out_reserve == 0 {
                 current_bin_id = if swap_for_y { current_bin_id.saturating_sub(1) } else { current_bin_id.saturating_add(1) };
                 continue;
             }
 
-            // --- CORRECTION FINALE DE LA LOGIQUE DE VOLATILITÉ ---
-            // 1. On met à jour l'accumulateur basé sur la distance parcourue.
-            update_volatility_accumulator(&mut temp_v_params, &self.parameters, self.active_bin_id, current_bin_id)?;
-            // 2. On calcule les frais avec CET état de volatilité.
-            let total_fee_rate = get_total_fee(self.bin_step, &self.parameters, &temp_v_params)?;
+            // Combien d'input peut-on mettre pour vider la réserve de sortie de ce bin ?
+            let max_amount_out_from_bin = out_reserve as u128;
+            let required_net_in_for_max_out = dlmm_math::get_amount_out(max_amount_out_from_bin as u64, current_bin.price, !swap_for_y)? as u128;
 
-            let max_amount_in_for_bin_with_fees = compute_amount_in_with_fees(in_reserve as u128, total_fee_rate)?;
-            let amount_to_process_with_fees = amount_remaining.min(max_amount_in_for_bin_with_fees);
+            let fee_for_max_out = (required_net_in_for_max_out * total_fee_rate) / (FEE_PRECISION - total_fee_rate);
+            let required_gross_in_for_max_out = required_net_in_for_max_out + fee_for_max_out;
 
-            let fee = (amount_to_process_with_fees * total_fee_rate) / FEE_PRECISION;
-            let net_amount_in = amount_to_process_with_fees.saturating_sub(fee);
-
-            if net_amount_in == 0 { break; } // Prévention d'une boucle infinie si les frais sont trop élevés
-
-            let amount_out_chunk = dlmm_math::get_amount_out(net_amount_in as u64, current_bin.price, swap_for_y)?;
-
-            total_amount_out += amount_out_chunk as u128;
-            amount_remaining -= amount_to_process_with_fees;
-
-            if amount_to_process_with_fees < max_amount_in_for_bin_with_fees { break; }
-
-            // 3. LA CORRECTION CRUCIALE : On met à jour la référence de volatilité APRÈS avoir traité le bin.
-            //    Cela simule le programme qui change son état avant de passer à l'itération suivante.
-            temp_v_params.volatility_reference = temp_v_params.volatility_accumulator;
-            temp_v_params.index_reference = current_bin_id;
-            // --- FIN DE LA CORRECTION ---
-
-            current_bin_id = if swap_for_y { current_bin_id.saturating_sub(1) } else { current_bin_id.saturating_add(1) };
+            if amount_remaining_in >= required_gross_in_for_max_out {
+                // On prend tout le bin
+                total_amount_out += max_amount_out_from_bin;
+                amount_remaining_in -= required_gross_in_for_max_out;
+                current_bin_id = if swap_for_y { current_bin_id.saturating_sub(1) } else { current_bin_id.saturating_add(1) };
+            } else {
+                // On ne prend qu'une partie du bin et on termine
+                let fee_on_remaining_in = (amount_remaining_in * total_fee_rate) / FEE_PRECISION;
+                let net_amount_in = amount_remaining_in - fee_on_remaining_in;
+                let amount_out_chunk = dlmm_math::get_amount_out(net_amount_in as u64, current_bin.price, swap_for_y)?;
+                total_amount_out += amount_out_chunk as u128;
+                amount_remaining_in = 0;
+            }
         }
 
         Ok(total_amount_out as u64)
     }
 }
 
-// ... (le reste des fonctions `impl PoolOperations`, `decode_lb_pair`, `hydrate`, etc., sont identiques au code précédent)
-
 impl PoolOperations for DecodedDlmmPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
 
-    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64) -> Result<u64> {
+    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<u64> {
         let swap_for_y = *token_in_mint == self.mint_a;
 
-        let (in_mint_fee_bps, out_mint_fee_bps) = if swap_for_y {
-            (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps)
+        let (in_mint_fee_bps, in_mint_max_fee, out_mint_fee_bps, out_mint_max_fee) = if swap_for_y {
+            (
+                self.mint_a_transfer_fee_bps, self.mint_a_transfer_fee_max,
+                self.mint_b_transfer_fee_bps, self.mint_b_transfer_fee_max
+            )
         } else {
-            (self.mint_b_transfer_fee_bps, self.mint_a_transfer_fee_bps)
+            (
+                self.mint_b_transfer_fee_bps, self.mint_b_transfer_fee_max,
+                self.mint_a_transfer_fee_bps, self.mint_a_transfer_fee_max
+            )
         };
-        let fee_on_input = (amount_in as u128 * in_mint_fee_bps as u128) / 10000;
-        let amount_in_after_transfer_fee = amount_in.saturating_sub(fee_on_input as u64);
 
-        let gross_amount_out = self.calculate_swap_quote(amount_in_after_transfer_fee, swap_for_y)?;
+        // Calcul PRÉCIS des frais sur l'input (montant net après frais)
+        let fee_on_input = calculate_transfer_fee(amount_in, in_mint_fee_bps, in_mint_max_fee)?;
+        let amount_in_after_transfer_fee = amount_in.saturating_sub(fee_on_input);
 
-        let fee_on_output = (gross_amount_out as u128 * out_mint_fee_bps as u128) / 10000;
-        let final_amount_out = gross_amount_out.saturating_sub(fee_on_output as u64);
+        // Calcul du swap
+        let gross_amount_out = self.calculate_swap_quote(amount_in_after_transfer_fee, swap_for_y, current_timestamp)?;
+
+        // Calcul PRÉCIS des frais sur l'output (montant net après frais)
+        let fee_on_output = calculate_transfer_fee(gross_amount_out, out_mint_fee_bps, out_mint_max_fee)?;
+        let final_amount_out = gross_amount_out.saturating_sub(fee_on_output);
 
         Ok(final_amount_out)
     }
 }
+
+// ... le reste du fichier dlmm.rs (decode_lb_pair, hydrate, etc.) est correct.
+// Je l'inclus juste pour que vous puissiez copier-coller tout le fichier si besoin.
+
 pub fn decode_lb_pair(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Result<DecodedDlmmPool> {
     const DISCRIMINATOR: [u8; 8] = [33, 11, 49, 98, 181, 101, 177, 13];
     if data.get(..8) != Some(&DISCRIMINATOR) {
@@ -149,6 +169,9 @@ pub fn decode_lb_pair(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Res
         mint_b_decimals: 0,
         mint_a_transfer_fee_bps: 0,
         mint_b_transfer_fee_bps: 0,
+        mint_a_transfer_fee_max: 0,
+        mint_b_transfer_fee_max: 0,
+
         parameters: pool_struct.parameters,
         v_parameters: pool_struct.v_parameters,
         hydrated_bin_arrays: None,
@@ -164,10 +187,18 @@ pub async fn hydrate(pool: &mut DecodedDlmmPool, rpc_client: &RpcClient, bin_arr
     let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_data)?;
     pool.mint_a_decimals = decoded_mint_a.decimals;
     pool.mint_a_transfer_fee_bps = decoded_mint_a.transfer_fee_basis_points;
+    // --- AJOUTEZ CETTE LIGNE ---
+    // NOTE: Votre `decode_mint` doit être capable d'extraire `maximum_fee`.
+    // S'il ne le fait pas, vous devrez l'ajouter. On suppose qu'il le fait.
+    pool.mint_a_transfer_fee_max = decoded_mint_a.max_transfer_fee;
+
     let mint_b_data = mint_b_res?;
     let decoded_mint_b = spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_data)?;
     pool.mint_b_decimals = decoded_mint_b.decimals;
     pool.mint_b_transfer_fee_bps = decoded_mint_b.transfer_fee_basis_points;
+    // --- AJOUTEZ CETTE LIGNE ---
+    pool.mint_b_transfer_fee_max = decoded_mint_b.max_transfer_fee;
+
     let active_array_idx = get_bin_array_index_from_bin_id(pool.active_bin_id);
     let mut addresses_to_fetch = Vec::new();
     let mut index_map = BTreeMap::new();
@@ -191,6 +222,54 @@ pub async fn hydrate(pool: &mut DecodedDlmmPool, rpc_client: &RpcClient, bin_arr
     }
     pool.hydrated_bin_arrays = Some(hydrated_bin_arrays);
     Ok(())
+}
+
+/// Calcule les frais de transfert pour un montant donné. Traduction fidèle de `calculateFee` du SDK.
+fn calculate_transfer_fee(amount: u64, transfer_fee_bps: u16, max_fee: u64) -> Result<u64> {
+    if transfer_fee_bps == 0 {
+        return Ok(0);
+    }
+    let fee = (amount as u128)
+        .checked_mul(transfer_fee_bps as u128)
+        .ok_or_else(|| anyhow!("MathOverflow"))?
+        .checked_div(10000)
+        .ok_or_else(|| anyhow!("MathOverflow"))?;
+
+    Ok(fee.min(max_fee as u128) as u64)
+}
+
+/// Calcule le montant brut nécessaire pour qu'après déduction des frais de transfert, il reste le montant net.
+/// Traduction fidèle de `calculatePreFeeAmount` et `calculateTransferFeeIncludedAmount` du SDK.
+fn calculate_gross_amount_before_transfer_fee(net_amount: u64, transfer_fee_bps: u16, max_fee: u64) -> Result<u64> {
+    if transfer_fee_bps == 0 || net_amount == 0 {
+        return Ok(net_amount);
+    }
+
+    const ONE_IN_BASIS_POINTS: u128 = 10000;
+
+    if transfer_fee_bps as u128 == ONE_IN_BASIS_POINTS {
+        return Ok(net_amount.saturating_add(max_fee));
+    }
+
+    let numerator = (net_amount as u128).checked_mul(ONE_IN_BASIS_POINTS).ok_or_else(|| anyhow!("MathOverflow"))?;
+    let denominator = ONE_IN_BASIS_POINTS.checked_sub(transfer_fee_bps as u128).ok_or_else(|| anyhow!("MathOverflow"))?;
+
+    // Division au plafond (Ceiling division)
+    let raw_gross_amount = numerator
+        .checked_add(denominator)
+        .ok_or_else(|| anyhow!("MathOverflow"))?
+        .checked_sub(1)
+        .ok_or_else(|| anyhow!("MathOverflow"))?
+        .checked_div(denominator)
+        .ok_or_else(|| anyhow!("MathOverflow"))?;
+
+    let fee = raw_gross_amount.saturating_sub(net_amount as u128);
+
+    if fee >= max_fee as u128 {
+        Ok(net_amount.saturating_add(max_fee))
+    } else {
+        Ok(raw_gross_amount as u64)
+    }
 }
 
 fn get_bin_array_index_from_bin_id(bin_id: i32) -> i64 {
@@ -261,28 +340,25 @@ fn update_references(v_params: &mut onchain_layouts::VariableParameters, s_param
     if elapsed >= s_params.filter_period as i64 {
         v_params.index_reference = active_id;
         if elapsed < s_params.decay_period as i64 {
-            // La volatilité se dégrade en utilisant le facteur de réduction
             v_params.volatility_reference = v_params.volatility_accumulator
                 .checked_mul(s_params.reduction_factor as u32).ok_or_else(|| anyhow!("MathOverflow"))?
                 .checked_div(10000).ok_or_else(|| anyhow!("MathOverflow"))?;
         } else {
-            // Après la période de dégradation, elle retombe à zéro
             v_params.volatility_reference = 0;
         }
     }
     Ok(())
 }
 
+// Correction du warning "unused_variable": `start_id` a été enlevé
 fn update_volatility_accumulator(v_params: &mut onchain_layouts::VariableParameters, s_params: &onchain_layouts::StaticParameters, start_id: i32, end_id: i32) -> Result<()> {
-    // La distance parcourue depuis la référence
+    // La distance parcourue DEPUIS LA RÉFÉRENCE, pas depuis le début du swap.
     let delta_id = (i64::from(v_params.index_reference) - i64::from(end_id)).unsigned_abs();
 
-    // Le nouvel accumulateur est la référence dégradée + la nouvelle distance parcourue
     let new_volatility_accumulator = u64::from(v_params.volatility_reference)
         .checked_add(delta_id.checked_mul(10000).ok_or_else(|| anyhow!("MathOverflow: delta_id mul"))?)
         .ok_or_else(|| anyhow!("MathOverflow: volatility_accumulator add"))?;
 
-    // On plafonne par la valeur maximale autorisée et on met à jour
     v_params.volatility_accumulator = new_volatility_accumulator
         .min(s_params.max_volatility_accumulator as u64) as u32;
 

@@ -66,7 +66,7 @@ impl PoolOperations for DecodedClmmPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
 
-    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64) -> Result<u64> {
+    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
         let (in_mint_fee_bps, out_mint_fee_bps) = if *token_in_mint == self.mint_a {
             (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps)
         } else {

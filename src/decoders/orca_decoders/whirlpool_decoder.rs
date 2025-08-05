@@ -256,7 +256,7 @@ impl PoolOperations for DecodedWhirlpoolPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
 
-    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64) -> Result<u64> {
+    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
         let tick_arrays = self.tick_arrays.as_ref().ok_or_else(|| anyhow!("Pool is not hydrated."))?;
         // CORRECTION: Si aucun tick n'est trouvé, la liquidité est peut-être dans le tick actuel, mais si l'array n'est pas là, c'est 0.
         if tick_arrays.is_empty() { return Ok(0); }

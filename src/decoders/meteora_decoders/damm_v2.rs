@@ -3,11 +3,11 @@
 use crate::decoders::pool_operations::PoolOperations;
 use crate::decoders::spl_token_decoders;
 use anyhow::{anyhow, bail, Result};
-use bytemuck::{from_bytes, Pod, Zeroable};
+use bytemuck::{Pod, Zeroable};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use uint::construct_uint;
-use bytemuck::pod_read_unaligned;
+
 
 construct_uint! { pub struct U256(4); }
 
@@ -183,7 +183,7 @@ impl PoolOperations for DecodedMeteoraDammPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
 
-    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64) -> Result<u64> {
+    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
         if self.liquidity == 0 { return Ok(0); }
 
         let a_to_b = *token_in_mint == self.mint_a;

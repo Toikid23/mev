@@ -219,7 +219,7 @@ impl PoolOperations for DecodedPumpAmmPool {
 
     /// Calcule le montant de sortie pour un montant d'entrée donné.
     /// C'est la fonction la plus importante, elle doit être parfaite.
-    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64) -> Result<u64> {
+    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
         // --- 1. Validation et Configuration Initiale ---
         if self.total_fee_basis_points == 0 && self.lp_fee_basis_points == 0 {
             // Si le pool n'est pas hydraté, les frais seront à 0.

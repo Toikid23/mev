@@ -69,20 +69,20 @@ impl PoolOperations for Pool {
         }
     }
 
-    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64) -> Result<u64> {
+    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
         match self {
-            Pool::RaydiumAmmV4(p) => p.get_quote(token_in_mint, amount_in),
-            Pool::RaydiumCpmm(p) => p.get_quote(token_in_mint, amount_in),
-            Pool::RaydiumClmm(p) => p.get_quote(token_in_mint, amount_in),
-            Pool::RaydiumStableSwap(p) => p.get_quote(token_in_mint, amount_in),
-            Pool::RaydiumLaunchpad(p) => p.get_quote(token_in_mint, amount_in),
-            Pool::MeteoraAmm(p) => p.get_quote(token_in_mint, amount_in),
-            Pool::MeteoraDammV2(p) => p.get_quote(token_in_mint, amount_in),
-            Pool::MeteoraDlmm(p) => p.get_quote(token_in_mint, amount_in),
-            Pool::OrcaWhirlpool(p) => p.get_quote(token_in_mint, amount_in),
-            Pool::OrcaAmmV2(p) => p.get_quote(token_in_mint, amount_in),
-            Pool::OrcaAmmV1(p) => p.get_quote(token_in_mint, amount_in),
-            Pool::PumpAmm(p) => p.get_quote(token_in_mint, amount_in),
+            Pool::RaydiumAmmV4(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
+            Pool::RaydiumCpmm(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
+            Pool::RaydiumClmm(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
+            Pool::RaydiumStableSwap(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
+            Pool::RaydiumLaunchpad(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
+            Pool::MeteoraAmm(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
+            Pool::MeteoraDammV2(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
+            Pool::MeteoraDlmm(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
+            Pool::OrcaWhirlpool(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
+            Pool::OrcaAmmV2(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
+            Pool::OrcaAmmV1(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
+            Pool::PumpAmm(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
         }
     }
 }

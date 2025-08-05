@@ -213,7 +213,7 @@ impl PoolOperations for DecodedMeteoraSbpPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
 
-    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64) -> Result<u64> {
+    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
         if !self.enabled || amount_in == 0 { return Ok(0); }
         let (in_reserve, out_reserve) = if *token_in_mint == self.mint_a { (self.reserve_a, self.reserve_b) } else { (self.reserve_b, self.reserve_a) };
         if in_reserve == 0 || out_reserve == 0 { return Ok(0); }

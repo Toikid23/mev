@@ -114,7 +114,7 @@ impl PoolOperations for DecodedLaunchpadPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
 
-    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64) -> Result<u64> {
+    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
         let is_buy = *token_in_mint == self.mint_b; // True si on achète A (base) avec B (quote)
 
         // --- 1. Appliquer les frais de transfert sur l'INPUT ---

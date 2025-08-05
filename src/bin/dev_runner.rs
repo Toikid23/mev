@@ -1,11 +1,14 @@
 // DANS : src/bin/dev_runner.rs
-// VERSION CORRIGÉE ET AMÉLIORÉE
+// VERSION FINALE ET COMPLÈTE
 
 use anyhow::{anyhow, Result};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
+use solana_sdk::sysvar::clock::Clock;
 use std::str::FromStr;
 use std::env;
+
+
 use mev::{
     config::Config,
     decoders::{
@@ -16,20 +19,21 @@ use mev::{
     },
 };
 use mev::decoders::orca_decoders::{whirlpool_decoder, token_swap_v2, token_swap_v1};
+use bincode::deserialize;
 
 
 // =================================================================================
-// FONCTION UTILITAIRE D'AFFICHAGE (INCHANGÉE)
+// FONCTION UTILITAIRE D'AFFICHAGE (INCHANGÉE LOGIQUEMENT, JUSTE AVEC TIMESTAMP)
 // =================================================================================
-
 fn print_quote_result<T: PoolOperations + ?Sized>(
     pool: &T,
     token_in_mint: &Pubkey,
     in_decimals: u8,
     out_decimals: u8,
-    amount_in: u64
+    amount_in: u64,
+    current_timestamp: i64
 ) -> Result<()> {
-    match pool.get_quote(token_in_mint, amount_in) {
+    match pool.get_quote(token_in_mint, amount_in, current_timestamp) {
         Ok(amount_out) => {
             let ui_amount_in = amount_in as f64 / 10f64.powi(in_decimals as i32);
             let ui_amount_out = amount_out as f64 / 10f64.powi(out_decimals as i32);
@@ -46,17 +50,22 @@ fn print_quote_result<T: PoolOperations + ?Sized>(
     Ok(())
 }
 
-
 // =================================================================================
 // DÉFINITIONS DES TESTS INDIVIDUELS (AVEC CORRECTIONS)
 // =================================================================================
 
+async fn get_timestamp(rpc_client: &RpcClient) -> Result<i64> {
+    let clock_account = rpc_client.get_account(&solana_sdk::sysvar::clock::ID).await?;
+
+    // --- C'est la syntaxe correcte pour bincode v1.3.3 ---
+    let clock: Clock = deserialize(&clock_account.data)?;
+
+    Ok(clock.unix_timestamp)
+}
+
 
 // --- TEST DLMM (CORRIGÉ) ---
-// Cette fonction est maintenant un orchestrateur qui peut lancer plusieurs scénarios
-// de test pour le même type de pool.
-async fn test_dlmm(rpc_client: &RpcClient) -> Result<()> {
-    // Étape 1: Définir les scénarios de test. C'est ici que vous pouvez facilement ajouter de nouveaux pools.
+async fn test_dlmm(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
     struct DlmmTestCase<'a> {
         pool_address: &'a str,
         input_token_mint: &'a str,
@@ -72,33 +81,30 @@ async fn test_dlmm(rpc_client: &RpcClient) -> Result<()> {
             description: "WSOL-USDC (Vente de 1 WSOL)",
         },
         DlmmTestCase {
-            pool_address: "9KUSnaqA7oWRfhHLut63aFCSdmybyFgnQBeJm9yudZXZ", // ANI-WSOL
+            pool_address: "SfyiR54tjDB13LZv9WYpZbErXMrbdqMgAiAWuCszBwE", // ANI-WSOL
             input_token_mint: "So11111111111111111111111111111111111111112", // WSOL
             input_amount_ui: 1.0,
             description: "ANI-WSOL (Vente de 1 WSOL)",
         },
         DlmmTestCase {
-            pool_address: "9KUSnaqA7oWRfhHLut63aFCSdmybyFgnQBeJm9yudZXZ", // ANI-WSOL
-            input_token_mint: "9tqjeRS1swj36Ee5C1iGiwAxjQJNGAVCzaTLwFY8bonk", // ANI
-            input_amount_ui: 3600.0,
-            description: "ANI-WSOL (Vente de 1000 ANI)",
+            pool_address: "SfyiR54tjDB13LZv9WYpZbErXMrbdqMgAiAWuCszBwE", // ANI-WSOL
+            input_token_mint: "9mAnyxAq8JQieHT7Lc47PVQbTK7ZVaaog8LwAbFzBAGS", // ANI
+            input_amount_ui: 142418.913458495,
+            description: "ANI-WSOL (Vente de 3600 ANI)",
         },
     ];
 
     const PROGRAM_ID: &str = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo";
     let program_pubkey = Pubkey::from_str(PROGRAM_ID)?;
 
-    // Étape 2: Boucler et exécuter chaque scénario
     for (i, case) in test_cases.iter().enumerate() {
         println!("\n--- [DLMM Cas {}/{}] Test sur {} ---", i + 1, test_cases.len(), case.description);
         let pool_pubkey = Pubkey::from_str(case.pool_address)?;
         let input_mint_pubkey = Pubkey::from_str(case.input_token_mint)?;
 
-        // Décodage
         let account_data = rpc_client.get_account_data(&pool_pubkey).await?;
         let mut pool = dlmm::decode_lb_pair(&pool_pubkey, &account_data, &program_pubkey)?;
 
-        // Hydratation (aucune valeur en dur)
         println!("[1/2] Hydratation...");
         dlmm::hydrate(&mut pool, rpc_client, 10).await?;
         println!("-> Hydratation terminée. Trouvé {} BinArray(s).",
@@ -106,10 +112,8 @@ async fn test_dlmm(rpc_client: &RpcClient) -> Result<()> {
         println!("   -> Mint A ({} décimales): {}", pool.mint_a_decimals, pool.mint_a);
         println!("   -> Mint B ({} décimales): {}", pool.mint_b_decimals, pool.mint_b);
 
-        // Préparation du calcul (aucune valeur en dur)
         println!("\n[2/2] Calcul pour VENDRE {} UI de {}...", case.input_amount_ui, case.input_token_mint);
 
-        // Logique dynamique pour trouver les bonnes décimales
         let (input_mint_decimals, output_mint_decimals) = if input_mint_pubkey == pool.mint_a {
             (pool.mint_a_decimals, pool.mint_b_decimals)
         } else if input_mint_pubkey == pool.mint_b {
@@ -118,26 +122,23 @@ async fn test_dlmm(rpc_client: &RpcClient) -> Result<()> {
             return Err(anyhow!("Le token d'input {} n'appartient pas au pool {}", case.input_token_mint, case.pool_address));
         };
 
-        // Calcul du montant en unités de base
         let amount_in_base_units = (case.input_amount_ui * 10f64.powi(input_mint_decimals as i32)) as u64;
 
-        // Appel à la fonction de quote avec les bons paramètres
         print_quote_result(
             &pool,
             &input_mint_pubkey,
             input_mint_decimals,
             output_mint_decimals,
-            amount_in_base_units
+            amount_in_base_units,
+            current_timestamp
         )?;
     }
-
     Ok(())
 }
 
+// --- AUTRES TESTS CORRIGÉS ---
 
-// --- AUTRES TESTS (inchangés, mais pourraient bénéficier du même modèle de scénarios) ---
-
-async fn test_ammv4(rpc_client: &RpcClient) -> Result<()> {
+async fn test_ammv4(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
     const POOL_ADDRESS: &str = "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2"; // SOL-USDC
     println!("\n--- Test Raydium AMMv4 ({}) ---", POOL_ADDRESS);
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
@@ -150,13 +151,12 @@ async fn test_ammv4(rpc_client: &RpcClient) -> Result<()> {
 
     let sell_sol_amount = 1_000_000_000; // 1 SOL (9 décimales)
     println!("\n[2/2] Calcul pour VENDRE 1 SOL...");
-    // Pour ce pool, mint_a=SOL(9) et mint_b=USDC(6)
-    print_quote_result(&pool, &pool.mint_a, 9, 6, sell_sol_amount)?;
+    print_quote_result(&pool, &pool.mint_a, 9, 6, sell_sol_amount, current_timestamp)?;
 
     Ok(())
 }
 
-async fn test_cpmm(rpc_client: &RpcClient) -> Result<()> {
+async fn test_cpmm(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
     const POOL_ADDRESS: &str = "Q2sPHPdUWFMg7M7wwrQKLrn619cAucfRsmhVJffodSp"; // DUST-SOL
     println!("\n--- Test Raydium CPMM ({}) ---", POOL_ADDRESS);
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
@@ -169,13 +169,12 @@ async fn test_cpmm(rpc_client: &RpcClient) -> Result<()> {
 
     let small_amount_in = 1_000_000_000; // 1 DUST (9 décimales)
     println!("\n[2/2] Calcul du quote pour 1 DUST...");
-    // Pour ce pool, DUST(9) est token_0 et SOL(9) est token_1
-    print_quote_result(&pool, &pool.token_0_mint, 9, 9, small_amount_in)?;
+    print_quote_result(&pool, &pool.token_0_mint, 9, 9, small_amount_in, current_timestamp)?;
 
     Ok(())
 }
 
-async fn test_clmm(rpc_client: &RpcClient) -> Result<()> {
+async fn test_clmm(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
     const POOL_ADDRESS: &str = "3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv"; // SOL-USDC
     const PROGRAM_ID: &str = "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK";
     println!("\n--- Test Raydium CLMM ({}) ---", POOL_ADDRESS);
@@ -190,12 +189,12 @@ async fn test_clmm(rpc_client: &RpcClient) -> Result<()> {
 
     let small_amount_in = 1_000_000_000; // 1 SOL (9 décimales)
     println!("\n[2/2] Calcul du quote pour 1 SOL...");
-    print_quote_result(&pool, &pool.mint_a, pool.mint_a_decimals, pool.mint_b_decimals, small_amount_in)?;
+    print_quote_result(&pool, &pool.mint_a, pool.mint_a_decimals, pool.mint_b_decimals, small_amount_in, current_timestamp)?;
 
     Ok(())
 }
 
-async fn test_launchpad(rpc_client: &RpcClient) -> Result<()> {
+async fn test_launchpad(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
     const POOL_ADDRESS: &str = "DReGGrVpi1Czq5tC1Juu2NjZh1jtack4GwckuJqbQd7H"; // ZETA-USDC
     println!("\n--- Test Raydium Launchpad ({}) ---", POOL_ADDRESS);
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
@@ -208,12 +207,12 @@ async fn test_launchpad(rpc_client: &RpcClient) -> Result<()> {
 
     let small_amount_in = 1_000_000; // 1 USDC (6 décimales)
     println!("\n[2/2] Calcul du quote pour 1 USDC...");
-    print_quote_result(&pool, &pool.mint_b, 6, 6, small_amount_in)?;
+    print_quote_result(&pool, &pool.mint_b, 6, 6, small_amount_in, current_timestamp)?;
 
     Ok(())
 }
 
-async fn test_whirlpool(rpc_client: &RpcClient) -> Result<()> {
+async fn test_whirlpool(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
     const POOL_ADDRESS: &str = "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE"; // WSOL-USDC
     println!("\n--- Test Orca Whirlpool ({}) ---", POOL_ADDRESS);
 
@@ -240,16 +239,17 @@ async fn test_whirlpool(rpc_client: &RpcClient) -> Result<()> {
 
     print_quote_result(
         &pool,
-        &pool.mint_a,         // On entre du SOL (mint_a)
+        &pool.mint_a,
         pool.mint_a_decimals,
         pool.mint_b_decimals,
-        sol_amount_in
+        sol_amount_in,
+        current_timestamp
     )?;
 
     Ok(())
 }
 
-async fn test_orca_amm_v1(rpc_client: &RpcClient) -> Result<()> {
+async fn test_orca_amm_v1(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
     const POOL_ADDRESS: &str = "6fTRDD7sYxCN7oyoSQaN1AWC3P2m8A6gVZzGrpej9DvL"; // SAMO-USDC
     println!("\n--- Test Orca AMM V1 ({}) ---", POOL_ADDRESS);
 
@@ -273,13 +273,14 @@ async fn test_orca_amm_v1(rpc_client: &RpcClient) -> Result<()> {
         &pool.mint_a,
         pool.mint_a_decimals,
         pool.mint_b_decimals,
-        amount_in
+        amount_in,
+        current_timestamp
     )?;
 
     Ok(())
 }
 
-async fn test_orca_amm_v2(rpc_client: &RpcClient) -> Result<()> {
+async fn test_orca_amm_v2(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
     const POOL_ADDRESS: &str = "EGZ7tiLeH62TPV1gL8WwbXGzEPa9zmcpVnnkPKKnrE2U"; // SOL/USDC
     println!("\n--- Test Orca AMM V2 ({}) ---", POOL_ADDRESS);
 
@@ -303,13 +304,14 @@ async fn test_orca_amm_v2(rpc_client: &RpcClient) -> Result<()> {
         &pool.mint_a,
         pool.mint_a_decimals,
         pool.mint_b_decimals,
-        amount_in_sol
+        amount_in_sol,
+        current_timestamp
     )?;
 
     Ok(())
 }
 
-async fn test_meteora_amm(rpc_client: &RpcClient) -> Result<()> {
+async fn test_meteora_amm(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
     const POOL_ADDRESS: &str = "7rQd8FhC1rimV3v9edCRZ6RNFsJN1puXM9UmjaURJRNj"; // Constant Product (WSOL-NOBODY)
     println!("\n--- Test Meteora AMM ({}) ---", POOL_ADDRESS);
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
@@ -326,12 +328,12 @@ async fn test_meteora_amm(rpc_client: &RpcClient) -> Result<()> {
 
     let amount_in = 1 * 10u64.pow(pool.mint_a_decimals as u32);
     println!("\n[2/2] Calcul du quote pour 1 Token A (ex: WSOL)...");
-    print_quote_result(&pool, &pool.mint_a, pool.mint_a_decimals, pool.mint_b_decimals, amount_in)?;
+    print_quote_result(&pool, &pool.mint_a, pool.mint_a_decimals, pool.mint_b_decimals, amount_in, current_timestamp)?;
 
     Ok(())
 }
 
-async fn test_damm_v2(rpc_client: &RpcClient) -> Result<()> {
+async fn test_damm_v2(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
     const POOL_ADDRESS: &str = "BnpqhBcR8jUXZjtZ8GrT1YyXPggfvtUonwHcHvu8LKj9"; // BAG-WSOL
     println!("\n--- Test Meteora DAMM v2 (BAG/WSOL: {}) ---", POOL_ADDRESS);
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
@@ -352,13 +354,14 @@ async fn test_damm_v2(rpc_client: &RpcClient) -> Result<()> {
         &pool.mint_a,
         pool.mint_a_decimals,
         pool.mint_b_decimals,
-        amount_in
+        amount_in,
+        current_timestamp
     )?;
 
     Ok(())
 }
 
-async fn test_pump_amm(rpc_client: &RpcClient) -> Result<()> {
+async fn test_pump_amm(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
     const POOL_ADDRESS: &str = "2H87WiHP7gMcBGodhRtzgmVc3MYqEx1xPcGdoVUHNQhj"; // DEPI-SOL
     println!("\n--- Test pump.fun AMM ({}) ---", POOL_ADDRESS);
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
@@ -380,12 +383,12 @@ async fn test_pump_amm(rpc_client: &RpcClient) -> Result<()> {
         &pool.mint_b,
         pool.mint_b_decimals,
         pool.mint_a_decimals,
-        amount_in_sol
+        amount_in_sol,
+        current_timestamp
     )?;
 
     Ok(())
 }
-
 
 // =================================================================================
 // ORCHESTRATEUR DE TESTS
@@ -399,36 +402,39 @@ async fn main() -> Result<()> {
 
     let args: Vec<String> = env::args().skip(1).collect();
 
+    // On récupère le timestamp une seule fois pour tous les tests
+    let current_timestamp = get_timestamp(&rpc_client).await?;
+    println!("-> Timestamp du cluster utilisé pour tous les tests: {}", current_timestamp);
+
+
     if args.is_empty() {
         println!("Mode: Exécution de tous les tests.");
-        // Exécutez tous les tests ici
-        if let Err(e) = test_ammv4(&rpc_client).await { println!("!! AMMv4 a échoué: {}", e); }
-        if let Err(e) = test_cpmm(&rpc_client).await { println!("!! CPMM a échoué: {}", e); }
-        if let Err(e) = test_clmm(&rpc_client).await { println!("!! CLMM a échoué: {}", e); }
-        if let Err(e) = test_launchpad(&rpc_client).await { println!("!! Launchpad a échoué: {}", e); }
-        if let Err(e) = test_meteora_amm(&rpc_client).await { println!("!! Meteora AMM a échoué: {}", e); }
-        if let Err(e) = test_damm_v2(&rpc_client).await { println!("!! Meteora DAMM v2 a echoue: {}", e); }
-        if let Err(e) = test_dlmm(&rpc_client).await { println!("!! DLMM a échoué: {}", e); }
-        if let Err(e) = test_whirlpool(&rpc_client).await { println!("!! Whirlpool a échoué: {}", e); }
-        if let Err(e) = test_orca_amm_v2(&rpc_client).await { println!("!! Orca AMM V2 a échoué: {}", e); }
-        if let Err(e) = test_orca_amm_v1(&rpc_client).await { println!("!! Orca AMM V1 a échoué: {}", e); }
-        if let Err(e) = test_pump_amm(&rpc_client).await { println!("!! pump.fun AMM a échoué: {}", e); }
-
+        if let Err(e) = test_ammv4(&rpc_client, current_timestamp).await { println!("!! AMMv4 a échoué: {}", e); }
+        if let Err(e) = test_cpmm(&rpc_client, current_timestamp).await { println!("!! CPMM a échoué: {}", e); }
+        if let Err(e) = test_clmm(&rpc_client, current_timestamp).await { println!("!! CLMM a échoué: {}", e); }
+        if let Err(e) = test_launchpad(&rpc_client, current_timestamp).await { println!("!! Launchpad a échoué: {}", e); }
+        if let Err(e) = test_meteora_amm(&rpc_client, current_timestamp).await { println!("!! Meteora AMM a échoué: {}", e); }
+        if let Err(e) = test_damm_v2(&rpc_client, current_timestamp).await { println!("!! Meteora DAMM v2 a echoue: {}", e); }
+        if let Err(e) = test_dlmm(&rpc_client, current_timestamp).await { println!("!! DLMM a échoué: {}", e); }
+        if let Err(e) = test_whirlpool(&rpc_client, current_timestamp).await { println!("!! Whirlpool a échoué: {}", e); }
+        if let Err(e) = test_orca_amm_v2(&rpc_client, current_timestamp).await { println!("!! Orca AMM V2 a échoué: {}", e); }
+        if let Err(e) = test_orca_amm_v1(&rpc_client, current_timestamp).await { println!("!! Orca AMM V1 a échoué: {}", e); }
+        if let Err(e) = test_pump_amm(&rpc_client, current_timestamp).await { println!("!! pump.fun AMM a échoué: {}", e); }
     } else {
         println!("Mode: Exécution des tests spécifiques: {:?}", args);
         for test_name in args {
             let result = match test_name.as_str() {
-                "ammv4" => test_ammv4(&rpc_client).await,
-                "cpmm" => test_cpmm(&rpc_client).await,
-                "clmm" => test_clmm(&rpc_client).await,
-                "launchpad" => test_launchpad(&rpc_client).await,
-                "meteora_amm" => test_meteora_amm(&rpc_client).await,
-                "damm_v2" => test_damm_v2(&rpc_client).await,
-                "dlmm" => test_dlmm(&rpc_client).await, // <--- APPELLE NOTRE NOUVEL ORCHESTRATEUR
-                "whirlpool" => test_whirlpool(&rpc_client).await,
-                "orca_amm_v2" => test_orca_amm_v2(&rpc_client).await,
-                "orca_amm_v1" => test_orca_amm_v1(&rpc_client).await,
-                "pump_amm" => test_pump_amm(&rpc_client).await,
+                "ammv4" => test_ammv4(&rpc_client, current_timestamp).await,
+                "cpmm" => test_cpmm(&rpc_client, current_timestamp).await,
+                "clmm" => test_clmm(&rpc_client, current_timestamp).await,
+                "launchpad" => test_launchpad(&rpc_client, current_timestamp).await,
+                "meteora_amm" => test_meteora_amm(&rpc_client, current_timestamp).await,
+                "damm_v2" => test_damm_v2(&rpc_client, current_timestamp).await,
+                "dlmm" => test_dlmm(&rpc_client, current_timestamp).await,
+                "whirlpool" => test_whirlpool(&rpc_client, current_timestamp).await,
+                "orca_amm_v2" => test_orca_amm_v2(&rpc_client, current_timestamp).await,
+                "orca_amm_v1" => test_orca_amm_v1(&rpc_client, current_timestamp).await,
+                "pump_amm" => test_pump_amm(&rpc_client, current_timestamp).await,
                 _ => {
                     println!("!! Test inconnu: '{}'", test_name);
                     continue;
