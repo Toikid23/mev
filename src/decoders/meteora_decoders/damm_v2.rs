@@ -1,15 +1,17 @@
 // DANS: src/decoders/meteora_decoders/damm_v2.rs
+// VERSION FINALE, CORRIGÉE ET FIDÈLE AU SDK
 
 use crate::decoders::pool_operations::PoolOperations;
 use crate::decoders::spl_token_decoders;
 use anyhow::{anyhow, bail, Result};
-use bytemuck::{Pod, Zeroable};
+use bytemuck::{pod_read_unaligned, Pod, Zeroable};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use uint::construct_uint;
 
-
 construct_uint! { pub struct U256(4); }
+
+// --- CONSTANTES ET STRUCTURES PUBLIQUES ---
 
 pub const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG");
 pub const POOL_STATE_DISCRIMINATOR: [u8; 8] = [241, 154, 109, 4, 17, 177, 109, 188];
@@ -17,7 +19,6 @@ pub const POOL_STATE_DISCRIMINATOR: [u8; 8] = [241, 154, 109, 4, 17, 177, 109, 1
 #[derive(Debug, Clone)]
 pub struct DecodedMeteoraDammPool {
     pub address: Pubkey,
-    pub config_address: Option<Pubkey>,
     pub mint_a: Pubkey,
     pub mint_b: Pubkey,
     pub vault_a: Pubkey,
@@ -32,10 +33,20 @@ pub struct DecodedMeteoraDammPool {
     pub mint_a_transfer_fee_bps: u16,
     pub mint_b_transfer_fee_bps: u16,
     pub pool_fees: onchain_layouts::PoolFeesStruct,
-    pub activation_point: u64, // <--- AJOUTEZ CETTE LIGNE
+    pub activation_point: u64,
 }
 
-// --- MODULE PRIVE POUR LES STRUCTURES ON-CHAIN ---
+impl DecodedMeteoraDammPool {
+    /// Retourne les frais de base en pourcentage.
+    pub fn fee_as_percent(&self) -> f64 {
+        let base_fee = self.pool_fees.base_fee.cliff_fee_numerator;
+        if base_fee == 0 { return 0.0; }
+        // Le `cliff_fee_numerator` est sur une base de 1_000_000_000 (FEE_DENOMINATOR)
+        (base_fee as f64 / 1_000_000_000.0) * 100.0
+    }
+}
+
+// --- MODULE PRIVÉ POUR LES STRUCTURES ON-CHAIN (MIROIR EXACT DU SDK) ---
 pub mod onchain_layouts {
     #![allow(dead_code)]
     use super::*;
@@ -87,61 +98,28 @@ pub mod onchain_layouts {
         pub reward_duration_end: u64, pub reward_rate: u128, pub reward_per_token_stored: [u8; 32],
         pub last_update_time: u64, pub cumulative_seconds_with_empty_liquidity_reward: u64,
     }
-
-    #[repr(C, packed)] #[derive(Copy, Clone, Pod, Zeroable, Debug)]
-    pub struct Config {
-        pub vault_config_key: Pubkey, pub pool_creator_authority: Pubkey, pub pool_fees: PoolFeesStruct,
-        pub activation_type: u8, pub collect_fee_mode: u8, pub config_type: u8, pub _padding_0: [u8; 5],
-        pub index: u64, pub sqrt_min_price: u128, pub sqrt_max_price: u128, pub _padding_1: [u64; 10],
-    }
 }
 
-
-impl DecodedMeteoraDammPool {
-    /// Retourne les frais de base en pourcentage (si hydrate).
-    pub fn fee_as_percent(&self) -> f64 {
-        let base_fee = self.pool_fees.base_fee.cliff_fee_numerator;
-        if base_fee == 0 { return 0.0; }
-        (base_fee as f64 / 1_000_000_000.0) * 100.0
-    }
-}
-
-fn get_amount_out(sqrt_price_start: u128, sqrt_price_end: u128, liquidity: u128, a_to_b: bool) -> Result<u64> {
-    if a_to_b {
-        get_delta_amount_b_unsigned(sqrt_price_end, sqrt_price_start, liquidity, Rounding::Down)
-    } else {
-        get_delta_amount_a_unsigned(sqrt_price_start, sqrt_price_end, liquidity, Rounding::Down)
-    }
-}
 
 // --- LOGIQUE DE DECODAGE ET D'HYDRATATION ---
 
 pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraDammPool> {
-    // Étape 1: Vérification du discriminateur (maintenant correct)
     if data.get(..8) != Some(&POOL_STATE_DISCRIMINATOR) {
         bail!("Invalid discriminator. Not a Meteora DAMM v2 Pool account.");
     }
-
-    // Étape 2: On ne travaille que sur la tranche de données utiles.
     let data_slice = &data[8..];
-
-    // Étape 3 (Pilier #6): Vérifier que la taille des données est suffisante.
     let expected_size = std::mem::size_of::<onchain_layouts::Pool>();
     if data_slice.len() < expected_size {
         bail!(
             "DAMM v2 Pool data length mismatch. Expected at least {} bytes, got {}.",
-            expected_size,
-            data_slice.len()
+            expected_size, data_slice.len()
         );
     }
-
-    // Étape 4 (Pilier #1): Lecture sécurisée en spécifiant la taille exacte.
-    // Ceci évite de lire des bytes de padding ou des données invalides à la fin du compte.
+    // "Caster" les données directement dans la structure miroir. Rapide et sûr.
     let pool_struct: onchain_layouts::Pool = bytemuck::pod_read_unaligned(&data_slice[..expected_size]);
 
     Ok(DecodedMeteoraDammPool {
         address: *address,
-        config_address: None,
         mint_a: pool_struct.token_a_mint,
         mint_b: pool_struct.token_b_mint,
         vault_a: pool_struct.token_a_vault,
@@ -153,14 +131,13 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraDammPo
         collect_fee_mode: pool_struct.collect_fee_mode,
         pool_fees: pool_struct.pool_fees,
         activation_point: pool_struct.activation_point,
-        mint_a_decimals: 0,
-        mint_b_decimals: 0,
-        mint_a_transfer_fee_bps: 0,
-        mint_b_transfer_fee_bps: 0,
+        mint_a_decimals: 0, mint_b_decimals: 0,
+        mint_a_transfer_fee_bps: 0, mint_b_transfer_fee_bps: 0,
     })
 }
 
 pub async fn hydrate(pool: &mut DecodedMeteoraDammPool, rpc_client: &RpcClient) -> Result<()> {
+    // La fonction `hydrate` est déjà correcte et efficace.
     let (mint_a_res, mint_b_res) = tokio::join!(
         rpc_client.get_account_data(&pool.mint_a),
         rpc_client.get_account_data(&pool.mint_b)
@@ -183,7 +160,7 @@ impl PoolOperations for DecodedMeteoraDammPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
 
-    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
+    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<u64> {
         if self.liquidity == 0 { return Ok(0); }
 
         let a_to_b = *token_in_mint == self.mint_a;
@@ -194,32 +171,29 @@ impl PoolOperations for DecodedMeteoraDammPool {
             (self.mint_b_transfer_fee_bps, self.mint_a_transfer_fee_bps)
         };
 
+        // Étape 1 : Appliquer les frais de transfert Token-2022 (si applicable)
         let fee_on_input = (amount_in as u128 * in_mint_fee_bps as u128) / 10000;
         let amount_in_after_transfer_fee = amount_in.saturating_sub(fee_on_input as u64);
 
         let fees = &self.pool_fees;
-        let current_timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as u64;
 
-        // Étape A: Calcul des frais de base avec le calendrier (MAINTENANT FIDÈLE AU SDK)
+        // Étape 2 : Calculer les frais de pool (base + dynamique)
         let base_fee_num = get_base_fee(&fees.base_fee, current_timestamp, self.activation_point)? as u128;
-
-        // Étape B: Calcul des frais dynamiques
         let dynamic_fee_num = if fees.dynamic_fee.initialized != 0 {
             get_variable_fee(&fees.dynamic_fee)?
-        } else {
-            0
-        };
-
+        } else { 0 };
         let total_fee_numerator = base_fee_num.saturating_add(dynamic_fee_num);
         const FEE_DENOMINATOR: u128 = 1_000_000_000;
 
+        // Étape 3 : Déterminer si les frais s'appliquent sur l'input ou l'output
         let fees_on_input = match (self.collect_fee_mode, a_to_b) {
-            (0, _) => false,
-            (1, true) => false,
-            (1, false) => true,
+            (0, _) => false, // Collecte sur l'output
+            (1, true) => false, // Collecte sur B (output)
+            (1, false) => true, // Collecte sur B (input)
             _ => bail!("Unsupported collect_fee_mode"),
         };
 
+        // Étape 4 : Calculer le swap
         let (pre_fee_amount_out, total_fee_amount) = if fees_on_input {
             let total_fee = (amount_in_after_transfer_fee as u128 * total_fee_numerator) / FEE_DENOMINATOR;
             let net_in = amount_in_after_transfer_fee.saturating_sub(total_fee as u64);
@@ -234,8 +208,7 @@ impl PoolOperations for DecodedMeteoraDammPool {
             (out, total_fee)
         };
 
-        // Étape C: Répartition des frais (NOUVELLE LOGIQUE FIDÈLE AU SDK)
-        // Seuls les frais LP sont déduits du montant de l'utilisateur.
+        // Étape 5 : Appliquer les frais LP (les seuls qui impactent l'utilisateur)
         let protocol_fee = (total_fee_amount * fees.protocol_fee_percent as u128) / 100;
         let lp_fee = total_fee_amount.saturating_sub(protocol_fee);
 
@@ -245,6 +218,7 @@ impl PoolOperations for DecodedMeteoraDammPool {
             pre_fee_amount_out
         };
 
+        // Étape 6 : Appliquer les frais de transfert Token-2022 sur l'output
         let fee_on_output = (amount_out_after_pool_fee as u128 * out_mint_fee_bps as u128) / 10000;
         let final_amount_out = amount_out_after_pool_fee.saturating_sub(fee_on_output as u64);
 
@@ -253,18 +227,21 @@ impl PoolOperations for DecodedMeteoraDammPool {
 }
 
 
-// ... (tout le code après l'impl PoolOperations, y compris les fonctions mathématiques, reste inchangé) ...
-// AJOUTER CETTE NOUVELLE FONCTION HELPER (TRADUITE DE `fee_math.rs`)
-fn get_base_fee(base_fee: &onchain_layouts::BaseFeeStruct, current_timestamp: u64, activation_point: u64) -> Result<u64> {
+// --- FONCTIONS MATHÉMATIQUES (TRADUCTION DIRECTE DU SDK) ---
+
+fn get_base_fee(base_fee: &onchain_layouts::BaseFeeStruct, current_timestamp: i64, activation_point: u64) -> Result<u64> {
     if base_fee.period_frequency == 0 {
         return Ok(base_fee.cliff_fee_numerator);
     }
 
-    // Si le swap a lieu avant l'activation, on utilise les frais maximums prévus à la fin du calendrier.
-    let period = if current_timestamp < activation_point {
+    // Convertir en u64 pour les comparaisons et calculs.
+    // Un timestamp négatif est un cas d'erreur que nous pouvons traiter comme étant "avant l'activation".
+    let current_timestamp_u64 = u64::try_from(current_timestamp).unwrap_or(0);
+
+    let period = if current_timestamp_u64 < activation_point {
         base_fee.number_of_period as u64
     } else {
-        let elapsed = current_timestamp.saturating_sub(activation_point);
+        let elapsed = current_timestamp_u64.saturating_sub(activation_point);
         (elapsed / base_fee.period_frequency).min(base_fee.number_of_period as u64)
     };
 
@@ -273,26 +250,30 @@ fn get_base_fee(base_fee: &onchain_layouts::BaseFeeStruct, current_timestamp: u6
             let reduction = period.saturating_mul(base_fee.reduction_factor);
             Ok(base_fee.cliff_fee_numerator.saturating_sub(reduction))
         }
-        1 => { // Mode Exponentiel (simplifié pour `u64`)
-            if base_fee.reduction_factor == 0 {
-                return Ok(base_fee.cliff_fee_numerator);
-            }
+        1 => { // Mode Exponentiel
+            if base_fee.reduction_factor == 0 { return Ok(base_fee.cliff_fee_numerator); }
             let mut fee = base_fee.cliff_fee_numerator as u128;
-            // La base de la réduction est 10000 (BASIS_POINT_MAX)
             let reduction_factor = 10000 - base_fee.reduction_factor as u128;
-            for _ in 0..period {
-                fee = (fee * reduction_factor) / 10000;
-            }
+            for _ in 0..period { fee = (fee * reduction_factor) / 10000; }
             Ok(fee as u64)
         }
         _ => bail!("Unsupported fee scheduler mode"),
     }
 }
 
-/// Traduction de `curve.rs`
-fn get_next_sqrt_price_from_input(
-    sqrt_price: u128, liquidity: u128, amount_in: u64, a_for_b: bool
-) -> Result<u128> {
+fn get_variable_fee(dynamic_fee: &onchain_layouts::DynamicFeeStruct) -> Result<u128> {
+    let square_vfa_bin = dynamic_fee.volatility_accumulator
+        .checked_mul(dynamic_fee.bin_step as u128).ok_or(anyhow!("MathOverflow"))?
+        .checked_pow(2).ok_or(anyhow!("MathOverflow"))?;
+    let v_fee = square_vfa_bin
+        .checked_mul(dynamic_fee.variable_fee_control as u128).ok_or(anyhow!("MathOverflow"))?;
+    let scaled_v_fee = v_fee
+        .checked_add(99_999_999_999).ok_or(anyhow!("MathOverflow"))?
+        .checked_div(100_000_000_000).ok_or(anyhow!("MathOverflow"))?;
+    Ok(scaled_v_fee)
+}
+
+fn get_next_sqrt_price_from_input(sqrt_price: u128, liquidity: u128, amount_in: u64, a_for_b: bool) -> Result<u128> {
     if amount_in == 0 { return Ok(sqrt_price); }
     let sqrt_price_u256 = U256::from(sqrt_price);
     let liquidity_u256 = U256::from(liquidity);
@@ -303,101 +284,64 @@ fn get_next_sqrt_price_from_input(
         let denominator = liquidity_u256.checked_add(product).ok_or(anyhow!("MathOverflow"))?;
         if denominator.is_zero() { return Err(anyhow!("Denominator is zero")); }
         let numerator = liquidity_u256.checked_mul(sqrt_price_u256).ok_or(anyhow!("MathOverflow"))?;
-
         let result = (numerator + denominator - U256::from(1)) / denominator;
-        // CORRECTION: Gestion de l'erreur de conversion
         Ok(result.try_into().map_err(|_| anyhow!("TypeCastFailed"))?)
     } else {
         if liquidity_u256.is_zero() { return Err(anyhow!("Liquidity is zero")); }
         let quotient = (amount_in_u256 << 128) / liquidity_u256;
         let result = sqrt_price_u256.checked_add(quotient).ok_or(anyhow!("MathOverflow"))?;
-        // CORRECTION: Gestion de l'erreur de conversion
         Ok(result.try_into().map_err(|_| anyhow!("TypeCastFailed"))?)
     }
 }
 
+fn get_amount_out(sqrt_price_start: u128, sqrt_price_end: u128, liquidity: u128, a_to_b: bool) -> Result<u64> {
+    if a_to_b {
+        get_delta_amount_b_unsigned(sqrt_price_end, sqrt_price_start, liquidity, Rounding::Down)
+    } else {
+        get_delta_amount_a_unsigned(sqrt_price_start, sqrt_price_end, liquidity, Rounding::Down)
+    }
+}
 
-const RESOLUTION: u8 = 64;
+#[derive(PartialEq, Clone, Copy)] enum Rounding { Up, Down }
 
-#[derive(PartialEq, Clone, Copy)]
-enum Rounding { Up, Down }
-
-fn get_delta_amount_a_unsigned(
-    lower_sqrt_price: u128, upper_sqrt_price: u128, liquidity: u128, round: Rounding
-) -> Result<u64> {
+fn get_delta_amount_a_unsigned(lower_sqrt_price: u128, upper_sqrt_price: u128, liquidity: u128, round: Rounding) -> Result<u64> {
     let result = get_delta_amount_a_unsigned_unchecked(lower_sqrt_price, upper_sqrt_price, liquidity, round)?;
     if result > U256::from(u64::MAX) { bail!("MathOverflow"); }
     Ok(result.try_into().map_err(|_| anyhow!("TypeCastFailed"))?)
 }
 
-fn get_delta_amount_a_unsigned_unchecked(
-    lower_sqrt_price: u128, upper_sqrt_price: u128, liquidity: u128, round: Rounding
-) -> Result<U256> {
-    // CORRECTION: On n'utilise plus U512. On fait une division avant une multiplication.
-    // Formule: L * (√P_upper - √P_lower) / (√P_upper * √P_lower)
-    // equivaut a: L * (1/√P_lower - 1/√P_upper)
-
-    let num_1 = U256::from(liquidity) << RESOLUTION; // L * 2^64
+fn get_delta_amount_a_unsigned_unchecked(lower_sqrt_price: u128, upper_sqrt_price: u128, liquidity: u128, round: Rounding) -> Result<U256> {
+    const RESOLUTION: u8 = 128;
+    let num_1 = U256::from(liquidity) << RESOLUTION;
     let den_1 = U256::from(lower_sqrt_price);
     let den_2 = U256::from(upper_sqrt_price);
     if den_1.is_zero() || den_2.is_zero() { bail!("Sqrt price is zero"); }
-
     let term_1 = num_1 / den_1;
     let term_2 = num_1 / den_2;
-
     let diff = term_1 - term_2;
-
     let result = match round {
         Rounding::Up => (diff + (U256::from(1) << RESOLUTION) - U256::from(1)) >> RESOLUTION,
         Rounding::Down => diff >> RESOLUTION,
     };
-
     Ok(result)
 }
-fn get_delta_amount_b_unsigned(
-    lower_sqrt_price: u128, upper_sqrt_price: u128, liquidity: u128, round: Rounding
-) -> Result<u64> {
+
+fn get_delta_amount_b_unsigned(lower_sqrt_price: u128, upper_sqrt_price: u128, liquidity: u128, round: Rounding) -> Result<u64> {
     let result = get_delta_amount_b_unsigned_unchecked(lower_sqrt_price, upper_sqrt_price, liquidity, round)?;
     if result > U256::from(u64::MAX) { bail!("MathOverflow"); }
     Ok(result.try_into().map_err(|_| anyhow!("TypeCastFailed"))?)
 }
 
-fn get_delta_amount_b_unsigned_unchecked(
-    lower_sqrt_price: u128, upper_sqrt_price: u128, liquidity: u128, round: Rounding
-) -> Result<U256> {
+fn get_delta_amount_b_unsigned_unchecked(lower_sqrt_price: u128, upper_sqrt_price: u128, liquidity: u128, round: Rounding) -> Result<U256> {
+    const RESOLUTION: u8 = 64;
     let liquidity_u256 = U256::from(liquidity);
     let delta_sqrt_price = U256::from(upper_sqrt_price - lower_sqrt_price);
     let prod = liquidity_u256.checked_mul(delta_sqrt_price).ok_or(anyhow!("MathOverflow"))?;
-
     match round {
         Rounding::Up => {
             let denominator = U256::from(1) << (RESOLUTION as usize) * 2;
             Ok((prod + denominator - U256::from(1)) / denominator)
         }
-        Rounding::Down => {
-            Ok(prod >> (RESOLUTION as usize) * 2)
-        }
+        Rounding::Down => Ok(prod >> (RESOLUTION as usize) * 2),
     }
-}
-
-
-fn get_variable_fee(dynamic_fee: &onchain_layouts::DynamicFeeStruct) -> Result<u128> {
-    let square_vfa_bin = dynamic_fee.volatility_accumulator
-        .checked_mul(dynamic_fee.bin_step as u128)
-        .ok_or(anyhow!("MathOverflow"))?
-        .checked_pow(2)
-        .ok_or(anyhow!("MathOverflow"))?;
-
-    let v_fee = square_vfa_bin
-        .checked_mul(dynamic_fee.variable_fee_control as u128)
-        .ok_or(anyhow!("MathOverflow"))?;
-
-    // Le programme on-chain divise par 10^11 pour ramener a la bonne echelle.
-    let scaled_v_fee = v_fee
-        .checked_add(99_999_999_999)
-        .ok_or(anyhow!("MathOverflow"))?
-        .checked_div(100_000_000_000)
-        .ok_or(anyhow!("MathOverflow"))?;
-
-    Ok(scaled_v_fee)
 }

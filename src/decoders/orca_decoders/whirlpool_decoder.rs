@@ -258,14 +258,13 @@ impl PoolOperations for DecodedWhirlpoolPool {
 
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
         let tick_arrays = self.tick_arrays.as_ref().ok_or_else(|| anyhow!("Pool is not hydrated."))?;
-        // CORRECTION: Si aucun tick n'est trouvé, la liquidité est peut-être dans le tick actuel, mais si l'array n'est pas là, c'est 0.
         if tick_arrays.is_empty() { return Ok(0); }
 
         let a_to_b = *token_in_mint == self.mint_a;
 
-        // --- CORRECTION DE LA LOGIQUE DES FRAIS ---
+        // --- DÉBUT DE LA CORRECTION DE LA LOGIQUE DES FRAIS ---
 
-        // 1. Appliquer les frais de transfert Token-2022 sur l'input
+        // 1. Appliquer les frais de transfert Token-2022 sur l'input (votre logique est déjà bonne)
         let (in_mint_fee_bps, out_mint_fee_bps) = if a_to_b {
             (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps)
         } else {
@@ -274,17 +273,20 @@ impl PoolOperations for DecodedWhirlpoolPool {
         let fee_on_input_token2022 = (amount_in as u128 * in_mint_fee_bps as u128) / 10000;
         let amount_in_after_token2022_fee = amount_in.saturating_sub(fee_on_input_token2022 as u64);
 
-        // 2. Appliquer les frais de pool (LP + Protocole) sur le montant d'entrée
+        // 2. Appliquer les frais de pool (LP) sur le montant d'entrée net.
+        // La `fee_rate` est en 1/1,000,000.
         let pool_fee = (amount_in_after_token2022_fee as u128 * self.fee_rate as u128) / 1_000_000;
         let amount_to_swap = amount_in_after_token2022_fee.saturating_sub(pool_fee as u64);
 
-        // 3. Calculer le swap avec le montant net
+        // 3. Calculer le swap avec le montant net de frais.
         let gross_amount_out = calculate_swap(self, amount_to_swap, a_to_b, tick_arrays)?;
 
-        // 4. Appliquer les frais de transfert Token-2022 sur l'output
+        // 4. Appliquer les frais de transfert Token-2022 sur l'output (votre logique est déjà bonne)
         let fee_on_output_token2022 = (gross_amount_out as u128 * out_mint_fee_bps as u128) / 10000;
         let final_amount_out = gross_amount_out.saturating_sub(fee_on_output_token2022 as u64);
 
         Ok(final_amount_out)
+
+        // --- FIN DE LA CORRECTION ---
     }
 }

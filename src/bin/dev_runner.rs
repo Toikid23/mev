@@ -213,7 +213,7 @@ async fn test_launchpad(rpc_client: &RpcClient, current_timestamp: i64) -> Resul
 }
 
 async fn test_whirlpool(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
-    const POOL_ADDRESS: &str = "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE"; // WSOL-USDC
+    const POOL_ADDRESS: &str = "44W73kGYQgXCTNkGxUmHv8DDBPCxojBcX49uuKmbFc9U"; // WSOL-USDC
     println!("\n--- Test Orca Whirlpool ({}) ---", POOL_ADDRESS);
 
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
@@ -347,16 +347,24 @@ async fn test_damm_v2(rpc_client: &RpcClient, current_timestamp: i64) -> Result<
     println!("-> Hydratation terminee. Frais de base: {:.4}%.", pool.fee_as_percent());
     println!("   -> Decimale A (BAG): {}, Decimale B (WSOL): {}", pool.mint_a_decimals, pool.mint_b_decimals);
 
-    let amount_in = 10_000 * 10u64.pow(pool.mint_a_decimals as u32);
-    println!("\n[2/2] Calcul du quote pour 10000 BAG...");
+    // --- DÉBUT DE LA MODIFICATION DU TEST ---
+
+    // Nous simulons maintenant la vente de 0.999 WSOL, comme dans la transaction on-chain.
+    // WSOL est mint_b et a 9 décimales.
+    let amount_in_ui = 0.999;
+    let amount_in_base_units = (amount_in_ui * 10f64.powi(pool.mint_b_decimals as i32)) as u64;
+
+    println!("\n[2/2] Calcul du quote pour VENDRE {} WSOL...", amount_in_ui);
     print_quote_result(
         &pool,
-        &pool.mint_a,
-        pool.mint_a_decimals,
-        pool.mint_b_decimals,
-        amount_in,
+        &pool.mint_b, // On entre du WSOL (mint_b)
+        pool.mint_b_decimals, // Décimales de l'input (WSOL)
+        pool.mint_a_decimals, // Décimales de l'output (BAG)
+        amount_in_base_units,
         current_timestamp
     )?;
+
+    // --- FIN DE LA MODIFICATION DU TEST ---
 
     Ok(())
 }
@@ -399,6 +407,10 @@ async fn main() -> Result<()> {
     println!("--- Lancement du Banc d'Essai des Décodeurs ---");
     let config = Config::load()?;
     let rpc_client = RpcClient::new(config.solana_rpc_url);
+    let current_timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs() as i64;
+    println!("-> Timestamp du cluster utilisé pour tous les tests: {}", current_timestamp);
 
     let args: Vec<String> = env::args().skip(1).collect();
 

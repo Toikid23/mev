@@ -205,6 +205,11 @@ pub async fn hydrate(pool: &mut DecodedPumpAmmPool, rpc_client: &RpcClient) -> R
 }
 
 
+fn ceil_div(a: u128, b: u128) -> Option<u128> {
+    if b == 0 { return None; }
+    a.checked_add(b)?.checked_sub(1)?.checked_div(b)
+}
+
 
 impl PoolOperations for DecodedPumpAmmPool {
     /// Retourne les adresses des deux tokens du pool.
@@ -222,15 +227,9 @@ impl PoolOperations for DecodedPumpAmmPool {
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
         // --- 1. Validation et Configuration Initiale ---
         if self.total_fee_basis_points == 0 && self.lp_fee_basis_points == 0 {
-            // Si le pool n'est pas hydraté, les frais seront à 0.
-            // On retourne une erreur pour éviter un calcul potentiellement incorrect.
             return Err(anyhow!("Pool is not hydrated, fees are unknown."));
         }
-
-        if self.reserve_a == 0 || self.reserve_b == 0 {
-            // Pas de liquidité, pas de swap.
-            return Ok(0);
-        }
+        if self.reserve_a == 0 || self.reserve_b == 0 { return Ok(0); }
 
         let is_buy = *token_in_mint == self.mint_b; // Achat si l'input est le quote token (SOL)
 
@@ -241,7 +240,6 @@ impl PoolOperations for DecodedPumpAmmPool {
         };
 
         // --- 2. Application des Frais de Transfert (Token-2022) sur l'INPUT ---
-        // Même si pump.fun n'utilise que le SPL standard, cette conception est prête pour l'avenir.
         let fee_on_input = (amount_in as u128 * in_mint_fee_bps as u128) / 10_000;
         let amount_in_after_transfer_fee = amount_in.saturating_sub(fee_on_input as u64);
 
@@ -249,41 +247,26 @@ impl PoolOperations for DecodedPumpAmmPool {
         let in_reserve_u128 = in_reserve as u128;
         let out_reserve_u128 = out_reserve as u128;
 
-        // --- 3. Calcul du Swap Brut (Constant Product) ---
-        // Le calcul est effectué avec des u128 pour éviter tout overflow (Pilier #1)
-
-        let numerator = amount_in_u128 * out_reserve_u128;
-        let denominator = in_reserve_u128 + amount_in_u128;
-        if denominator == 0 { return Ok(0); }
-
-        let gross_amount_out = numerator / denominator;
-
-        // --- 4. Application des Frais de Pool (LP + Protocole + Créateur) ---
-        // D'après l'IDL et l'usage, les frais sont toujours prélevés sur le quote token (mint_b).
-
-        let feeable_amount = if is_buy {
-            // Pour un achat, les frais sont prélevés sur le montant d'entrée (SOL).
-            // Le swap est calculé sur le montant net.
-            amount_in_u128
-        } else {
-            // Pour une vente, les frais sont prélevés sur le montant de sortie (SOL).
-            gross_amount_out
-        };
-
-        let total_fee = (feeable_amount * self.total_fee_basis_points as u128) / 10_000;
-
+        // --- 3. Calcul du Swap Brut et des Frais de Pool (Logique 1:1 avec le SDK) ---
         let amount_out_after_pool_fee = if is_buy {
-            // Recalcul du swap avec le montant d'entrée net de frais
+            // Logique d'ACHAT : Les frais sont sur l'INPUT. Le swap se fait sur le montant NET.
+            let total_fee = (amount_in_u128 * self.total_fee_basis_points as u128) / 10_000;
             let net_amount_in = amount_in_u128.saturating_sub(total_fee);
             let new_numerator = net_amount_in * out_reserve_u128;
             let new_denominator = in_reserve_u128 + net_amount_in;
             if new_denominator == 0 { 0 } else { new_numerator / new_denominator }
         } else {
-            // On soustrait simplement les frais du montant de sortie
+            // Logique de VENTE : Le swap se fait sur le montant BRUT, les frais sont sur l'OUTPUT.
+            let numerator = amount_in_u128 * out_reserve_u128;
+            let denominator = in_reserve_u128 + amount_in_u128;
+            if denominator == 0 { return Ok(0); }
+
+            let gross_amount_out = numerator / denominator;
+            let total_fee = (gross_amount_out * self.total_fee_basis_points as u128) / 10_000;
             gross_amount_out.saturating_sub(total_fee)
         };
 
-        // --- 5. Application des Frais de Transfert (Token-2022) sur l'OUTPUT ---
+        // --- 4. Application des Frais de Transfert (Token-2022) sur l'OUTPUT ---
         let fee_on_output = (amount_out_after_pool_fee * out_mint_fee_bps as u128) / 10_000;
         let final_amount_out = amount_out_after_pool_fee.saturating_sub(fee_on_output);
 
