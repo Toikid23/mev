@@ -14,6 +14,8 @@ pub struct DecodedAmmPool {
     pub address: Pubkey,
     pub mint_a: Pubkey,
     pub mint_b: Pubkey,
+    pub mint_a_decimals: u8,
+    pub mint_b_decimals: u8,
     pub mint_a_transfer_fee_bps: u16,
     pub mint_b_transfer_fee_bps: u16,
     pub vault_a: Pubkey,
@@ -97,6 +99,8 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedAmmPool> {
         vault_b: pool_struct.token_pc,
         trade_fee_numerator: pool_struct.fees.trade_fee_numerator,
         trade_fee_denominator: pool_struct.fees.trade_fee_denominator,
+        mint_a_decimals: 0,
+        mint_b_decimals: 0,
         mint_a_transfer_fee_bps: 0,
         mint_b_transfer_fee_bps: 0,
         reserve_a: 0, // Les réserves sont initialisées à 0
@@ -150,40 +154,35 @@ impl PoolOperations for DecodedAmmPool {
 }
 
 pub async fn hydrate(pool: &mut DecodedAmmPool, rpc_client: &RpcClient) -> Result<()> {
-    // --- LA CORRECTION EST ICI ---
-    // On crée une variable qui va "posséder" le slice de pubkeys.
-    // Sa durée de vie est maintenant celle de toute la fonction hydrate.
-    let vaults_to_fetch = [pool.vault_a, pool.vault_b];
-
-    // On fetch tout en parallèle : les vaults et les mints
-    let (vault_accounts_res, mint_a_res, mint_b_res) = tokio::join!(
-         // On passe une référence à notre variable qui a une longue durée de vie
-         rpc_client.get_multiple_accounts(&vaults_to_fetch),
-         rpc_client.get_account_data(&pool.mint_a),
-         rpc_client.get_account_data(&pool.mint_b)
-    );
+    // Optimisation : On regroupe les 4 comptes dans un seul appel.
+    let accounts_to_fetch = [pool.vault_a, pool.vault_b, pool.mint_a, pool.mint_b];
+    let accounts_data = rpc_client.get_multiple_accounts(&accounts_to_fetch).await?;
 
     // Traitement des vaults
-    let vault_accounts = vault_accounts_res?;
-    let vault_a_account = vault_accounts[0]
+    let vault_a_account = accounts_data[0]
         .as_ref()
         .ok_or_else(|| anyhow!("AMM V4 Vault A not found for pool {}", pool.address))?;
     pool.reserve_a = u64::from_le_bytes(vault_a_account.data[64..72].try_into()?);
 
-    let vault_b_account = vault_accounts[1]
+    let vault_b_account = accounts_data[1]
         .as_ref()
         .ok_or_else(|| anyhow!("AMM V4 Vault B not found for pool {}", pool.address))?;
     pool.reserve_b = u64::from_le_bytes(vault_b_account.data[64..72].try_into()?);
 
-    // --- AJOUT DE LA LOGIQUE D'HYDRATATION DES MINTS ---
-    let mint_a_data = mint_a_res?;
-    let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_data)?;
+    // Traitement des mints (avec les décimales)
+    let mint_a_data = accounts_data[2]
+        .as_ref()
+        .ok_or_else(|| anyhow!("Mint A not found for pool {}", pool.address))?;
+    let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_data.data)?;
     pool.mint_a_transfer_fee_bps = decoded_mint_a.transfer_fee_basis_points;
+    pool.mint_a_decimals = decoded_mint_a.decimals; // <-- On stocke les décimales
 
-    let mint_b_data = mint_b_res?;
-    let decoded_mint_b = spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_data)?;
+    let mint_b_data = accounts_data[3]
+        .as_ref()
+        .ok_or_else(|| anyhow!("Mint B not found for pool {}", pool.address))?;
+    let decoded_mint_b = spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_data.data)?;
     pool.mint_b_transfer_fee_bps = decoded_mint_b.transfer_fee_basis_points;
-    // --- FIN DE L'AJOUT ---
+    pool.mint_b_decimals = decoded_mint_b.decimals; // <-- On stocke les décimales
 
     Ok(())
 }

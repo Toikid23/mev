@@ -25,6 +25,8 @@ pub struct DecodedCpmmPool {
     pub mint_a_transfer_fee_bps: u16,
     pub mint_b_transfer_fee_bps: u16,
     pub status: u8,
+    pub mint_0_decimals: u8,
+    pub mint_1_decimals: u8,
     // Les champs "intelligents"
     pub trade_fee_rate: u64,
     pub reserve_a: u64,
@@ -101,6 +103,8 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedCpmmPool> {
         status: pool_struct.status,
         mint_a_transfer_fee_bps: 0,
         mint_b_transfer_fee_bps: 0,
+        mint_0_decimals: 0,
+        mint_1_decimals: 0,
         // Les champs "intelligents" sont initialisés à 0
         trade_fee_rate: 0,
         reserve_a: 0,
@@ -155,36 +159,38 @@ impl PoolOperations for DecodedCpmmPool {
 }
 
 pub async fn hydrate(pool: &mut DecodedCpmmPool, rpc_client: &RpcClient) -> Result<()> {
-    // Lance les 3 appels réseau indépendants (config, vault A, vault B) en parallèle
+    // ... (votre `tokio::join!` existant est parfait et reste inchangé) ...
     let (config_res, vault_a_res, vault_b_res, mint_a_res, mint_b_res) = tokio::join!(
         rpc_client.get_account_data(&pool.amm_config),
         rpc_client.get_account_data(&pool.token_0_vault),
         rpc_client.get_account_data(&pool.token_1_vault),
-        rpc_client.get_account_data(&pool.token_0_mint), // <-- NOUVEAU
+        rpc_client.get_account_data(&pool.token_0_mint),
         rpc_client.get_account_data(&pool.token_1_mint)
     );
 
-    // Traite le résultat de la config pour obtenir les frais de pool
+    // ... (la logique pour `config_data`, `vault_a_data`, `vault_b_data` est inchangée) ...
     let config_data = config_res?;
     let decoded_config = amm_config::decode_config(&config_data)?;
     pool.trade_fee_rate = decoded_config.trade_fee_rate;
 
-    // Traite les résultats des vaults pour obtenir les réserves
     let vault_a_data = vault_a_res?;
     pool.reserve_a = u64::from_le_bytes(vault_a_data[64..72].try_into()?);
     let vault_b_data = vault_b_res?;
     pool.reserve_b = u64::from_le_bytes(vault_b_data[64..72].try_into()?);
 
-    // --- AJOUT DE LA LOGIQUE D'HYDRATATION DES MINTS ---
+    // --- MISE À JOUR DE LA LOGIQUE D'HYDRATATION DES MINTS ---
     let mint_a_data = mint_a_res?;
     let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.token_0_mint, &mint_a_data)?;
-    // On pourrait stocker les décimales dans le pool si nécessaire, mais pour l'instant on ne s'en sert pas
     pool.mint_a_transfer_fee_bps = decoded_mint_a.transfer_fee_basis_points;
+    // AJOUTEZ CETTE LIGNE :
+    pool.mint_0_decimals = decoded_mint_a.decimals;
 
     let mint_b_data = mint_b_res?;
     let decoded_mint_b = spl_token_decoders::mint::decode_mint(&pool.token_1_mint, &mint_b_data)?;
     pool.mint_b_transfer_fee_bps = decoded_mint_b.transfer_fee_basis_points;
-    // --- FIN DE L'AJOUT ---
+    // AJOUTEZ CETTE LIGNE :
+    pool.mint_1_decimals = decoded_mint_b.decimals;
+    // --- FIN DE LA MISE À JOUR ---
 
     Ok(())
 }
