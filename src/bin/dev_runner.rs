@@ -139,7 +139,14 @@ async fn test_dlmm(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()>
 // --- AUTRES TESTS CORRIGÉS ---
 
 async fn test_ammv4(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
-    const POOL_ADDRESS: &str = "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2"; // SOL-USDC
+    // --- CONSTANTES POUR LA TRANSACTION WOJAK-WSOL ---
+    // Je dois deviner l'adresse du pool WOJAK-WSOL, celle-ci est une possibilité,
+    // mais il faudra peut-être l'ajuster si ce n'est pas la bonne.
+    const POOL_ADDRESS: &str = "6GDrReNVfyjQDCuGMrKdG2JU7Uj8NCvBt2ukaL2mDj1L"; // WOJAK-SOL
+    const INPUT_MINT: &str = "So11111111111111111111111111111111111111112";   // WSOL
+    const INPUT_AMOUNT_UI: f64 = 1.459648; // Vente de 2.60739 WSOL
+    // --- FIN DES CONSTANTES ---
+
     println!("\n--- Test Raydium AMMv4 ({}) ---", POOL_ADDRESS);
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
     let account_data = rpc_client.get_account_data(&pool_pubkey).await?;
@@ -149,15 +156,33 @@ async fn test_ammv4(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()
     amm_v4::hydrate(&mut pool, rpc_client).await?;
     println!("-> Hydratation terminée. Frais: {:.4}%.", pool.fee_as_percent());
 
-    let sell_sol_amount = 1_000_000_000; // 1 SOL (9 décimales)
-    println!("\n[2/2] Calcul pour VENDRE 1 SOL...");
-    print_quote_result(&pool, &pool.mint_a, 9, 6, sell_sol_amount, current_timestamp)?;
+    let input_mint_pubkey = Pubkey::from_str(INPUT_MINT)?;
+
+    // --- DÉTERMINATION DYNAMIQUE DES DÉCIMALES ---
+    let (input_decimals, output_decimals) = if input_mint_pubkey == pool.mint_a {
+        (pool.mint_a_decimals, pool.mint_b_decimals)
+    } else {
+        (pool.mint_b_decimals, pool.mint_a_decimals)
+    };
+
+    println!("   -> Token d'entrée (WSOL): {} ({} décimales détectées)", input_mint_pubkey, input_decimals);
+    println!("   -> Token de sortie (WOJAK): {} ({} décimales détectées)", if input_mint_pubkey == pool.mint_a { pool.mint_b } else { pool.mint_a }, output_decimals);
+    // --- FIN DE LA DÉTERMINATION ---
+
+    let amount_in_base_units = (INPUT_AMOUNT_UI * 10f64.powi(input_decimals as i32)) as u64;
+    println!("\n[2/2] Calcul du quote pour VENDRE {} UI de WSOL...", INPUT_AMOUNT_UI);
+    print_quote_result(&pool, &input_mint_pubkey, input_decimals, output_decimals, amount_in_base_units, current_timestamp)?;
 
     Ok(())
 }
 
 async fn test_cpmm(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
-    const POOL_ADDRESS: &str = "Q2sPHPdUWFMg7M7wwrQKLrn619cAucfRsmhVJffodSp"; // DUST-SOL
+    // --- CONSTANTES POUR LE TEST DE LA TRANSACTION ---
+    const POOL_ADDRESS: &str = "Q2sPHPdUWFMg7M7wwrQKLrn619cAucfRsmhVJffodSp"; // USELESS-WSOL
+    const INPUT_MINT: &str = "Dz9mQ9NzkBcCsuGPFJ3r1bS4wgqKMHBPiVuniW8Mbonk"; // WSOL
+    const INPUT_AMOUNT_UI: f64 = 4236.0; // Montant de WSOL de l'image
+    // --- FIN DES CONSTANTES ---
+
     println!("\n--- Test Raydium CPMM ({}) ---", POOL_ADDRESS);
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
     let account_data = rpc_client.get_account_data(&pool_pubkey).await?;
@@ -167,16 +192,37 @@ async fn test_cpmm(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()>
     cpmm::hydrate(&mut pool, rpc_client).await?;
     println!("-> Hydratation terminée. Frais: {:.4}%.", pool.fee_as_percent());
 
-    let small_amount_in = 1_000_000_000; // 1 DUST (9 décimales)
-    println!("\n[2/2] Calcul du quote pour 1 DUST...");
-    print_quote_result(&pool, &pool.token_0_mint, 9, 9, small_amount_in, current_timestamp)?;
+    let input_mint_pubkey = Pubkey::from_str(INPUT_MINT)?;
+
+    // --- DÉTERMINATION DYNAMIQUE DES DÉCIMALES ---
+    let (input_decimals, output_decimals) = if input_mint_pubkey == pool.token_0_mint {
+        (pool.mint_0_decimals, pool.mint_1_decimals)
+    } else {
+        (pool.mint_1_decimals, pool.mint_0_decimals)
+    };
+
+    println!("   -> Token d'entrée (WSOL): {} ({} décimales détectées)", input_mint_pubkey, input_decimals);
+    println!("   -> Token de sortie (USELESS): {} ({} décimales détectées)", if input_mint_pubkey == pool.token_0_mint { pool.token_1_mint } else { pool.token_0_mint }, output_decimals);
+    // --- FIN DE LA DÉTERMINATION ---
+
+    let amount_in_base_units = (INPUT_AMOUNT_UI * 10f64.powi(input_decimals as i32)) as u64;
+    println!("\n[2/2] Calcul du quote pour VENDRE {} UI de WSOL...", INPUT_AMOUNT_UI);
+    print_quote_result(&pool, &input_mint_pubkey, input_decimals, output_decimals, amount_in_base_units, current_timestamp)?;
 
     Ok(())
 }
 
+// DANS : src/bin/dev_runner.rs
+
 async fn test_clmm(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
-    const POOL_ADDRESS: &str = "3ucNos4NbumPLZNWztqGHNFFgkHeRMBQAVemeeomsUxv"; // SOL-USDC
+    // --- CONSTANTES POUR LA TRANSACTION MACROHARD-WSOL ---
+    const POOL_ADDRESS: &str = "YrrUStgPugDp8BbfosqDeFssen6sA75ZS1QJvgnHtmY";
     const PROGRAM_ID: &str = "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK";
+    // NOTE : Le log précédent indique que HBsbZz9hvxzi3EnCYWLLwvMPWgV4aeC74mEdvTg9bonk est le MACROHARD, et So111...1112 est le WSOL.
+    const INPUT_MINT: &str = "Ey59PH7Z4BFU4HjyKnyMdWt5GGN76KazTAwQihoUXRnk"; // MACROHARD
+    const INPUT_AMOUNT_UI: f64 = 89.496379971; // Montant de MACROHARD de l'image
+    // --- FIN DES CONSTANTES ---
+
     println!("\n--- Test Raydium CLMM ({}) ---", POOL_ADDRESS);
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
     let program_pubkey = Pubkey::from_str(PROGRAM_ID)?;
@@ -185,11 +231,33 @@ async fn test_clmm(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()>
 
     println!("[1/2] Hydratation...");
     clmm_pool::hydrate(&mut pool, rpc_client).await?;
-    println!("-> Hydratation terminée. Frais: {:.4}%. Trouvé {} TickArray(s).", pool.fee_as_percent(), pool.tick_arrays.as_ref().unwrap().len());
+    let tick_arrays_found = pool.tick_arrays.as_ref().map_or(0, |arrays| arrays.len());
+    println!("-> Hydratation terminée. Frais: {:.4}%. Trouvé {} TickArray(s).", pool.fee_as_percent(), tick_arrays_found);
 
-    let small_amount_in = 1_000_000_000; // 1 SOL (9 décimales)
-    println!("\n[2/2] Calcul du quote pour 1 SOL...");
-    print_quote_result(&pool, &pool.mint_a, pool.mint_a_decimals, pool.mint_b_decimals, small_amount_in, current_timestamp)?;
+    let input_mint_pubkey = Pubkey::from_str(INPUT_MINT)?;
+
+    // --- DÉTERMINATION DYNAMIQUE DES DÉCIMALES ---
+    let (input_decimals, output_decimals) = if input_mint_pubkey == pool.mint_a {
+        (pool.mint_a_decimals, pool.mint_b_decimals)
+    } else {
+        (pool.mint_b_decimals, pool.mint_a_decimals)
+    };
+
+    println!("   -> Token d'entrée (MACROHARD): {} ({} décimales détectées)", input_mint_pubkey, input_decimals);
+    println!("   -> Token de sortie (WSOL): {} ({} décimales détectées)", if input_mint_pubkey == pool.mint_a { pool.mint_b } else { pool.mint_a }, output_decimals);
+    // --- FIN DE LA DÉTERMINATION ---
+
+    let amount_in_base_units = (INPUT_AMOUNT_UI * 10f64.powi(input_decimals as i32)) as u64;
+    println!("\n[2/2] Calcul du quote pour VENDRE {} UI de MACROHARD...", INPUT_AMOUNT_UI);
+
+    print_quote_result(
+        &pool,
+        &input_mint_pubkey,
+        input_decimals,
+        output_decimals,
+        amount_in_base_units,
+        current_timestamp
+    )?;
 
     Ok(())
 }
