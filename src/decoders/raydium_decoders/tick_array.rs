@@ -1,15 +1,19 @@
-// Fichier COMPLET et FINAL : src/decoders/raydium_decoders/tick_array.rs
+// Fichier : src/decoders/raydium_decoders/tick_array.rs
+// STATUT : CORRIGÉ - Décodage manuel pour contourner les limitations de bytemuck.
 
 use bytemuck::{from_bytes, Pod, Zeroable};
 use solana_sdk::pubkey::Pubkey;
 use anyhow::{Result, bail};
+use std::mem;
 
 // Constantes tirées directement du code source de Raydium
 pub const TICK_ARRAY_SIZE: usize = 60;
 pub const REWARD_NUM: usize = 3;
 
+// TickState EST bien Pod et Zeroable, car tous ses champs sont des types primitifs
+// ou des tableaux de taille supportée. On garde les `derive` ici.
 #[repr(C, packed)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 pub struct TickState {
     pub tick: i32,
     pub liquidity_net: i128,
@@ -19,10 +23,9 @@ pub struct TickState {
     pub reward_growths_outside_x64: [u128; REWARD_NUM],
     pub padding: [u32; 13],
 }
-unsafe impl Zeroable for TickState {}
-unsafe impl Pod for TickState {}
 
-
+// CORRECTION : On retire `Pod` et `Zeroable` du derive car les tableaux internes
+// ne sont pas supportés par défaut.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
 pub struct TickArrayState {
@@ -33,18 +36,13 @@ pub struct TickArrayState {
     pub recent_epoch: u64,
     pub padding: [u8; 107],
 }
-unsafe impl Zeroable for TickArrayState {}
-unsafe impl Pod for TickArrayState {}
 
-
-/// Calcule l'adresse d'un compte TickArray (PDA).
-/// **LA VERSION PROUVÉE CORRECTE**
-pub fn get_tick_array_address(whirlpool: &Pubkey, start_tick_index: i32, program_id: &Pubkey) -> Pubkey {
+// ... les fonctions get_tick_array_address et get_start_tick_index restent inchangées ...
+pub fn get_tick_array_address(pool_id: &Pubkey, start_tick_index: i32, program_id: &Pubkey) -> Pubkey {
     let (pda, _) = Pubkey::find_program_address(
         &[
             b"tick_array",
-            whirlpool.as_ref(),
-            // LA CORRECTION CRUCIALE : Big Endian, comme pour Raydium CLMM
+            pool_id.as_ref(),
             &start_tick_index.to_be_bytes(),
         ],
         program_id,
@@ -52,11 +50,7 @@ pub fn get_tick_array_address(whirlpool: &Pubkey, start_tick_index: i32, program
     pda
 }
 
-/// Calcule le tick de départ d'un array.
-/// **LA VERSION PROUVÉE CORRECTE**
 pub fn get_start_tick_index(tick_index: i32, tick_spacing: u16) -> i32 {
-    // NOTRE MOUCHARD : Affiche la valeur qui cause le problème.
-
     let ticks_in_array = (TICK_ARRAY_SIZE as i32) * (tick_spacing as i32);
     let mut start = tick_index / ticks_in_array;
     if tick_index < 0 && tick_index % ticks_in_array != 0 {
@@ -65,21 +59,57 @@ pub fn get_start_tick_index(tick_index: i32, tick_spacing: u16) -> i32 {
     start * ticks_in_array
 }
 
-/// Décode les données brutes d'un compte TickArray.
+
+// CORRECTION : Implémentation du décodage manuel.
 pub fn decode_tick_array(data: &[u8]) -> Result<TickArrayState> {
     const DISCRIMINATOR: [u8; 8] = [192, 155, 85, 205, 49, 249, 129, 42];
     if data.get(..8) != Some(&DISCRIMINATOR) {
         bail!("Discriminator de TickArray invalide.");
     }
     let data_slice = &data[8..];
-    if data_slice.len() != std::mem::size_of::<TickArrayState>() {
+    if data_slice.len() != mem::size_of::<TickArrayState>() {
         bail!(
             "Taille de données de TickArray invalide. Attendu {}, reçu {}.",
-            std::mem::size_of::<TickArrayState>(),
+            mem::size_of::<TickArrayState>(),
             data_slice.len()
         );
     }
-    // On copie la valeur pour éviter les problèmes d'alignement
-    let tick_array_state: TickArrayState = *from_bytes(data_slice);
-    Ok(tick_array_state)
+
+    let mut offset = 0;
+
+    let pool_id_bytes: [u8; 32] = data_slice[offset..offset+32].try_into()?;
+    let pool_id = Pubkey::new_from_array(pool_id_bytes);
+    offset += 32;
+
+    let start_tick_bytes: [u8; 4] = data_slice[offset..offset+4].try_into()?;
+    let start_tick_index = i32::from_le_bytes(start_tick_bytes);
+    offset += 4;
+
+    let mut ticks = [TickState::default(); TICK_ARRAY_SIZE];
+    let tick_data_size = mem::size_of::<TickState>();
+    for i in 0..TICK_ARRAY_SIZE {
+        let start = offset + i * tick_data_size;
+        let end = start + tick_data_size;
+        // On peut utiliser from_bytes ici car TickState est bien `Pod`.
+        ticks[i] = *from_bytes(&data_slice[start..end]);
+    }
+    offset += tick_data_size * TICK_ARRAY_SIZE;
+
+    let initialized_tick_count = data_slice[offset];
+    offset += 1;
+
+    let recent_epoch_bytes: [u8; 8] = data_slice[offset..offset+8].try_into()?;
+    let recent_epoch = u64::from_le_bytes(recent_epoch_bytes);
+    offset += 8;
+
+    let padding: [u8; 107] = data_slice[offset..offset+107].try_into()?;
+
+    Ok(TickArrayState {
+        pool_id,
+        start_tick_index,
+        ticks,
+        initialized_tick_count,
+        recent_epoch,
+        padding,
+    })
 }

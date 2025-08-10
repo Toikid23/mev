@@ -7,6 +7,7 @@ use solana_sdk::pubkey::Pubkey;
 use solana_sdk::sysvar::clock::Clock;
 use std::str::FromStr;
 use std::env;
+use anyhow::bail;
 
 
 use mev::{
@@ -215,13 +216,14 @@ async fn test_cpmm(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()>
 // DANS : src/bin/dev_runner.rs
 
 async fn test_clmm(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
-    // --- CONSTANTES POUR LA TRANSACTION MACROHARD-WSOL ---
-    const POOL_ADDRESS: &str = "YrrUStgPugDp8BbfosqDeFssen6sA75ZS1QJvgnHtmY";
+    // --- TEST BASÉ SUR LA TRANSACTION DE L'IMAGE : Vente de WSOL pour du LAUNCHCOIN ---
+    const POOL_ADDRESS: &str = "YrrUStgPugDp8BbfosqDeFssen6sA75ZS1QJvgnHtmY"; // Pool WSOL-LAUNCHCOIN
     const PROGRAM_ID: &str = "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK";
-    // NOTE : Le log précédent indique que HBsbZz9hvxzi3EnCYWLLwvMPWgV4aeC74mEdvTg9bonk est le MACROHARD, et So111...1112 est le WSOL.
-    const INPUT_MINT: &str = "Ey59PH7Z4BFU4HjyKnyMdWt5GGN76KazTAwQihoUXRnk"; // MACROHARD
-    const INPUT_AMOUNT_UI: f64 = 89.496379971; // Montant de MACROHARD de l'image
-    // --- FIN DES CONSTANTES ---
+
+    // On vend du WSOL, comme dans la première transaction de l'image
+    const INPUT_MINT: &str = "So11111111111111111111111111111111111111112";
+    const INPUT_AMOUNT_UI: f64 = 1.295638593;
+    // --- FIN DE LA CONFIGURATION DU TEST ---
 
     println!("\n--- Test Raydium CLMM ({}) ---", POOL_ADDRESS);
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
@@ -236,19 +238,20 @@ async fn test_clmm(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()>
 
     let input_mint_pubkey = Pubkey::from_str(INPUT_MINT)?;
 
-    // --- DÉTERMINATION DYNAMIQUE DES DÉCIMALES ---
-    let (input_decimals, output_decimals) = if input_mint_pubkey == pool.mint_a {
-        (pool.mint_a_decimals, pool.mint_b_decimals)
+    // --- Logique de détermination robuste ---
+    let (input_decimals, output_decimals, output_mint_pubkey) = if input_mint_pubkey == pool.mint_a {
+        (pool.mint_a_decimals, pool.mint_b_decimals, pool.mint_b)
+    } else if input_mint_pubkey == pool.mint_b {
+        (pool.mint_b_decimals, pool.mint_a_decimals, pool.mint_a)
     } else {
-        (pool.mint_b_decimals, pool.mint_a_decimals)
+        bail!("ERREUR FATALE: Le token d'input {} n'appartient PAS au pool {}. Mints du pool: {}, {}", INPUT_MINT, POOL_ADDRESS, pool.mint_a, pool.mint_b);
     };
 
-    println!("   -> Token d'entrée (MACROHARD): {} ({} décimales détectées)", input_mint_pubkey, input_decimals);
-    println!("   -> Token de sortie (WSOL): {} ({} décimales détectées)", if input_mint_pubkey == pool.mint_a { pool.mint_b } else { pool.mint_a }, output_decimals);
-    // --- FIN DE LA DÉTERMINATION ---
+    println!("   -> Token d'entrée : {} ({} décimales détectées)", input_mint_pubkey, input_decimals);
+    println!("   -> Token de sortie: {} ({} décimales détectées)", output_mint_pubkey, output_decimals);
 
     let amount_in_base_units = (INPUT_AMOUNT_UI * 10f64.powi(input_decimals as i32)) as u64;
-    println!("\n[2/2] Calcul du quote pour VENDRE {} UI de MACROHARD...", INPUT_AMOUNT_UI);
+    println!("\n[2/2] Calcul du quote pour VENDRE {} UI de {}...", INPUT_AMOUNT_UI, INPUT_MINT);
 
     print_quote_result(
         &pool,
