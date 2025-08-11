@@ -217,12 +217,12 @@ async fn test_cpmm(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()>
 
 async fn test_clmm(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
     // --- TEST BASÉ SUR LA TRANSACTION DE L'IMAGE : Vente de WSOL pour du LAUNCHCOIN ---
-    const POOL_ADDRESS: &str = "YrrUStgPugDp8BbfosqDeFssen6sA75ZS1QJvgnHtmY"; // Pool WSOL-LAUNCHCOIN
+    const POOL_ADDRESS: &str = "4UfaSHNQvADZ1ZkCcSABNE14xZeQaF8vaEYb3e9A52ER"; // Pool WSOL-LAUNCHCOIN
     const PROGRAM_ID: &str = "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK";
 
     // On vend du WSOL, comme dans la première transaction de l'image
     const INPUT_MINT: &str = "So11111111111111111111111111111111111111112";
-    const INPUT_AMOUNT_UI: f64 = 2.663385296;
+    const INPUT_AMOUNT_UI: f64 = 1.235235365;
     // --- FIN DE LA CONFIGURATION DU TEST ---
 
     println!("\n--- Test Raydium CLMM ({}) ---", POOL_ADDRESS);
