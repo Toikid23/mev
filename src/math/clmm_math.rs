@@ -1,4 +1,6 @@
-use uint::{construct_uint}; // CORRECTION: On importe juste le constructeur
+// Fichier : src/math/clmm_math.rs (VERSION CORRIGÉE ET COMPLÈTE)
+
+use uint::{construct_uint};
 use anyhow::{Result, anyhow};
 use super::full_math::MulDiv;
 
@@ -12,12 +14,8 @@ mod tick_math {
 }
 pub use tick_math::{MIN_TICK, MAX_TICK};
 
-
-// ... TOUT LE RESTE DU FICHIER EST IDENTIQUE ET CORRECT ...
-
 // --- Fonctions de conversion Tick <-> SqrtPrice (Inchangées et correctes) ---
 pub fn tick_to_sqrt_price_x64(tick: i32) -> u128 {
-    // ... (votre fonction existante est correcte)
     let abs_tick = tick.unsigned_abs();
     let mut ratio = if (abs_tick & 0x1) != 0 { 0xfffb023273ab_u128 } else { 0x1000000000000_u128 };
     if (abs_tick & 0x2) != 0 { ratio = (ratio * 0xfff608684f0a_u128) >> 48; }
@@ -45,7 +43,7 @@ pub fn tick_to_sqrt_price_x64(tick: i32) -> u128 {
     ratio << 32
 }
 
-// --- Fonctions de calcul de montant (Inchangées et correctes) ---
+// --- Fonctions de calcul de montant (Traduites de `liquidity_math.rs`) ---
 fn get_amount_y(sqrt_price_a: u128, sqrt_price_b: u128, liquidity: u128) -> u128 {
     let (sqrt_price_a, sqrt_price_b) = if sqrt_price_a > sqrt_price_b { (sqrt_price_b, sqrt_price_a) } else { (sqrt_price_a, sqrt_price_b) };
     (U256::from(liquidity) * U256::from(sqrt_price_b - sqrt_price_a) >> BITS).as_u128()
@@ -61,6 +59,7 @@ fn get_amount_x(sqrt_price_a: u128, sqrt_price_b: u128, liquidity: u128) -> u128
     (ratio * U256::from(sqrt_price_b - sqrt_price_a) >> (BITS * 2)).as_u128()
 }
 
+// --- Fonctions de calcul de prix (Traduites de `sqrt_price_math.rs`) ---
 fn get_next_sqrt_price_from_amount_x_in(sqrt_price: u128, liquidity: u128, amount_in: u128) -> u128 {
     if amount_in == 0 { return sqrt_price; }
     let numerator = U256::from(liquidity) << BITS;
@@ -75,7 +74,7 @@ fn get_next_sqrt_price_from_amount_y_in(sqrt_price: u128, liquidity: u128, amoun
     sqrt_price + ((U256::from(amount_in) << BITS) / U256::from(liquidity)).as_u128()
 }
 
-// --- NOUVELLE FONCTION `compute_swap_step` ---
+// --- NOUVELLE FONCTION `compute_swap_step` (Traduite de `swap_math.rs`) ---
 // Calcule l'étape d'un swap en prenant en compte les frais.
 // Retourne: (prochain_sqrt_price, montant_in_consommé, montant_out_produit, frais_payés)
 pub fn compute_swap_step(
@@ -93,33 +92,39 @@ pub fn compute_swap_step(
     let fee_rate_u64 = fee_rate as u64;
     const FEE_RATE_DENOMINATOR_VALUE: u64 = 1_000_000;
 
+    // On calcule le montant net disponible pour le swap après déduction des frais.
     let amount_remaining_less_fee = (amount_remaining as u64).mul_div_floor(
         FEE_RATE_DENOMINATOR_VALUE - fee_rate_u64,
         FEE_RATE_DENOMINATOR_VALUE
     ).ok_or_else(|| anyhow!("Math overflow"))? as u128;
 
-    if is_base_input {
+    if is_base_input { // Vente de token 0 (base) pour du token 1 (quote)
         let amount_in_to_reach_target = get_amount_x(sqrt_price_target_x64, sqrt_price_current_x64, liquidity);
         if amount_remaining_less_fee >= amount_in_to_reach_target {
+            // Le montant restant est suffisant pour atteindre le prochain tick.
             sqrt_price_next_x64 = sqrt_price_target_x64;
             amount_in = amount_in_to_reach_target;
         } else {
+            // Le montant restant est insuffisant, on s'arrête avant le tick.
             sqrt_price_next_x64 = get_next_sqrt_price_from_amount_x_in(sqrt_price_current_x64, liquidity, amount_remaining_less_fee);
             amount_in = amount_remaining_less_fee;
         }
         amount_out = get_amount_y(sqrt_price_next_x64, sqrt_price_current_x64, liquidity);
-    } else {
+    } else { // Vente de token 1 (quote) pour du token 0 (base)
         let amount_in_to_reach_target = get_amount_y(sqrt_price_current_x64, sqrt_price_target_x64, liquidity);
         if amount_remaining_less_fee >= amount_in_to_reach_target {
+            // Le montant restant est suffisant pour atteindre le prochain tick.
             sqrt_price_next_x64 = sqrt_price_target_x64;
             amount_in = amount_in_to_reach_target;
         } else {
+            // Le montant restant est insuffisant, on s'arrête avant le tick.
             sqrt_price_next_x64 = get_next_sqrt_price_from_amount_y_in(sqrt_price_current_x64, liquidity, amount_remaining_less_fee);
             amount_in = amount_remaining_less_fee;
         }
         amount_out = get_amount_x(sqrt_price_current_x64, sqrt_price_next_x64, liquidity);
     }
 
+    // Calcul précis des frais.
     let fee_amount = (amount_in as u64).mul_div_ceil(
         fee_rate_u64,
         FEE_RATE_DENOMINATOR_VALUE - fee_rate_u64

@@ -222,7 +222,7 @@ async fn test_clmm(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()>
 
     // On vend du WSOL, comme dans la première transaction de l'image
     const INPUT_MINT: &str = "So11111111111111111111111111111111111111112";
-    const INPUT_AMOUNT_UI: f64 = 1.295638593;
+    const INPUT_AMOUNT_UI: f64 = 2.663385296;
     // --- FIN DE LA CONFIGURATION DU TEST ---
 
     println!("\n--- Test Raydium CLMM ({}) ---", POOL_ADDRESS);

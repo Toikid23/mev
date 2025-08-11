@@ -11,6 +11,7 @@ use bytemuck::{from_bytes, Pod, Zeroable};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::BTreeMap;
+use crate::decoders::raydium_decoders::tickarray_bitmap_extension;
 
 // --- STRUCTURES (Inchangées) ---
 #[derive(Debug, Clone)]
@@ -93,39 +94,97 @@ pub fn decode_pool(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Result
 }
 
 pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &RpcClient) -> Result<()> {
-    let (config_res, mint_a_res, mint_b_res) = tokio::join!(
+    // Étape 1: Hydratation de base (config, mints)
+    let bitmap_ext_address = tickarray_bitmap_extension::get_bitmap_extension_address(&pool.address, &pool.program_id);
+
+    // On fetch tous les comptes nécessaires en parallèle
+    let (config_res, mint_a_res, mint_b_res, pool_state_res, bitmap_ext_res) = tokio::join!(
         rpc_client.get_account_data(&pool.amm_config),
         rpc_client.get_account_data(&pool.mint_a),
-        rpc_client.get_account_data(&pool.mint_b)
+        rpc_client.get_account_data(&pool.mint_b),
+        rpc_client.get_account_data(&pool.address),
+        rpc_client.get_account(&bitmap_ext_address) // Utilise `get_account` qui retourne Result<Account>
     );
+
+    // ... (décodage du config et des mints, cette partie est correcte et ne change pas)
     let config_account_data = config_res?;
     let decoded_config = clmm_config::decode_config(&config_account_data)?;
     pool.tick_spacing = decoded_config.tick_spacing;
     pool.trade_fee_rate = decoded_config.trade_fee_rate;
-
     let mint_a_data = mint_a_res?;
     let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_data)?;
     pool.mint_a_decimals = decoded_mint_a.decimals;
     pool.mint_a_transfer_fee_bps = decoded_mint_a.transfer_fee_basis_points;
-
     let mint_b_data = mint_b_res?;
     let decoded_mint_b = spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_data)?;
     pool.mint_b_decimals = decoded_mint_b.decimals;
     pool.mint_b_transfer_fee_bps = decoded_mint_b.transfer_fee_basis_points;
 
-    const WINDOW_SIZE: i32 = 20; // Gardons une grande fenêtre pour le débogage
-    let ticks_per_array = (tick_array::TICK_ARRAY_SIZE as i32) * (pool.tick_spacing as i32);
-    let active_array_start_index =
-        tick_array::get_start_tick_index(pool.tick_current, pool.tick_spacing);
+    // Étape 2: Lire et combiner les bitmaps
+    let pool_state_data = pool_state_res?;
+    const BITMAP_OFFSET_IN_POOL_STATE: usize = 689;
+    let mut default_bitmap = [0u64; 16];
+    for i in 0..16 {
+        let start = BITMAP_OFFSET_IN_POOL_STATE + i * 8;
+        let end = start + 8;
+        default_bitmap[i] = u64::from_le_bytes(pool_state_data[start..end].try_into()?);
+    }
 
+    // CORRECTION de la gestion du résultat de `get_account`
+    let extension_bitmap_words = if let Ok(account) = bitmap_ext_res {
+        // L'appel a réussi et le compte existe
+        tickarray_bitmap_extension::decode_tick_array_bitmap_extension(&account.data)?.bitmap_words
+    } else {
+        // L'appel a échoué (le compte n'existe probablement pas), on retourne un vecteur vide
+        Vec::new()
+    };
+
+    // Étape 3: Parcourir les bitmaps et construire la liste d'adresses
     let mut addresses_to_fetch = Vec::new();
-    for i in -WINDOW_SIZE..=WINDOW_SIZE {
-        let target_start_index = active_array_start_index + (i * ticks_per_array);
-        if target_start_index < clmm_math::MIN_TICK || target_start_index > clmm_math::MAX_TICK {
-            continue;
+    let multiplier = (tick_array::TICK_ARRAY_SIZE as i32) * (pool.tick_spacing as i32);
+
+    // D'abord le bitmap par défaut du PoolState
+    for (word_index, &word) in default_bitmap.iter().enumerate() {
+        if word == 0 { continue; }
+        for bit_index in 0..64 {
+            if (word & (1 << bit_index)) != 0 {
+                let compressed_index = word_index * 64 + bit_index;
+                let start_tick_index = (compressed_index as i32 - 512) * multiplier;
+                if start_tick_index >= clmm_math::MIN_TICK && start_tick_index <= clmm_math::MAX_TICK {
+                    addresses_to_fetch.push(tick_array::get_tick_array_address(&pool.address, start_tick_index, &pool.program_id));
+                }
+            }
         }
-        let pda = tick_array::get_tick_array_address(&pool.address, target_start_index, &pool.program_id);
-        addresses_to_fetch.push(pda);
+    }
+
+    // Ensuite, le bitmap d'extension
+    let ticks_in_one_bitmap = multiplier * 512;
+    for (word_index, &word) in extension_bitmap_words.iter().enumerate() {
+        if word == 0 { continue; }
+        for bit_index in 0..64 {
+            if (word & (1 << bit_index)) != 0 {
+                let compressed_index = word_index * 64 + bit_index;
+                let start_tick_index = if compressed_index < (112 * 64) { // Négatif
+                    let tick_offset = (compressed_index / 512) as i32;
+                    let bit_pos_in_sub = (compressed_index % 512) as i32;
+                    -(ticks_in_one_bitmap * (tick_offset + 1)) + (bit_pos_in_sub * multiplier)
+                } else { // Positif
+                    let pos_idx = compressed_index - (112 * 64);
+                    let tick_offset = (pos_idx / 512) as i32;
+                    let bit_pos_in_sub = (pos_idx % 512) as i32;
+                    ticks_in_one_bitmap * (tick_offset + 1) + (bit_pos_in_sub * multiplier)
+                };
+                if start_tick_index >= clmm_math::MIN_TICK && start_tick_index <= clmm_math::MAX_TICK {
+                    addresses_to_fetch.push(tick_array::get_tick_array_address(&pool.address, start_tick_index, &pool.program_id));
+                }
+            }
+        }
+    }
+
+    // Étape 4: Hydrater
+    if addresses_to_fetch.is_empty() {
+        pool.tick_arrays = Some(BTreeMap::new());
+        return Ok(());
     }
 
     let accounts_results = rpc_client.get_multiple_accounts(&addresses_to_fetch).await?;
@@ -133,12 +192,12 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &RpcClient) -> Resu
     for account_opt in accounts_results {
         if let Some(account) = account_opt {
             if let Ok(decoded_array) = tick_array::decode_tick_array(&account.data) {
-                let start_tick = decoded_array.start_tick_index;
-                tick_arrays.insert(start_tick, decoded_array);
+                tick_arrays.insert(decoded_array.start_tick_index, decoded_array);
             }
         }
     }
     pool.tick_arrays = Some(tick_arrays);
+
     Ok(())
 }
 
@@ -277,30 +336,49 @@ fn find_next_initialized_tick<'a>(
     is_base_input: bool, // true = cherche vers le bas, false = cherche vers le haut
     tick_arrays: &'a BTreeMap<i32, TickArrayState>,
 ) -> Result<(i32, i128)> {
+    println!("[DEBUG find_tick] Recherche d'un tick initialisé. Direction: is_base_input={}, Tick actuel: {}", is_base_input, current_tick);
+
     if is_base_input { // Le prix baisse, on cherche un tick inférieur.
-        // On itère sur tous les arrays chargés, en ordre DÉCROISSANT de start_tick_index.
-        for (_, array_state) in tick_arrays.iter().rev() {
-            // On parcourt les ticks de l'array du plus grand au plus petit index (i).
+        for (start_index, array_state) in tick_arrays.iter().rev() {
+            println!("[DEBUG find_tick] Inspection de l'array commençant à: {}", start_index);
             for i in (0..tick_array::TICK_ARRAY_SIZE).rev() {
-                let tick_state = &array_state.ticks[i];
-                // On retourne le premier tick initialisé qu'on trouve qui est strictement inférieur au tick actuel.
-                if tick_state.liquidity_gross > 0 && tick_state.tick < current_tick {
-                    return Ok((tick_state.tick, tick_state.liquidity_net));
+                // CORRECTION : On copie les champs dans des variables locales avant de les utiliser.
+                let tick_state = array_state.ticks[i];
+                let liquidity_gross = tick_state.liquidity_gross;
+
+                if liquidity_gross > 0 {
+                    let tick = tick_state.tick;
+                    let liquidity_net = tick_state.liquidity_net;
+                    println!("[DEBUG find_tick]   -> Tick initialisé trouvé à l'index [{}]: tick={}, liquidity_gross={}", i, tick, liquidity_gross);
+
+                    if tick < current_tick {
+                        println!("[DEBUG find_tick]      --> C'est un candidat valide !");
+                        return Ok((tick, liquidity_net));
+                    }
                 }
             }
         }
     } else { // Le prix monte, on cherche un tick supérieur.
-        // On itère sur tous les arrays chargés, en ordre CROISSANT de start_tick_index.
-        for (_, array_state) in tick_arrays.iter() {
-            // On parcourt les ticks de l'array du plus petit au plus grand index (i).
+        for (start_index, array_state) in tick_arrays.iter() {
+            println!("[DEBUG find_tick] Inspection de l'array commençant à: {}", start_index);
             for i in 0..tick_array::TICK_ARRAY_SIZE {
-                let tick_state = &array_state.ticks[i];
-                // On retourne le premier tick initialisé qu'on trouve qui est strictement supérieur au tick actuel.
-                if tick_state.liquidity_gross > 0 && tick_state.tick > current_tick {
-                    return Ok((tick_state.tick, tick_state.liquidity_net));
+                // CORRECTION : On copie les champs dans des variables locales avant de les utiliser.
+                let tick_state = array_state.ticks[i];
+                let liquidity_gross = tick_state.liquidity_gross;
+
+                if liquidity_gross > 0 {
+                    let tick = tick_state.tick;
+                    let liquidity_net = tick_state.liquidity_net;
+                    println!("[DEBUG find_tick]   -> Tick initialisé trouvé à l'index [{}]: tick={}, liquidity_gross={}", i, tick, liquidity_gross);
+
+                    if tick > current_tick {
+                        println!("[DEBUG find_tick]      --> C'est un candidat valide !");
+                        return Ok((tick, liquidity_net));
+                    }
                 }
             }
         }
     }
+
     Err(anyhow!("Aucun tick initialisé trouvé dans la direction du swap parmi les arrays chargés."))
 }

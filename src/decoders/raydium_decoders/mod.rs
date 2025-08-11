@@ -7,3 +7,4 @@ pub mod stable_swap;
 pub mod clmm_pool;
 pub mod clmm_config;
 pub mod tick_array;
+pub mod tickarray_bitmap_extension;
