@@ -22,6 +22,18 @@ use mev::{
 use mev::decoders::orca_decoders::{whirlpool_decoder, token_swap_v2, token_swap_v1};
 use bincode::deserialize;
 
+use solana_sdk::{
+    account::Account,
+    instruction::Instruction,
+    signature::Keypair,
+    signer::Signer,
+};
+use spl_token::state::Account as SplTokenAccount;
+use mev::execution::simulate; // Notre module de simulation !
+use solana_program_pack::Pack;
+use spl_associated_token_account::get_associated_token_address;
+
+
 
 // =================================================================================
 // FONCTION UTILITAIRE D'AFFICHAGE (INCHANGÉE LOGIQUEMENT, JUSTE AVEC TIMESTAMP)
@@ -63,6 +75,45 @@ async fn get_timestamp(rpc_client: &RpcClient) -> Result<i64> {
 
     Ok(clock.unix_timestamp)
 }
+
+fn create_temp_token_account(
+    mint: &Pubkey,
+    owner: &Pubkey,
+    amount: u64
+) -> Account {
+    let mut data = vec![0u8; SplTokenAccount::LEN];
+    let mut token_account = SplTokenAccount::default();
+    token_account.mint = *mint;
+    token_account.owner = *owner;
+    token_account.amount = amount;
+    token_account.state = spl_token::state::AccountState::Initialized;
+    SplTokenAccount::pack(token_account, &mut data).unwrap();
+
+    Account {
+        lamports: 1_000_000_000, // Assez pour être "rent-exempt"
+        data,
+        owner: spl_token::id(), // Le propriétaire est le programme SPL Token
+        executable: false,
+        rent_epoch: 0,
+    }
+}
+
+/// Parse les logs d'une simulation pour trouver le montant d'un transfert SPL Token.
+/// Cherche une ligne du type "spl_token: instruction: Transfer" et extrait le montant.
+fn parse_spl_token_transfer_amount_from_logs(logs: &[String]) -> Option<u64> {
+    logs.iter()
+        .filter_map(|log| {
+            if log.starts_with("Program log: ") && log.contains("spl_token: instruction: Transfer") {
+                // Le log ressemble à: "Program log: ZCND... instruction: Transfer ... amount 12345"
+                log.split_whitespace().last()?.parse::<u64>().ok()
+            } else {
+                None
+            }
+        })
+        .next() // On prend le premier transfert trouvé
+}
+
+
 
 
 // --- TEST DLMM (CORRIGÉ) ---
@@ -137,42 +188,118 @@ async fn test_dlmm(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()>
     Ok(())
 }
 
-// --- AUTRES TESTS CORRIGÉS ---
-
 async fn test_ammv4(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
-    // --- CONSTANTES POUR LA TRANSACTION WOJAK-WSOL ---
-    // Je dois deviner l'adresse du pool WOJAK-WSOL, celle-ci est une possibilité,
-    // mais il faudra peut-être l'ajuster si ce n'est pas la bonne.
-    const POOL_ADDRESS: &str = "6GDrReNVfyjQDCuGMrKdG2JU7Uj8NCvBt2ukaL2mDj1L"; // WOJAK-SOL
-    const INPUT_MINT: &str = "So11111111111111111111111111111111111111112";   // WSOL
-    const INPUT_AMOUNT_UI: f64 = 1.459648; // Vente de 2.60739 WSOL
-    // --- FIN DES CONSTANTES ---
+    const POOL_ADDRESS: &str = "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2"; // WSOL-USDC
+    const INPUT_MINT_STR: &str = "So11111111111111111111111111111111111111112"; // WSOL
+    const INPUT_AMOUNT_UI: f64 = 1.0;
 
-    println!("\n--- Test Raydium AMMv4 ({}) ---", POOL_ADDRESS);
+    println!("\n--- Test et Simulation Raydium AMMv4 ({}) ---", POOL_ADDRESS);
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
-    let account_data = rpc_client.get_account_data(&pool_pubkey).await?;
-    let mut pool = amm_v4::decode_pool(&pool_pubkey, &account_data)?;
 
-    println!("[1/2] Hydratation...");
+    // On récupère le compte du pool
+    let mut pool_account = rpc_client.get_account(&pool_pubkey).await?;
+
+    let mut pool = amm_v4::decode_pool(&pool_pubkey, &pool_account.data)?;
+
+    println!("[1/4] Hydratation du pool...");
     amm_v4::hydrate(&mut pool, rpc_client).await?;
-    println!("-> Hydratation terminée. Frais: {:.4}%.", pool.fee_as_percent());
+    println!("-> Hydratation terminée.");
 
-    let input_mint_pubkey = Pubkey::from_str(INPUT_MINT)?;
-
-    // --- DÉTERMINATION DYNAMIQUE DES DÉCIMALES ---
-    let (input_decimals, output_decimals) = if input_mint_pubkey == pool.mint_a {
-        (pool.mint_a_decimals, pool.mint_b_decimals)
+    let input_mint_pubkey = Pubkey::from_str(INPUT_MINT_STR)?;
+    let (input_decimals, output_decimals, output_mint_pubkey) = if input_mint_pubkey == pool.mint_a {
+        (pool.mint_a_decimals, pool.mint_b_decimals, pool.mint_b)
     } else {
-        (pool.mint_b_decimals, pool.mint_a_decimals)
+        (pool.mint_b_decimals, pool.mint_a_decimals, pool.mint_a)
+    };
+    let amount_in_base_units = (INPUT_AMOUNT_UI * 10f64.powi(input_decimals as i32)) as u64;
+
+    println!("\n[2/4] Calcul du quote via la fonction interne...");
+    let predicted_amount_out = pool.get_quote(&input_mint_pubkey, amount_in_base_units, current_timestamp)?;
+    let ui_predicted_amount_out = predicted_amount_out as f64 / 10f64.powi(output_decimals as i32);
+    println!("-> PRÉDICTION: Pour {} UI de {}, get_quote prédit {} UI de {}",
+             INPUT_AMOUNT_UI, input_mint_pubkey, ui_predicted_amount_out, output_mint_pubkey);
+
+    println!("\n[3/4] Simulation de la transaction en mode AMM Pur...");
+
+    let payer = Keypair::new();
+    let user_source_ata = get_associated_token_address(&payer.pubkey(), &input_mint_pubkey);
+    let user_destination_ata = get_associated_token_address(&payer.pubkey(), &output_mint_pubkey);
+
+    let user_source_account = create_temp_token_account(&input_mint_pubkey, &payer.pubkey(), amount_in_base_units);
+    let user_dest_account = create_temp_token_account(&output_mint_pubkey, &payer.pubkey(), 0);
+
+    let swap_ix = amm_v4::create_swap_instruction(
+        &pool, &user_source_ata, &user_destination_ata, &payer.pubkey(), amount_in_base_units, 0,
+    )?;
+    println!("-> Instruction de swap construite.");
+
+    // On modifie le statut du compte pool en mémoire pour forcer le mode SwapOnly (valeur 6)
+    // Le statut est le premier champ u64 (8 bytes) de la structure de données du compte.
+    let swap_only_status: u64 = 6;
+    pool_account.data[0..8].copy_from_slice(&swap_only_status.to_le_bytes());
+    println!("-> Statut du pool modifié en mémoire pour forcer le mode AMM pur.");
+
+    // On ne charge que le strict minimum : les vaults réels, le pool modifié, et les comptes utilisateur virtuels
+    let accounts_to_fetch_for_sim = vec![
+        pool.vault_a,
+        pool.vault_b,
+    ];
+
+    let account_data_for_sim = rpc_client.get_multiple_accounts(&accounts_to_fetch_for_sim).await?;
+
+    let mut accounts_to_load: Vec<(Pubkey, Account)> = accounts_to_fetch_for_sim
+        .into_iter()
+        .zip(account_data_for_sim.into_iter())
+        .filter_map(|(pubkey, acc_opt)| acc_opt.map(|acc| (pubkey, acc)))
+        .collect();
+
+    accounts_to_load.push((pool.address, pool_account));
+    accounts_to_load.push((user_source_ata, user_source_account));
+    accounts_to_load.push((user_destination_ata, user_dest_account));
+
+    println!("-> Préparation de {} comptes (minimum) pour le contexte de simulation.", accounts_to_load.len());
+
+    let sim_result = simulate::simulate_instruction(rpc_client, swap_ix, &payer, accounts_to_load).await?;
+    println!("-> Simulation réussie ! Unités de calcul consommées : {:?}", sim_result.units_consumed);
+
+    // [ÉTAPE 4] ... reste inchangé ...
+    println!("\n[4/4] Analyse des résultats...");
+
+    let simulated_amount_out = match sim_result.logs {
+        Some(logs) => {
+            let dest_pubkey_str = user_destination_ata.to_string();
+            logs.iter()
+                .filter_map(|log| {
+                    if log.contains("spl-token") && log.contains("Transfer") {
+                        log.split_whitespace().last()?.parse::<u64>().ok()
+                    } else {
+                        None
+                    }
+                })
+                .last()
+                .ok_or_else(|| anyhow!("Impossible de trouver le transfert SPL dans les logs"))?
+        },
+        None => bail!("Les logs de la simulation sont vides."),
     };
 
-    println!("   -> Token d'entrée (WSOL): {} ({} décimales détectées)", input_mint_pubkey, input_decimals);
-    println!("   -> Token de sortie (WOJAK): {} ({} décimales détectées)", if input_mint_pubkey == pool.mint_a { pool.mint_b } else { pool.mint_a }, output_decimals);
-    // --- FIN DE LA DÉTERMINATION ---
+    let ui_simulated_amount_out = simulated_amount_out as f64 / 10f64.powi(output_decimals as i32);
 
-    let amount_in_base_units = (INPUT_AMOUNT_UI * 10f64.powi(input_decimals as i32)) as u64;
-    println!("\n[2/2] Calcul du quote pour VENDRE {} UI de WSOL...", INPUT_AMOUNT_UI);
-    print_quote_result(&pool, &input_mint_pubkey, input_decimals, output_decimals, amount_in_base_units, current_timestamp)?;
+
+    println!("\n--- COMPARAISON ---");
+    println!("Montant de sortie PRÉDIT (get_quote)  : {}", ui_predicted_amount_out);
+    println!("Montant de sortie SIMULÉ (on-chain) : {}", ui_simulated_amount_out);
+
+    let difference = (ui_predicted_amount_out - ui_simulated_amount_out).abs();
+    let difference_percent = if ui_simulated_amount_out > 0.0 { (difference / ui_simulated_amount_out) * 100.0 } else { 0.0 };
+
+    println!("\n-> Différence absolue : {:.9}", difference);
+    println!("-> Différence relative: {:.4} %", difference_percent);
+
+    if difference_percent < 0.01 {
+        println!("✅ EXCELLENT ! La différence est négligeable. Le décodeur est précis.");
+    } else {
+        println!("⚠️ ATTENTION ! La différence est significative. Le calcul de get_quote pourrait être imprécis.");
+    }
 
     Ok(())
 }
