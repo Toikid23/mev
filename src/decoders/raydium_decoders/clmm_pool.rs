@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, HashSet};
 use crate::decoders::raydium_decoders::tick_array::TICK_ARRAY_SIZE;
 
 
+
 // --- STRUCTURES (Inchangées) ---
 #[derive(Debug, Clone)]
 pub struct DecodedClmmPool {
@@ -147,47 +148,62 @@ impl DecodedClmmPool {
         user_owner: &Pubkey,
         amount_in: u64,
         minimum_amount_out: u64,
+        // La fonction attend une liste de 3 tick_arrays
+        tick_arrays: Vec<Pubkey>,
     ) -> Result<Instruction> {
-        let mut instruction_data: Vec<u8> = vec![122, 22, 232, 163, 102, 137, 13, 52]; // swap_v2
-        instruction_data.extend_from_slice(&amount_in.to_le_bytes());
-        instruction_data.extend_from_slice(&minimum_amount_out.to_le_bytes());
-        instruction_data.extend_from_slice(&u128::to_le_bytes(0)); // sqrt_price_limit
-        instruction_data.extend_from_slice(&[1]); // is_base_input = true
+        if tick_arrays.len() != 3 {
+            bail!("L'instruction de swap CLMM de Raydium requiert exactement 3 comptes de tick_array.");
+        }
 
         let is_base_input = *input_token_mint == self.mint_a;
 
-        let (input_vault, output_vault, input_mint, output_mint) = if is_base_input {
+        let sqrt_price_limit = if is_base_input {
+            4295128739_u128 // MIN_SQRT_PRICE_X64 + 1
+        } else {
+            79226673515401279992447579055_u128 // MAX_SQRT_PRICE_X64 - 1
+        };
+
+        let mut instruction_data: Vec<u8> = vec![43, 4, 237, 11, 26, 201, 30, 98]; // Discriminator `swap_v2`
+        instruction_data.extend_from_slice(&amount_in.to_le_bytes());
+        instruction_data.extend_from_slice(&minimum_amount_out.to_le_bytes());
+        instruction_data.extend_from_slice(&sqrt_price_limit.to_le_bytes());
+        instruction_data.push(u8::from(is_base_input));
+
+        let (input_vault, output_vault, input_vault_mint, output_vault_mint) = if is_base_input {
             (self.vault_a, self.vault_b, self.mint_a, self.mint_b)
         } else {
             (self.vault_b, self.vault_a, self.mint_b, self.mint_a)
         };
 
+        // --- LA STRUCTURE FINALE ET CORRECTE ---
         let mut accounts = vec![
-            AccountMeta::new_readonly(*user_owner, true),
-            AccountMeta::new_readonly(self.amm_config, false),
-            AccountMeta::new(self.address, false),
-            AccountMeta::new(*user_source_token_account, false),
-            AccountMeta::new(*user_destination_token_account, false),
-            AccountMeta::new(input_vault, false),
-            AccountMeta::new(output_vault, false),
-            AccountMeta::new(self.observation_key, false),
-            AccountMeta::new_readonly(spl_token::id(), false),
-            AccountMeta::new_readonly(spl_token_2022::id(), false),
-            AccountMeta::new_readonly(spl_memo::id(), false),
-            AccountMeta::new_readonly(input_mint, false),
-            AccountMeta::new_readonly(output_mint, false),
+            // 1. Les 13 comptes principaux de l'IDL
+            AccountMeta { pubkey: *user_owner, is_signer: true, is_writable: false },
+            AccountMeta { pubkey: self.amm_config, is_signer: false, is_writable: false },
+            AccountMeta { pubkey: self.address, is_signer: false, is_writable: true },
+            AccountMeta { pubkey: *user_source_token_account, is_signer: false, is_writable: true },
+            AccountMeta { pubkey: *user_destination_token_account, is_signer: false, is_writable: true },
+            AccountMeta { pubkey: input_vault, is_signer: false, is_writable: true },
+            AccountMeta { pubkey: output_vault, is_signer: false, is_writable: true },
+            AccountMeta { pubkey: self.observation_key, is_signer: false, is_writable: true },
+            AccountMeta { pubkey: spl_token::id(), is_signer: false, is_writable: false },
+            AccountMeta { pubkey: spl_token_2022::id(), is_signer: false, is_writable: false },
+            AccountMeta { pubkey: spl_memo::id(), is_signer: false, is_writable: false },
+            AccountMeta { pubkey: input_vault_mint, is_signer: false, is_writable: false },
+            AccountMeta { pubkey: output_vault_mint, is_signer: false, is_writable: false },
         ];
 
+        // 2. Le compte d'extension du bitmap, qui doit être `writable`.
         let tick_array_bitmap_extension = tickarray_bitmap_extension::get_bitmap_extension_address(&self.address, &self.program_id);
-        accounts.push(AccountMeta::new(tick_array_bitmap_extension, false));
+        accounts.push(AccountMeta { pubkey: tick_array_bitmap_extension, is_signer: false, is_writable: true });
 
-        // On fournit les 3 prochains tick arrays initialisés
-        let tick_array_keys = self.get_next_initialized_tick_arrays(is_base_input, 3);
-        for key in tick_array_keys {
-            accounts.push(AccountMeta::new(key, false));
+        // 3. Les 3 comptes de TickArray, tous `writable`.
+        for key in tick_arrays {
+            accounts.push(AccountMeta { pubkey: key, is_signer: false, is_writable: true });
         }
+        // --- FIN DE LA STRUCTURE CORRECTE ---
 
-        Ok(Instruction {
+        Ok(solana_sdk::instruction::Instruction {
             program_id: self.program_id,
             accounts,
             data: instruction_data,
@@ -431,7 +447,27 @@ impl PoolOperations for DecodedClmmPool {
     }
 
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<u64> {
-        Ok(self.get_quote_with_tick_arrays(token_in_mint, amount_in, current_timestamp)?.0)
+        // --- LA LOGIQUE FINALE ET COMPLÈTE ---
+
+        // 1. Calculer le montant brut de sortie en utilisant notre logique de swap validée.
+        // Cette fonction prend déjà en compte la taxe sur le jeton d'entrée.
+        let (gross_amount_out, _) =
+            self.get_quote_with_tick_arrays(token_in_mint, amount_in, current_timestamp)?;
+
+        // 2. Déterminer la taxe du jeton de SORTIE.
+        let output_mint_fee_bps = if *token_in_mint == self.mint_a {
+            self.mint_b_transfer_fee_bps // La sortie est le token B
+        } else {
+            self.mint_a_transfer_fee_bps // La sortie est le token A
+        };
+
+        // 3. Calculer la taxe sur le montant brut de sortie.
+        let fee_on_output = (gross_amount_out as u128 * output_mint_fee_bps as u128) / 10000;
+
+        // 4. Calculer le montant final que l'utilisateur reçoit.
+        let final_amount_out = gross_amount_out.saturating_sub(fee_on_output as u64);
+
+        Ok(final_amount_out)
     }
 }
 

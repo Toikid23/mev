@@ -32,6 +32,11 @@ use spl_token::state::Account as SplTokenAccount;
 use mev::execution::simulate; // Notre module de simulation !
 use solana_program_pack::Pack;
 use spl_associated_token_account::get_associated_token_address;
+use solana_sdk::transaction::Transaction;
+use std::collections::HashSet;
+use std::collections::HashMap;
+use anchor_lang::{AnchorDeserialize, Discriminator};
+use borsh::BorshDeserialize;
 
 
 // =================================================================================
@@ -73,6 +78,13 @@ async fn get_timestamp(rpc_client: &RpcClient) -> Result<i64> {
     let clock: Clock = deserialize(&clock_account.data)?;
 
     Ok(clock.unix_timestamp)
+}
+
+fn parse_spl_token_transfer_amount_from_logs(logs: &[String]) -> Option<u64> {
+    // La nouvelle sortie de simulation a des logs plus verbeux
+    logs.iter()
+        .find(|log| log.contains("spl_token") && log.contains("Transfer") && log.starts_with("Program log:"))
+        .and_then(|log| log.split_whitespace().last()?.parse::<u64>().ok())
 }
 
 
@@ -167,7 +179,7 @@ fn create_temp_token_account(
     SplTokenAccount::pack(token_account_state, &mut data).unwrap();
 
     Account {
-        lamports: 2_039_280, // Rent-exempt amount
+        lamports: 2_039_280, // Montant pour être rent-exempt
         data,
         owner: spl_token::id(),
         executable: false,
@@ -175,11 +187,45 @@ fn create_temp_token_account(
     }
 }
 
-fn parse_spl_token_transfer_amount_from_logs(logs: &[String]) -> Option<u64> {
-    // La nouvelle sortie de simulation a des logs plus verbeux
-    logs.iter()
-        .find(|log| log.contains("spl_token") && log.contains("Transfer") && log.starts_with("Program log:"))
-        .and_then(|log| log.split_whitespace().last()?.parse::<u64>().ok())
+
+fn parse_swap_event_from_logs(logs: &[String], is_base_input: bool) -> Option<u64> {
+    // Discriminator pour SwapEvent, tiré de l'IDL de Raydium
+    const SWAP_EVENT_DISCRIMINATOR: [u8; 8] = [64, 198, 205, 232, 38, 8, 113, 226];
+
+    for log in logs {
+        if let Some(data_str) = log.strip_prefix("Program data: ") {
+            if let Ok(bytes) = base64::decode(data_str) {
+                if bytes.len() > 8 && bytes.starts_with(&SWAP_EVENT_DISCRIMINATOR) {
+                    let mut event_data: &[u8] = &bytes[8..];
+                    if let Ok(event) = SwapEvent::try_from_slice(&mut event_data) {
+                        if is_base_input {
+                            return Some(event.amount_1);
+                        } else {
+                            return Some(event.amount_0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[derive(BorshDeserialize, Debug)]
+pub struct SwapEvent {
+    // discriminator: [u8; 8], // Le discriminator est déjà vérifié, on ne le met pas dans la struct
+    pub pool_state: Pubkey,
+    pub sender: Pubkey,
+    pub token_account_0: Pubkey,
+    pub token_account_1: Pubkey,
+    pub amount_0: u64,
+    pub transfer_fee_0: u64,
+    pub amount_1: u64,
+    pub transfer_fee_1: u64,
+    pub zero_for_one: bool,
+    pub sqrt_price_x64: u128,
+    pub liquidity: u128,
+    pub tick: i32,
 }
 
 
@@ -253,6 +299,16 @@ async fn test_ammv4(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()
     accounts_to_load.push((user_source_ata, user_source_account));
     accounts_to_load.push((user_destination_ata, user_dest_account));
 
+    let payer_account = Account {
+        lamports: 1_000_000_000,
+        data: vec![],
+        owner: solana_sdk::system_program::id(),
+        executable: false,
+        rent_epoch: u64::MAX,
+    };
+    accounts_to_load.push((payer.pubkey(), payer_account));
+
+
     println!("-> {} comptes chargés pour le contexte de simulation.", accounts_to_load.len());
 
     // --- ÉTAPE 3 : SIMULATION ET ANALYSE ---
@@ -321,17 +377,18 @@ async fn test_cpmm(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()>
 
 // DANS : src/bin/dev_runner.rs
 
-async fn test_clmm(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
+
+
+async fn test_clmm(rpc_client: &RpcClient, payer: &Keypair, current_timestamp: i64) -> Result<()> {
     const POOL_ADDRESS: &str = "YrrUStgPugDp8BbfosqDeFssen6sA75ZS1QJvgnHtmY";
     const PROGRAM_ID: &str = "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK";
     const INPUT_MINT_STR: &str = "So11111111111111111111111111111111111111112";
     const INPUT_AMOUNT_UI: f64 = 0.1;
 
-    println!("\n--- Test et Simulation FINALE Raydium CLMM ({}) ---", POOL_ADDRESS);
+    println!("\n--- Test et Simulation (VRAI COMPTE) Raydium CLMM ({}) ---", POOL_ADDRESS);
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
     let program_pubkey = Pubkey::from_str(PROGRAM_ID)?;
 
-    // --- ÉTAPE 1 : HYDRATATION ET PRÉDICTION LOCALE ---
     println!("[1/3] Hydratation et prédiction locale...");
     let pool_account_data = rpc_client.get_account_data(&pool_pubkey).await?;
     let mut pool = clmm_pool::decode_pool(&pool_pubkey, &pool_account_data, &program_pubkey)?;
@@ -341,43 +398,74 @@ async fn test_clmm(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()>
         (pool.mint_a_decimals, pool.mint_b_decimals, pool.mint_b)
     } else { (pool.mint_b_decimals, pool.mint_a_decimals, pool.mint_a) };
     let amount_in_base_units = (INPUT_AMOUNT_UI * 10f64.powi(input_decimals as i32)) as u64;
-    let predicted_amount_out = pool.get_quote(&input_mint_pubkey, amount_in_base_units, current_timestamp)?;
+
+    let (predicted_amount_out, _) = pool.get_quote_with_tick_arrays(&input_mint_pubkey, amount_in_base_units, current_timestamp)?;
     let ui_predicted_amount_out = predicted_amount_out as f64 / 10f64.powi(output_decimals as i32);
-    println!("-> PRÉDICTION LOCALE: {}", ui_predicted_amount_out);
+    println!("-> PRÉDICTION LOCALE (potentiellement fausse): {}", ui_predicted_amount_out);
 
-    // --- ÉTAPE 2 : PRÉPARATION DE LA SIMULATION ---
     println!("\n[2/3] Préparation de la simulation...");
-    let payer = Keypair::new();
+
+    // --- LA LOGIQUE DE TICK_ARRAY CORRECTE ET DYNAMIQUE (selon les logs d'erreur) ---
+    let is_base_input = input_mint_pubkey == pool.mint_a;
+    let ticks_in_array = (mev::decoders::raydium_decoders::tick_array::TICK_ARRAY_SIZE as i32) * (pool.tick_spacing as i32);
+
+    // 1. Obtenir tous les index des TickArrays initialisés que nous avons hydratés.
+    let mut initialized_indices: Vec<i32> = pool.tick_arrays.as_ref().unwrap().keys().cloned().collect();
+    initialized_indices.sort(); // S'assurer qu'ils sont triés
+
+    // 2. Trouver le premier TickArray initialisé dans la direction du swap, COMME LE DEMANDE LE LOG D'ERREUR.
+    let first_array_start_index = if is_base_input {
+        // Le prix baisse, on cherche le plus grand index <= au tick actuel.
+        *initialized_indices.iter().rev().find(|&&i| i <= pool.tick_current).unwrap_or(&pool.tick_current)
+    } else {
+        // Le prix monte, on cherche le plus petit index >= au tick actuel.
+        *initialized_indices.iter().find(|&&i| i >= pool.tick_current).unwrap_or(&pool.tick_current)
+    };
+
+    // 3. Construire la liste des 3 TickArrays attendus à partir de ce point de départ.
+    let final_tick_arrays: Vec<Pubkey> = if is_base_input {
+        vec![
+            first_array_start_index,
+            first_array_start_index - ticks_in_array,
+            first_array_start_index - (2 * ticks_in_array),
+        ]
+    } else {
+        vec![
+            first_array_start_index,
+            first_array_start_index + ticks_in_array,
+            first_array_start_index + (2 * ticks_in_array),
+        ]
+    }.into_iter().map(|index| {
+        mev::decoders::raydium_decoders::tick_array::get_tick_array_address(&pool.address, index, &pool.program_id)
+    }).collect();
+    // --- FIN DE LA LOGIQUE CORRECTE ---
+
     let user_source_ata = get_associated_token_address(&payer.pubkey(), &input_mint_pubkey);
-    let user_destination_ata = get_associated_token_address(&payer.pubkey(), &output_mint_pubkey);
+    let user_destination_ata = spl_associated_token_account::get_associated_token_address_with_program_id(&payer.pubkey(), &output_mint_pubkey, &spl_token_2022::id());
 
-    let swap_ix = pool.create_swap_instruction(&input_mint_pubkey, &user_source_ata, &user_destination_ata, &payer.pubkey(), amount_in_base_units, 0)?;
-    println!("-> Instruction de swap construite pour {} comptes.", swap_ix.accounts.len());
+    let swap_ix = pool.create_swap_instruction(
+        &input_mint_pubkey, &user_source_ata, &user_destination_ata, &payer.pubkey(),
+        amount_in_base_units, 0, final_tick_arrays,
+    )?;
 
-    let mut keys_for_sim: Vec<Pubkey> = swap_ix.accounts.iter().map(|meta| meta.pubkey).collect();
-    keys_for_sim.retain(|&key| key != payer.pubkey() && key != user_source_ata && key != user_destination_ata);
-    keys_for_sim.sort(); keys_for_sim.dedup();
+    let mut transaction = Transaction::new_with_payer(&[swap_ix], Some(&payer.pubkey()));
+    transaction.sign(&[payer], rpc_client.get_latest_blockhash().await?);
 
-    println!("-> Récupération de l'état on-chain de {} comptes...", keys_for_sim.len());
-    let account_data_for_sim = rpc_client.get_multiple_accounts(&keys_for_sim).await?;
+    println!("\n[3/3] Exécution de la simulation standard...");
+    let sim_result = rpc_client.simulate_transaction(&transaction).await?.value;
 
-    let mut accounts_to_load: Vec<(Pubkey, Account)> = keys_for_sim.into_iter().zip(account_data_for_sim.into_iter())
-        .filter_map(|(pubkey, acc_opt)| acc_opt.map(|acc| (pubkey, acc)))
-        .collect();
+    if sim_result.err.is_some() {
+        println!("LOGS DE SIMULATION DÉTAILLÉS:\n{:#?}", sim_result.logs);
+        bail!("La simulation a échoué. Cause : {:?}", sim_result.err);
+    }
 
-    let user_source_account = create_temp_token_account(&input_mint_pubkey, &payer.pubkey(), amount_in_base_units);
-    let user_dest_account = create_temp_token_account(&output_mint_pubkey, &payer.pubkey(), 0);
-    accounts_to_load.push((user_source_ata, user_source_account));
-    accounts_to_load.push((user_destination_ata, user_dest_account));
-    println!("-> {} comptes chargés pour le contexte de simulation.", accounts_to_load.len());
-
-    // --- ÉTAPE 3 : SIMULATION ET ANALYSE ---
-    println!("\n[3/3] Exécution de la simulation...");
-    let sim_result = simulate::simulate_instruction(rpc_client, swap_ix, &payer, accounts_to_load).await?;
-    println!("-> Simulation réussie !");
+    println!("✅✅✅ VICTOIRE ! La simulation a réussi !");
+    println!("Maintenant, vérifions le résultat...");
 
     let simulated_amount_out = match sim_result.logs {
-        Some(logs) => parse_spl_token_transfer_amount_from_logs(&logs).ok_or_else(|| anyhow!("Impossible de trouver le transfert"))?,
+        Some(logs) => parse_swap_event_from_logs(&logs, is_base_input).ok_or_else(|| {
+            anyhow!("Impossible de trouver le transfert dans les logs de simulation.")
+        })?,
         None => bail!("Logs de simulation vides."),
     };
     let ui_simulated_amount_out = simulated_amount_out as f64 / 10f64.powi(output_decimals as i32);
@@ -390,9 +478,9 @@ async fn test_clmm(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()>
     println!("-> Différence relative: {:.4} %", difference_percent);
 
     if difference_percent < 0.1 {
-        println!("✅ EXCELLENT ! Le décodeur CLMM est précis.");
+        println!("✅ La prédiction de `get_quote` est correcte !");
     } else {
-        println!("⚠️ ATTENTION ! La différence est significative.");
+        println!("⚠️ La simulation fonctionne, mais la prédiction de `get_quote` est à revoir.");
     }
 
     Ok(())
@@ -611,23 +699,21 @@ async fn main() -> Result<()> {
     println!("--- Lancement du Banc d'Essai des Décodeurs ---");
     let config = Config::load()?;
     let rpc_client = RpcClient::new(config.solana_rpc_url);
-    let current_timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs() as i64;
+
+    // On charge le vrai portefeuille depuis la clé privée dans le .env
+    let payer_keypair = Keypair::from_base58_string(&config.payer_private_key);
+    println!("-> Utilisation du portefeuille payeur : {}", payer_keypair.pubkey());
+
+    let current_timestamp = get_timestamp(&rpc_client).await?;
     println!("-> Timestamp du cluster utilisé pour tous les tests: {}", current_timestamp);
 
     let args: Vec<String> = env::args().skip(1).collect();
 
-    // On récupère le timestamp une seule fois pour tous les tests
-    let current_timestamp = get_timestamp(&rpc_client).await?;
-    println!("-> Timestamp du cluster utilisé pour tous les tests: {}", current_timestamp);
-
-
-    if args.is_empty() {
+    if args.is_empty() || args.contains(&"all".to_string()) {
         println!("Mode: Exécution de tous les tests.");
         if let Err(e) = test_ammv4(&rpc_client, current_timestamp).await { println!("!! AMMv4 a échoué: {}", e); }
         if let Err(e) = test_cpmm(&rpc_client, current_timestamp).await { println!("!! CPMM a échoué: {}", e); }
-        if let Err(e) = test_clmm(&rpc_client, current_timestamp).await { println!("!! CLMM a échoué: {}", e); }
+        if let Err(e) = test_clmm(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! CLMM a échoué: {}", e); }
         if let Err(e) = test_launchpad(&rpc_client, current_timestamp).await { println!("!! Launchpad a échoué: {}", e); }
         if let Err(e) = test_meteora_amm(&rpc_client, current_timestamp).await { println!("!! Meteora AMM a échoué: {}", e); }
         if let Err(e) = test_damm_v2(&rpc_client, current_timestamp).await { println!("!! Meteora DAMM v2 a echoue: {}", e); }
@@ -642,7 +728,7 @@ async fn main() -> Result<()> {
             let result = match test_name.as_str() {
                 "ammv4" => test_ammv4(&rpc_client, current_timestamp).await,
                 "cpmm" => test_cpmm(&rpc_client, current_timestamp).await,
-                "clmm" => test_clmm(&rpc_client, current_timestamp).await,
+                "clmm" => test_clmm(&rpc_client, &payer_keypair, current_timestamp).await,
                 "launchpad" => test_launchpad(&rpc_client, current_timestamp).await,
                 "meteora_amm" => test_meteora_amm(&rpc_client, current_timestamp).await,
                 "damm_v2" => test_damm_v2(&rpc_client, current_timestamp).await,

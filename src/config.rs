@@ -1,9 +1,12 @@
+// DANS : src/config.rs
+
 use serde::Deserialize;
 use anyhow::Result;
 
 #[derive(Deserialize, Debug)]
 pub struct Config {
     pub solana_rpc_url: String,
+    pub payer_private_key: String, // <-- AJOUTEZ CETTE LIGNE
 }
 
 impl Config {
