@@ -4,7 +4,7 @@
 use crate::decoders::pool_operations::PoolOperations;
 use crate::decoders::spl_token_decoders;
 use anyhow::{anyhow, bail, Result};
-use bytemuck::{pod_read_unaligned, Pod, Zeroable};
+use bytemuck::{Pod, Zeroable};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use uint::construct_uint;

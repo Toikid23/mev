@@ -1,24 +1,25 @@
-// DANS : src/execution/simulate.rs (Version FINALE et CORRECTE)
+// DANS : src/execution/simulate.rs (Version NETTOYÉE)
 
 use anyhow::{anyhow, Result};
+// CORRECTION: Imports inutiles retirés
 use solana_client::{
     nonblocking::rpc_client::RpcClient,
-    rpc_config::RpcSimulateTransactionConfig,
     rpc_request::RpcRequest,
     rpc_response::{Response, RpcSimulateTransactionResult},
 };
 use solana_sdk::{
     account::Account,
-    commitment_config::CommitmentConfig,
     instruction::Instruction,
     pubkey::Pubkey,
     signature::Keypair,
     signer::Signer,
     transaction::Transaction,
 };
-use solana_transaction_status::UiTransactionEncoding;
 use std::collections::HashMap;
 use serde_json::json;
+// CORRECTION: Imports nécessaires pour la nouvelle API base64
+use base64::{engine::general_purpose, Engine as _};
+
 
 pub async fn simulate_instruction(
     rpc_client: &RpcClient,
@@ -32,17 +33,17 @@ pub async fn simulate_instruction(
     transaction.sign(&[payer], recent_blockhash);
 
     let serialized_tx = bincode::serialize(&transaction)?;
-    let encoded_tx = base64::encode(serialized_tx);
+    // CORRECTION: Utilisation de la nouvelle API base64
+    let encoded_tx = general_purpose::STANDARD.encode(serialized_tx);
 
     let loaded_accounts: HashMap<String, String> = accounts_to_load
         .into_iter()
         .map(|(pubkey, account)| {
-            let account_data = base64::encode(bincode::serialize(&account).unwrap_or_default());
+            let account_data = general_purpose::STANDARD.encode(bincode::serialize(&account).unwrap_or_default());
             (pubkey.to_string(), account_data)
         })
         .collect();
 
-    // Cette structure JSON est la seule qui est acceptée par le RPC
     let params = json!([
         encoded_tx,
         {
@@ -51,7 +52,7 @@ pub async fn simulate_instruction(
             "replaceRecentBlockhash": true,
             "commitment": "confirmed",
             "accounts": {
-                "addresses": [], // Champ requis, même s'il est vide
+                "addresses": [],
                 "loaded": loaded_accounts
             }
         }

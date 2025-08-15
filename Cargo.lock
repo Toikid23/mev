@@ -2460,10 +2460,10 @@ dependencies = [
  "futures",
  "hex",
  "num-integer",
+ "openbook_dex",
  "reqwest",
  "serde",
  "serde_json",
- "serum_dex",
  "solana-account-decoder",
  "solana-client",
  "solana-program 2.3.0",
@@ -2776,6 +2776,30 @@ name = "opaque-debug"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
+
+[[package]]
+name = "openbook_dex"
+version = "0.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc2795442782f5eff209621e49e0ac00f9d1f209fc0f879e345d30b67479ba2b"
+dependencies = [
+ "arrayref",
+ "bincode",
+ "bytemuck",
+ "byteorder",
+ "enumflags2",
+ "field-offset",
+ "itertools 0.9.0",
+ "num-traits",
+ "num_enum 0.5.11",
+ "safe-transmute",
+ "serde",
+ "solana-program 1.10.0",
+ "spl-token 3.3.0",
+ "static_assertions",
+ "thiserror 1.0.69",
+ "without-alloc",
+]
 
 [[package]]
 name = "openssl"
@@ -3672,30 +3696,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.104",
-]
-
-[[package]]
-name = "serum_dex"
-version = "0.5.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c62b5450e2d875e269af76b80080126e2d8eeb10ac256f900dc7cbad1a8dc85e"
-dependencies = [
- "arrayref",
- "bincode",
- "bytemuck",
- "byteorder",
- "enumflags2",
- "field-offset",
- "itertools 0.9.0",
- "num-traits",
- "num_enum 0.5.11",
- "safe-transmute",
- "serde",
- "solana-program 1.10.0",
- "spl-token 3.3.0",
- "static_assertions",
- "thiserror 1.0.69",
- "without-alloc",
 ]
 
 [[package]]

@@ -10,7 +10,6 @@ solana-sdk = "2.3.0" # Gardons une version compatible
 
 # --- LA CORRECTION EST ICI ---
 # On désactive les features par défaut et on active uniquement "client" ou "default" sans "program"
-serum_dex = { version = "0.5.4", default-features = false, features = ["client"] }
 spl-token = { version = "8.0.0", default-features = false, features = ["no-entrypoint"] }
 spl-token-2022 = { version = "9.0.0", default-features = false, features = ["no-entrypoint", "zk-ops"] }
 spl-associated-token-account = "7.0.0"
@@ -48,3 +47,4 @@ num-integer = "0.1.46"
 futures = "0.3.31"
 anchor-spl = "0.31.1"
 bincode = "1.3.3"
+openbook_dex = "0.5.6"
