@@ -1,6 +1,5 @@
 // Fichier : src/decoders/raydium_decoders/clmm_pool.rs
 // STATUT : VERSION FINALE ET CORRECTE - Assurez-vous que ce code est bien celui qui est compilé.
-
 use crate::decoders::pool_operations::PoolOperations;
 use crate::decoders::raydium_decoders::clmm_config;
 use crate::decoders::raydium_decoders::tick_array::{self, TickArrayState};
@@ -10,8 +9,14 @@ use anyhow::{anyhow, bail, Result};
 use bytemuck::{from_bytes, Pod, Zeroable};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
-use std::collections::BTreeMap;
 use crate::decoders::raydium_decoders::tickarray_bitmap_extension;
+// Imports nécessaires pour la construction d'instruction
+use solana_sdk::instruction::{Instruction, AccountMeta};
+use spl_associated_token_account::get_associated_token_address;
+use solana_program_pack::Pack;
+use std::collections::{BTreeMap, HashSet};
+use crate::decoders::raydium_decoders::tick_array::TICK_ARRAY_SIZE;
+
 
 // --- STRUCTURES (Inchangées) ---
 #[derive(Debug, Clone)]
@@ -19,6 +24,7 @@ pub struct DecodedClmmPool {
     pub address: Pubkey,
     pub program_id: Pubkey,
     pub amm_config: Pubkey,
+    pub observation_key: Pubkey,
     pub mint_a: Pubkey,
     pub mint_b: Pubkey,
     pub mint_a_decimals: u8,
@@ -39,8 +45,153 @@ pub struct DecodedClmmPool {
 
 impl DecodedClmmPool {
     pub fn fee_as_percent(&self) -> f64 {
-        // La trade_fee_rate est en parties par million (ppm)
         self.trade_fee_rate as f64 / 1_000_000.0 * 100.0
+    }
+
+    pub fn get_quote_with_tick_arrays(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<(u64, Vec<Pubkey>)> {
+        let tick_arrays = self.tick_arrays.as_ref().ok_or_else(|| anyhow!("Pool is not hydrated."))?;
+        if tick_arrays.is_empty() || self.liquidity == 0 {
+            return Ok((0, Vec::new()));
+        }
+
+        let is_base_input = *token_in_mint == self.mint_a;
+        let fee_on_input = (amount_in as u128 * self.mint_a_transfer_fee_bps as u128) / 10000;
+        let mut amount_remaining = amount_in.saturating_sub(fee_on_input as u64) as u128;
+        let mut total_amount_out: u128 = 0;
+        let mut current_sqrt_price = self.sqrt_price_x64;
+        let mut current_tick_index = self.tick_current;
+        let mut current_liquidity = self.liquidity;
+        let mut tick_arrays_crossed = HashSet::new();
+
+        while amount_remaining > 0 {
+            let current_tick_array_start_index = tick_array::get_start_tick_index(current_tick_index, self.tick_spacing);
+            tick_arrays_crossed.insert(tick_array::get_tick_array_address(&self.address, current_tick_array_start_index, &self.program_id));
+
+            if current_liquidity > 0 {
+                let (next_tick_index, _) = match find_next_initialized_tick(self, current_tick_index, is_base_input, tick_arrays) {
+                    Ok(result) => result,
+                    Err(_) => (if is_base_input { clmm_math::MIN_TICK } else { clmm_math::MAX_TICK }, 0)
+                };
+
+                let sqrt_price_target = clmm_math::tick_to_sqrt_price_x64(next_tick_index);
+
+                let (next_sqrt_price, amount_in_step, amount_out_step, fee_amount_step) = clmm_math::compute_swap_step(
+                    current_sqrt_price, sqrt_price_target, current_liquidity, amount_remaining, self.trade_fee_rate, is_base_input,
+                )?;
+
+                let total_consumed = amount_in_step.saturating_add(fee_amount_step);
+                if total_consumed == 0 { break; }
+
+                amount_remaining = amount_remaining.saturating_sub(total_consumed);
+                total_amount_out = total_amount_out.saturating_add(amount_out_step);
+                current_sqrt_price = next_sqrt_price;
+            }
+
+            if current_sqrt_price == clmm_math::tick_to_sqrt_price_x64(find_next_initialized_tick(self, current_tick_index, is_base_input, tick_arrays)?.0) {
+                let (next_tick_index, next_liquidity_net) = find_next_initialized_tick(self, current_tick_index, is_base_input, tick_arrays)?;
+                current_liquidity = (current_liquidity as i128 + next_liquidity_net) as u128;
+                current_tick_index = if is_base_input { next_tick_index - 1 } else { next_tick_index };
+
+                let next_tick_array_start_index = tick_array::get_start_tick_index(next_tick_index, self.tick_spacing);
+                tick_arrays_crossed.insert(tick_array::get_tick_array_address(&self.address, next_tick_array_start_index, &self.program_id));
+            } else {
+                break;
+            }
+        }
+
+        Ok((total_amount_out as u64, tick_arrays_crossed.into_iter().collect()))
+    }
+
+    /// Trouve les N prochains TickArrays initialisés dans la direction du swap.
+    fn get_next_initialized_tick_arrays(&self, is_base_input: bool, count: usize) -> Vec<Pubkey> {
+        let tick_arrays = self.tick_arrays.as_ref().unwrap();
+        let mut result = Vec::new();
+
+        if is_base_input { // Le prix baisse, on cherche des index plus petits
+            // On itère sur les tick_arrays hydratés en ordre inversé (du plus grand au plus petit start_tick_index)
+            for (_, array_state) in tick_arrays.iter().rev() {
+                if array_state.start_tick_index <= self.tick_current {
+                    result.push(tick_array::get_tick_array_address(
+                        &self.address,
+                        array_state.start_tick_index,
+                        &self.program_id,
+                    ));
+                    if result.len() >= count {
+                        break;
+                    }
+                }
+            }
+        } else { // Le prix monte, on cherche des index plus grands
+            // On itère sur les tick_arrays hydratés en ordre normal
+            for (_, array_state) in tick_arrays.iter() {
+                if array_state.start_tick_index >= self.tick_current {
+                    result.push(tick_array::get_tick_array_address(
+                        &self.address,
+                        array_state.start_tick_index,
+                        &self.program_id,
+                    ));
+                    if result.len() >= count {
+                        break;
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    pub fn create_swap_instruction(
+        &self,
+        input_token_mint: &Pubkey,
+        user_source_token_account: &Pubkey,
+        user_destination_token_account: &Pubkey,
+        user_owner: &Pubkey,
+        amount_in: u64,
+        minimum_amount_out: u64,
+    ) -> Result<Instruction> {
+        let mut instruction_data: Vec<u8> = vec![122, 22, 232, 163, 102, 137, 13, 52]; // swap_v2
+        instruction_data.extend_from_slice(&amount_in.to_le_bytes());
+        instruction_data.extend_from_slice(&minimum_amount_out.to_le_bytes());
+        instruction_data.extend_from_slice(&u128::to_le_bytes(0)); // sqrt_price_limit
+        instruction_data.extend_from_slice(&[1]); // is_base_input = true
+
+        let is_base_input = *input_token_mint == self.mint_a;
+
+        let (input_vault, output_vault, input_mint, output_mint) = if is_base_input {
+            (self.vault_a, self.vault_b, self.mint_a, self.mint_b)
+        } else {
+            (self.vault_b, self.vault_a, self.mint_b, self.mint_a)
+        };
+
+        let mut accounts = vec![
+            AccountMeta::new_readonly(*user_owner, true),
+            AccountMeta::new_readonly(self.amm_config, false),
+            AccountMeta::new(self.address, false),
+            AccountMeta::new(*user_source_token_account, false),
+            AccountMeta::new(*user_destination_token_account, false),
+            AccountMeta::new(input_vault, false),
+            AccountMeta::new(output_vault, false),
+            AccountMeta::new(self.observation_key, false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(spl_token_2022::id(), false),
+            AccountMeta::new_readonly(spl_memo::id(), false),
+            AccountMeta::new_readonly(input_mint, false),
+            AccountMeta::new_readonly(output_mint, false),
+        ];
+
+        let tick_array_bitmap_extension = tickarray_bitmap_extension::get_bitmap_extension_address(&self.address, &self.program_id);
+        accounts.push(AccountMeta::new(tick_array_bitmap_extension, false));
+
+        // On fournit les 3 prochains tick arrays initialisés
+        let tick_array_keys = self.get_next_initialized_tick_arrays(is_base_input, 3);
+        for key in tick_array_keys {
+            accounts.push(AccountMeta::new(key, false));
+        }
+
+        Ok(Instruction {
+            program_id: self.program_id,
+            accounts,
+            data: instruction_data,
+        })
     }
 }
 
@@ -107,23 +258,16 @@ struct RewardInfo {
 // --- LOGIQUE DE DÉCODAGE ET HYDRATATION ---
 pub fn decode_pool(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Result<DecodedClmmPool> {
     const DISCRIMINATOR: [u8; 8] = [247, 237, 227, 245, 215, 195, 222, 70];
-    if data.get(..8) != Some(&DISCRIMINATOR) {
-        bail!("Invalid PoolState discriminator.");
-    }
+    if data.get(..8) != Some(&DISCRIMINATOR) { bail!("Invalid PoolState discriminator."); }
     let data_slice = &data[8..];
-
-    // On vérifie que les données sont au moins aussi grandes que notre struct
-    if data_slice.len() < std::mem::size_of::<PoolState>() {
-        bail!("PoolState data length mismatch. Expected at least {}, got {}.", std::mem::size_of::<PoolState>(), data_slice.len());
-    }
-
-    // On utilise from_bytes pour un parsing sûr et sans copie
+    if data_slice.len() < std::mem::size_of::<PoolState>() { bail!("PoolState data length mismatch."); }
     let pool_struct: &PoolState = from_bytes(&data_slice[..std::mem::size_of::<PoolState>()]);
 
     Ok(DecodedClmmPool {
         address: *address,
         program_id: *program_id,
         amm_config: pool_struct.amm_config,
+        observation_key: pool_struct.observation_key,
         mint_a: pool_struct.token_mint_0,
         mint_b: pool_struct.token_mint_1,
         vault_a: pool_struct.token_vault_0,
@@ -132,13 +276,9 @@ pub fn decode_pool(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Result
         liquidity: pool_struct.liquidity,
         sqrt_price_x64: pool_struct.sqrt_price_x64,
         tick_current: pool_struct.tick_current,
-        mint_a_decimals: 0,
-        mint_b_decimals: 0,
-        mint_a_transfer_fee_bps: 0,
-        mint_b_transfer_fee_bps: 0,
-        trade_fee_rate: 0,
-        min_tick: -443636,
-        max_tick: 443636,
+        mint_a_decimals: 0, mint_b_decimals: 0,
+        mint_a_transfer_fee_bps: 0, mint_b_transfer_fee_bps: 0,
+        trade_fee_rate: 0, min_tick: -443636, max_tick: 443636,
         tick_arrays: None,
     })
 }
@@ -280,6 +420,8 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &RpcClient) -> Resu
     Ok(())
 }
 
+
+
 impl PoolOperations for DecodedClmmPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) {
         (self.mint_a, self.mint_b)
@@ -288,82 +430,8 @@ impl PoolOperations for DecodedClmmPool {
         (self.vault_a, self.vault_b)
     }
 
-    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
-        let tick_arrays = self.tick_arrays.as_ref().ok_or_else(|| anyhow!("Pool is not hydrated."))?;
-        if tick_arrays.is_empty() || self.liquidity == 0 {
-            return Ok(0);
-        }
-
-        let is_base_input = *token_in_mint == self.mint_a;
-
-        // Gère les frais de transfert SPL Token-2022 sur l'entrée
-        let (in_mint_fee_bps, _) = if is_base_input {
-            (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps)
-        } else {
-            (self.mint_b_transfer_fee_bps, self.mint_a_transfer_fee_bps)
-        };
-        let fee_on_input = (amount_in as u128 * in_mint_fee_bps as u128) / 10000;
-        let mut amount_remaining = amount_in.saturating_sub(fee_on_input as u64) as u128;
-
-        let mut total_amount_out: u128 = 0;
-        let mut current_sqrt_price = self.sqrt_price_x64;
-        let mut current_tick_index = self.tick_current;
-        let mut current_liquidity = self.liquidity;
-
-        while amount_remaining > 0 {
-            if current_liquidity == 0 {
-                // Si la liquidité est à zéro, on saute au prochain tick initialisé
-                let (next_tick, next_liquidity_net) =
-                    match find_next_initialized_tick(self, current_tick_index, is_base_input, tick_arrays) {
-                        Ok(result) => result,
-                        Err(_) => break, // Plus de liquidité dans cette direction
-                    };
-                current_tick_index = if is_base_input { next_tick - 1 } else { next_tick };
-                current_sqrt_price = clmm_math::tick_to_sqrt_price_x64(next_tick);
-                current_liquidity = (current_liquidity as i128 + next_liquidity_net) as u128;
-                continue;
-            }
-
-            let (next_tick_index, _) =
-                match find_next_initialized_tick(self, current_tick_index, is_base_input, tick_arrays) {
-                    Ok(result) => result,
-                    Err(_) => (if is_base_input { clmm_math::MIN_TICK } else { clmm_math::MAX_TICK }, 0)
-                };
-
-            let sqrt_price_target = clmm_math::tick_to_sqrt_price_x64(next_tick_index);
-
-            let (next_sqrt_price, amount_in_step, amount_out_step, fee_amount_step) = clmm_math::compute_swap_step(
-                current_sqrt_price,
-                sqrt_price_target,
-                current_liquidity,
-                amount_remaining,
-                self.trade_fee_rate,
-                is_base_input,
-            )?;
-
-            let total_consumed = amount_in_step.saturating_add(fee_amount_step);
-            if total_consumed == 0 {
-                break; // Pas de progression, on arrête pour éviter une boucle infinie
-            }
-
-            amount_remaining = amount_remaining.saturating_sub(total_consumed);
-            total_amount_out = total_amount_out.saturating_add(amount_out_step);
-            current_sqrt_price = next_sqrt_price;
-
-            // Si on a atteint la cible, on met à jour la liquidité et le tick
-            if current_sqrt_price == sqrt_price_target {
-                let (_, next_liquidity_net) =
-                    match find_next_initialized_tick(self, current_tick_index, is_base_input, tick_arrays) {
-                        Ok(result) => result,
-                        Err(_) => break, // Fin du chemin
-                    };
-                current_liquidity = (current_liquidity as i128 + next_liquidity_net) as u128;
-                current_tick_index = if is_base_input { next_tick_index - 1 } else { next_tick_index };
-            }
-        }
-
-        // Pour Raydium CLMM, le programme vault est exempté des frais de transfert sur la sortie.
-        Ok(total_amount_out as u64)
+    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<u64> {
+        Ok(self.get_quote_with_tick_arrays(token_in_mint, amount_in, current_timestamp)?.0)
     }
 }
 
@@ -401,3 +469,5 @@ fn find_next_initialized_tick<'a>(
 
     Err(anyhow!("Aucun tick initialisé trouvé dans la direction du swap parmi les arrays chargés."))
 }
+
+

@@ -8,10 +8,10 @@ use anyhow::{bail, Result, anyhow};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use crate::decoders::spl_token_decoders;
 use solana_sdk::{instruction::{AccountMeta, Instruction}, pubkey};
-use crate::decoders::raydium_decoders::openbook_market::{self, OrderBook};
+use crate::decoders::raydium_decoders::openbook_market::{OrderBook};
 use openbook_dex::state::MarketState;
 use std::mem::size_of;
-use openbook_dex::state::OpenOrders;
+
 
 // La structure reste la même
 #[derive(Debug, Clone)]

@@ -34,7 +34,6 @@ use solana_program_pack::Pack;
 use spl_associated_token_account::get_associated_token_address;
 
 
-
 // =================================================================================
 // FONCTION UTILITAIRE D'AFFICHAGE (INCHANGÉE LOGIQUEMENT, JUSTE AVEC TIMESTAMP)
 // =================================================================================
@@ -177,10 +176,10 @@ fn create_temp_token_account(
 }
 
 fn parse_spl_token_transfer_amount_from_logs(logs: &[String]) -> Option<u64> {
+    // La nouvelle sortie de simulation a des logs plus verbeux
     logs.iter()
-        .filter(|log| log.contains("spl-token") && log.contains("Transfer"))
-        .filter_map(|log| log.split_whitespace().last()?.parse::<u64>().ok())
-        .last()
+        .find(|log| log.contains("spl_token") && log.contains("Transfer") && log.starts_with("Program log:"))
+        .and_then(|log| log.split_whitespace().last()?.parse::<u64>().ok())
 }
 
 
@@ -323,51 +322,78 @@ async fn test_cpmm(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()>
 // DANS : src/bin/dev_runner.rs
 
 async fn test_clmm(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
-    // --- TEST BASÉ SUR LA TRANSACTION DE L'IMAGE : Vente de WSOL pour du LAUNCHCOIN ---
-    const POOL_ADDRESS: &str = "YrrUStgPugDp8BbfosqDeFssen6sA75ZS1QJvgnHtmY"; // Pool WSOL-LAUNCHCOIN
+    const POOL_ADDRESS: &str = "YrrUStgPugDp8BbfosqDeFssen6sA75ZS1QJvgnHtmY";
     const PROGRAM_ID: &str = "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK";
+    const INPUT_MINT_STR: &str = "So11111111111111111111111111111111111111112";
+    const INPUT_AMOUNT_UI: f64 = 0.1;
 
-    // On vend du WSOL, comme dans la première transaction de l'image
-    const INPUT_MINT: &str = "So11111111111111111111111111111111111111112"; //Ey59PH7Z4BFU4HjyKnyMdWt5GGN76KazTAwQihoUXRnk
-    const INPUT_AMOUNT_UI: f64 = 0.523441514;
-    // --- FIN DE LA CONFIGURATION DU TEST ---
-
-    println!("\n--- Test Raydium CLMM ({}) ---", POOL_ADDRESS);
+    println!("\n--- Test et Simulation FINALE Raydium CLMM ({}) ---", POOL_ADDRESS);
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
     let program_pubkey = Pubkey::from_str(PROGRAM_ID)?;
-    let account_data = rpc_client.get_account_data(&pool_pubkey).await?;
-    let mut pool = clmm_pool::decode_pool(&pool_pubkey, &account_data, &program_pubkey)?;
 
-    println!("[1/2] Hydratation...");
+    // --- ÉTAPE 1 : HYDRATATION ET PRÉDICTION LOCALE ---
+    println!("[1/3] Hydratation et prédiction locale...");
+    let pool_account_data = rpc_client.get_account_data(&pool_pubkey).await?;
+    let mut pool = clmm_pool::decode_pool(&pool_pubkey, &pool_account_data, &program_pubkey)?;
     clmm_pool::hydrate(&mut pool, rpc_client).await?;
-    let tick_arrays_found = pool.tick_arrays.as_ref().map_or(0, |arrays| arrays.len());
-    println!("-> Hydratation terminée. Frais: {:.4}%. Trouvé {} TickArray(s).", pool.fee_as_percent(), tick_arrays_found);
-
-    let input_mint_pubkey = Pubkey::from_str(INPUT_MINT)?;
-
-    // --- Logique de détermination robuste ---
+    let input_mint_pubkey = Pubkey::from_str(INPUT_MINT_STR)?;
     let (input_decimals, output_decimals, output_mint_pubkey) = if input_mint_pubkey == pool.mint_a {
         (pool.mint_a_decimals, pool.mint_b_decimals, pool.mint_b)
-    } else if input_mint_pubkey == pool.mint_b {
-        (pool.mint_b_decimals, pool.mint_a_decimals, pool.mint_a)
-    } else {
-        bail!("ERREUR FATALE: Le token d'input {} n'appartient PAS au pool {}. Mints du pool: {}, {}", INPUT_MINT, POOL_ADDRESS, pool.mint_a, pool.mint_b);
-    };
-
-    println!("   -> Token d'entrée : {} ({} décimales détectées)", input_mint_pubkey, input_decimals);
-    println!("   -> Token de sortie: {} ({} décimales détectées)", output_mint_pubkey, output_decimals);
-
+    } else { (pool.mint_b_decimals, pool.mint_a_decimals, pool.mint_a) };
     let amount_in_base_units = (INPUT_AMOUNT_UI * 10f64.powi(input_decimals as i32)) as u64;
-    println!("\n[2/2] Calcul du quote pour VENDRE {} UI de {}...", INPUT_AMOUNT_UI, INPUT_MINT);
+    let predicted_amount_out = pool.get_quote(&input_mint_pubkey, amount_in_base_units, current_timestamp)?;
+    let ui_predicted_amount_out = predicted_amount_out as f64 / 10f64.powi(output_decimals as i32);
+    println!("-> PRÉDICTION LOCALE: {}", ui_predicted_amount_out);
 
-    print_quote_result(
-        &pool,
-        &input_mint_pubkey,
-        input_decimals,
-        output_decimals,
-        amount_in_base_units,
-        current_timestamp
-    )?;
+    // --- ÉTAPE 2 : PRÉPARATION DE LA SIMULATION ---
+    println!("\n[2/3] Préparation de la simulation...");
+    let payer = Keypair::new();
+    let user_source_ata = get_associated_token_address(&payer.pubkey(), &input_mint_pubkey);
+    let user_destination_ata = get_associated_token_address(&payer.pubkey(), &output_mint_pubkey);
+
+    let swap_ix = pool.create_swap_instruction(&input_mint_pubkey, &user_source_ata, &user_destination_ata, &payer.pubkey(), amount_in_base_units, 0)?;
+    println!("-> Instruction de swap construite pour {} comptes.", swap_ix.accounts.len());
+
+    let mut keys_for_sim: Vec<Pubkey> = swap_ix.accounts.iter().map(|meta| meta.pubkey).collect();
+    keys_for_sim.retain(|&key| key != payer.pubkey() && key != user_source_ata && key != user_destination_ata);
+    keys_for_sim.sort(); keys_for_sim.dedup();
+
+    println!("-> Récupération de l'état on-chain de {} comptes...", keys_for_sim.len());
+    let account_data_for_sim = rpc_client.get_multiple_accounts(&keys_for_sim).await?;
+
+    let mut accounts_to_load: Vec<(Pubkey, Account)> = keys_for_sim.into_iter().zip(account_data_for_sim.into_iter())
+        .filter_map(|(pubkey, acc_opt)| acc_opt.map(|acc| (pubkey, acc)))
+        .collect();
+
+    let user_source_account = create_temp_token_account(&input_mint_pubkey, &payer.pubkey(), amount_in_base_units);
+    let user_dest_account = create_temp_token_account(&output_mint_pubkey, &payer.pubkey(), 0);
+    accounts_to_load.push((user_source_ata, user_source_account));
+    accounts_to_load.push((user_destination_ata, user_dest_account));
+    println!("-> {} comptes chargés pour le contexte de simulation.", accounts_to_load.len());
+
+    // --- ÉTAPE 3 : SIMULATION ET ANALYSE ---
+    println!("\n[3/3] Exécution de la simulation...");
+    let sim_result = simulate::simulate_instruction(rpc_client, swap_ix, &payer, accounts_to_load).await?;
+    println!("-> Simulation réussie !");
+
+    let simulated_amount_out = match sim_result.logs {
+        Some(logs) => parse_spl_token_transfer_amount_from_logs(&logs).ok_or_else(|| anyhow!("Impossible de trouver le transfert"))?,
+        None => bail!("Logs de simulation vides."),
+    };
+    let ui_simulated_amount_out = simulated_amount_out as f64 / 10f64.powi(output_decimals as i32);
+
+    println!("\n--- COMPARAISON (CLMM) ---");
+    println!("Montant PRÉDIT (local)  : {}", ui_predicted_amount_out);
+    println!("Montant SIMULÉ (on-chain) : {}", ui_simulated_amount_out);
+    let difference = (ui_predicted_amount_out - ui_simulated_amount_out).abs();
+    let difference_percent = if ui_simulated_amount_out > 0.0 { (difference / ui_simulated_amount_out) * 100.0 } else { 0.0 };
+    println!("-> Différence relative: {:.4} %", difference_percent);
+
+    if difference_percent < 0.1 {
+        println!("✅ EXCELLENT ! Le décodeur CLMM est précis.");
+    } else {
+        println!("⚠️ ATTENTION ! La différence est significative.");
+    }
 
     Ok(())
 }

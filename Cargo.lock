@@ -2472,6 +2472,7 @@ dependencies = [
  "solana-transaction-status",
  "spl-associated-token-account 7.0.0",
  "spl-math",
+ "spl-memo",
  "spl-token 8.0.0",
  "spl-token-2022 9.0.0",
  "tokio",
