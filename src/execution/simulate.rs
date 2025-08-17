@@ -1,4 +1,4 @@
-// DANS : src/execution/simulate.rs (VERSION FINALE - Correcte pour les RPCs avancés)
+// DANS : src/execution/simulate.rs (REMPLACEZ TOUT LE FICHIER)
 
 use anyhow::{anyhow, Result};
 use solana_client::{
@@ -14,7 +14,7 @@ use solana_sdk::{
     signer::Signer,
     transaction::Transaction,
 };
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 pub async fn simulate_instruction(
     rpc_client: &RpcClient,
@@ -30,18 +30,24 @@ pub async fn simulate_instruction(
     let serialized_tx = bincode::serialize(&transaction)?;
     let encoded_tx = base64::encode(serialized_tx);
 
-    // Le format le plus commun pour les RPCs supportant cette feature est une Map (un objet JSON).
-    let mut address_map = Map::new();
-    for (pubkey, account) in accounts_to_load {
-        let account_data_bincode = bincode::serialize(&account)?;
-        let account_data_base64 = base64::encode(account_data_bincode);
-        address_map.insert(pubkey.to_string(), Value::String(account_data_base64));
-    }
+    // --- LA CORRECTION EST ICI ---
+    // On transforme notre liste de comptes en un format JSON qui est un tableau de [pubkey_str, account_data_base64_str]
+    let addresses_array: Vec<Value> = accounts_to_load
+        .into_iter()
+        .map(|(pubkey, account)| {
+            let account_data_bincode = bincode::serialize(&account).unwrap();
+            let account_data_base64 = base64::encode(account_data_bincode);
+            json!([pubkey.to_string(), account_data_base64])
+        })
+        .collect();
 
+    // On construit le paramètre `accounts` pour la simulation.
+    // Le champ "addresses" attend maintenant un tableau (une "séquence").
     let accounts_param = json!({
         "encoding": "base64",
-        "addresses": address_map // On utilise la Map
+        "addresses": addresses_array
     });
+    // --- FIN DE LA CORRECTION ---
 
     let params = json!([
         encoded_tx,
@@ -57,6 +63,7 @@ pub async fn simulate_instruction(
     let request = RpcRequest::Custom { method: "simulateTransaction" };
     let response_value: serde_json::Value = rpc_client.send(request, params).await?;
 
+    // La logique de parsing de la réponse ne change pas
     let rpc_response = response_value
         .get("value")
         .ok_or_else(|| anyhow!("Champ 'value' manquant dans la réponse de simulation"))?;
@@ -64,6 +71,13 @@ pub async fn simulate_instruction(
     let sim_result: RpcSimulateTransactionResult = serde_json::from_value(rpc_response.clone())?;
 
     if let Some(err) = &sim_result.err {
+        if let Some(logs) = &sim_result.logs {
+            println!("--- LOGS DE SIMULATION DÉTAILLÉS ---");
+            for log in logs {
+                println!("{}", log);
+            }
+            println!("------------------------------------");
+        }
         return Err(anyhow!("La simulation de transaction a échoué : {:?}", err));
     }
 

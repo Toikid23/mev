@@ -7,6 +7,7 @@ use anyhow::{bail, Result, anyhow};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use crate::decoders::raydium_decoders::amm_config;
 use crate::decoders::spl_token_decoders;
+use num_integer::Integer;
 
 // Discriminator pour les comptes PoolState du programme CPMM
 const CPMM_POOL_STATE_DISCRIMINATOR: [u8; 8] = [247, 237, 227, 245, 215, 195, 222, 70];
@@ -18,12 +19,15 @@ const CPMM_POOL_STATE_DISCRIMINATOR: [u8; 8] = [247, 237, 227, 245, 215, 195, 22
 pub struct DecodedCpmmPool {
     pub address: Pubkey,
     pub amm_config: Pubkey, // Pour aller chercher les frais plus tard
+    pub observation_key: Pubkey,
     pub token_0_mint: Pubkey,
     pub token_1_mint: Pubkey,
     pub token_0_vault: Pubkey,
     pub token_1_vault: Pubkey,
     pub mint_a_transfer_fee_bps: u16,
     pub mint_b_transfer_fee_bps: u16,
+    pub token_0_program: Pubkey, // <--- AJOUTER
+    pub token_1_program: Pubkey,
     pub status: u8,
     pub mint_0_decimals: u8,
     pub mint_1_decimals: u8,
@@ -37,6 +41,60 @@ pub struct DecodedCpmmPool {
 impl DecodedCpmmPool {
     pub fn fee_as_percent(&self) -> f64 {
         (self.trade_fee_rate as f64 / 1_000_000.0) * 100.0
+    }
+
+    pub fn create_swap_instruction(
+        &self,
+        user_source_token_account: &Pubkey,
+        user_destination_token_account: &Pubkey,
+        user_owner: &Pubkey,
+        input_is_token_0: bool, // true si l'input est token_0, false sinon
+        amount_in: u64,
+        minimum_amount_out: u64,
+    ) -> Result<solana_sdk::instruction::Instruction> {
+        // Discriminateur pour l'instruction `swap_base_input`
+        // Trouvé via l'IDL ou en inspectant les transactions.
+        let instruction_discriminator: [u8; 8] = [143, 190, 90, 218, 196, 30, 51, 222];
+
+        // Sérialisation des arguments de l'instruction
+        let mut instruction_data = Vec::new();
+        instruction_data.extend_from_slice(&instruction_discriminator);
+        instruction_data.extend_from_slice(&amount_in.to_le_bytes());
+        instruction_data.extend_from_slice(&minimum_amount_out.to_le_bytes());
+
+        // Détermination des comptes d'entrée/sortie en fonction de la direction
+        let (input_vault, output_vault, input_mint, output_mint, input_token_program, output_token_program) = if input_is_token_0 {
+            (self.token_0_vault, self.token_1_vault, self.token_0_mint, self.token_1_mint, spl_token::id(), spl_token::id()) // En supposant SPL pour l'instant
+        } else {
+            (self.token_1_vault, self.token_0_vault, self.token_1_mint, self.token_0_mint, spl_token::id(), spl_token::id()) // Idem
+        };
+
+        // PDA de l'autorité du programme
+        let (authority, _) = Pubkey::find_program_address(&[b"vault_and_lp_mint_auth_seed"], &solana_sdk::pubkey!("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C"));
+
+        // Construction de la liste des comptes, dans l'ordre exact requis par le programme
+        let accounts = vec![
+            solana_sdk::instruction::AccountMeta::new_readonly(*user_owner, true),
+            solana_sdk::instruction::AccountMeta::new_readonly(authority, false),
+            solana_sdk::instruction::AccountMeta::new_readonly(self.amm_config, false),
+            solana_sdk::instruction::AccountMeta::new(self.address, false),
+            solana_sdk::instruction::AccountMeta::new(*user_source_token_account, false),
+            solana_sdk::instruction::AccountMeta::new(*user_destination_token_account, false),
+            solana_sdk::instruction::AccountMeta::new(input_vault, false),
+            solana_sdk::instruction::AccountMeta::new(output_vault, false),
+            solana_sdk::instruction::AccountMeta::new_readonly(input_token_program, false),
+            solana_sdk::instruction::AccountMeta::new_readonly(output_token_program, false),
+            solana_sdk::instruction::AccountMeta::new_readonly(input_mint, false),
+            solana_sdk::instruction::AccountMeta::new_readonly(output_mint, false),
+            // LA CORRECTION EST ICI : on utilise la vraie clé
+            solana_sdk::instruction::AccountMeta::new(self.observation_key, false),
+        ];
+
+        Ok(solana_sdk::instruction::Instruction {
+            program_id: solana_sdk::pubkey!("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C"),
+            accounts,
+            data: instruction_data,
+        })
     }
 }
 
@@ -96,10 +154,13 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedCpmmPool> {
     Ok(DecodedCpmmPool {
         address: *address,
         amm_config: pool_struct.amm_config,
+        observation_key: pool_struct.observation_key,
         token_0_mint: pool_struct.token_0_mint,
         token_1_mint: pool_struct.token_1_mint,
         token_0_vault: pool_struct.token_0_vault,
         token_1_vault: pool_struct.token_1_vault,
+        token_0_program: pool_struct.token_0_program, // <--- AJOUTER
+        token_1_program: pool_struct.token_1_program,
         status: pool_struct.status,
         mint_a_transfer_fee_bps: 0,
         mint_b_transfer_fee_bps: 0,
@@ -122,8 +183,8 @@ impl PoolOperations for DecodedCpmmPool {
         (self.token_0_vault, self.token_1_vault)
     }
 
+    // --- VERSION AMÉLIORÉE DE GET_QUOTE ---
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
-        // --- 1. Appliquer les frais de transfert sur l'INPUT ---
         let (in_mint_fee_bps, out_mint_fee_bps, in_reserve, out_reserve) = if *token_in_mint == self.token_0_mint {
             (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps, self.reserve_a, self.reserve_b)
         } else if *token_in_mint == self.token_1_mint {
@@ -132,32 +193,39 @@ impl PoolOperations for DecodedCpmmPool {
             return Err(anyhow!("Input token does not belong to this pool."));
         };
 
+        // Étape 1 : Frais de transfert Token-2022 (inchangé)
         let fee_on_input = (amount_in as u128 * in_mint_fee_bps as u128) / 10000;
-        let amount_in_after_transfer_fee = amount_in.saturating_sub(fee_on_input as u64);
+        let amount_in_after_transfer_fee = amount_in.saturating_sub(fee_on_input as u64) as u128;
 
         if in_reserve == 0 || out_reserve == 0 {
             return Ok(0);
         }
 
-        // --- 2. Calculer le swap avec le montant NET ---
-        const FEE_PRECISION: u128 = 1_000_000;
-        let amount_in_with_fees = (amount_in_after_transfer_fee as u128)
-            .saturating_mul(FEE_PRECISION.saturating_sub(self.trade_fee_rate as u128))
-            / FEE_PRECISION;
+        // --- DÉBUT DE LA LOGIQUE DE FRAIS 1:1 ---
+        const FEE_DENOMINATOR: u128 = 1_000_000;
 
-        let numerator = amount_in_with_fees * out_reserve as u128;
-        let denominator = in_reserve as u128 + amount_in_with_fees;
+        // Étape 2 : Calculer les frais de trading avec un arrondi au plafond (ceil).
+        // C'est la réplique exacte du code on-chain.
+        let trade_fee = (amount_in_after_transfer_fee * self.trade_fee_rate as u128).div_ceil(FEE_DENOMINATOR);
+
+        // Étape 3 : Soustraire les frais pour obtenir le montant net pour le swap.
+        let amount_in_less_fees = amount_in_after_transfer_fee.saturating_sub(trade_fee);
+
+        // Étape 4 : Calculer le swap avec la formule de produit constant pure (inchangé).
+        let numerator = amount_in_less_fees * out_reserve as u128;
+        let denominator = in_reserve as u128 + amount_in_less_fees;
         if denominator == 0 { return Ok(0); }
         let gross_amount_out = (numerator / denominator) as u64;
 
-        // --- 3. Appliquer les frais de transfert sur l'OUTPUT ---
+        // --- FIN DE LA LOGIQUE DE FRAIS 1:1 ---
+
+        // Étape 5 : Frais de transfert sur l'output (inchangé)
         let fee_on_output = (gross_amount_out as u128 * out_mint_fee_bps as u128) / 10000;
         let final_amount_out = gross_amount_out.saturating_sub(fee_on_output as u64);
 
         Ok(final_amount_out)
     }
 }
-
 pub async fn hydrate(pool: &mut DecodedCpmmPool, rpc_client: &RpcClient) -> Result<()> {
     // ... (votre `tokio::join!` existant est parfait et reste inchangé) ...
     let (config_res, vault_a_res, vault_b_res, mint_a_res, mint_b_res) = tokio::join!(

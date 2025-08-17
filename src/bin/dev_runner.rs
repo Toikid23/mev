@@ -37,6 +37,11 @@ use std::collections::HashSet;
 use std::collections::HashMap;
 use anchor_lang::{AnchorDeserialize, Discriminator};
 use borsh::BorshDeserialize;
+use solana_client::rpc_config::RpcSimulateTransactionConfig; // Ajoutez cet import en haut
+use solana_account_decoder::UiAccountData;
+use num_integer::Integer; // Pour la division au plafond
+
+
 
 
 // =================================================================================
@@ -81,11 +86,64 @@ async fn get_timestamp(rpc_client: &RpcClient) -> Result<i64> {
 }
 
 fn parse_spl_token_transfer_amount_from_logs(logs: &[String]) -> Option<u64> {
-    // La nouvelle sortie de simulation a des logs plus verbeux
+    // On cherche d'abord le format le plus récent (ex: "Program log: Instruction: TransferChecked")
+    for log in logs.iter().rev() { // On itère depuis la fin, le transfert de sortie est souvent le dernier.
+        if log.contains("Program log: Instruction: TransferChecked") {
+            // Dans ce format, le montant n'est pas dans le log, il faut regarder les logs suivants du programme token.
+            // C'est complexe. Utilisons une méthode plus simple.
+        }
+    }
+
+    // MÉTHODE UNIVERSELLE : Le programme principal émet souvent un log juste avant le transfert.
+    // Le log de transfert réel du programme token ressemble à ça :
+    // "Program Tokenkeg... success"
+    // "Program log: Transfer XXX tokens"
+    // Malheureusement, la simulation ne retourne pas toujours ces logs détaillés.
+
+    // LA MÉTHODE LA PLUS SIMPLE ET QUI MARCHE POUR CPMM :
+    // Raydium log un événement. Puisque le parsing de cet événement est capricieux,
+    // extrayons le montant manuellement.
+    for log in logs {
+        if let Some(data_str) = log.strip_prefix("Program data: ") {
+            if let Ok(bytes) = base64::decode(data_str) {
+                // La structure de l'événement est :
+                // pub pool_id: Pubkey,            // 32 bytes
+                // pub input_vault_before: u64,    // 8 bytes
+                // pub output_vault_before: u64,   // 8 bytes
+                // pub input_amount: u64,          // 8 bytes
+                // pub output_amount: u64,         // 8 bytes <--- CE QU'ON VEUT
+
+                // Offset de output_amount = 32 + 8 + 8 + 8 = 56
+                const OFFSET: usize = 56;
+                if bytes.len() >= OFFSET + 8 {
+                    let amount_bytes: [u8; 8] = bytes[OFFSET..OFFSET + 8].try_into().ok()?;
+                    return Some(u64::from_le_bytes(amount_bytes));
+                }
+            }
+        }
+    }
+
+
+    // Si la méthode ci-dessus échoue, on retombe sur l'ancienne méthode pour la compatibilité
     logs.iter()
         .find(|log| log.contains("spl_token") && log.contains("Transfer") && log.starts_with("Program log:"))
         .and_then(|log| log.split_whitespace().last()?.parse::<u64>().ok())
 }
+
+
+#[derive(BorshDeserialize, Debug)]
+pub struct CpmmSwapEvent {
+    pub pool_id: Pubkey,
+    pub input_vault_before: u64,
+    pub output_vault_before: u64,
+    pub input_amount: u64,
+    pub output_amount: u64,
+    pub input_transfer_fee: u64,
+    pub output_transfer_fee: u64,
+    pub base_input: bool,
+}
+
+
 
 
 
@@ -339,44 +397,117 @@ async fn test_ammv4(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()
     Ok(())
 }
 
-async fn test_cpmm(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
-    // --- CONSTANTES POUR LE TEST DE LA TRANSACTION ---
-    const POOL_ADDRESS: &str = "Q2sPHPdUWFMg7M7wwrQKLrn619cAucfRsmhVJffodSp"; // USELESS-WSOL
-    const INPUT_MINT: &str = "Dz9mQ9NzkBcCsuGPFJ3r1bS4wgqKMHBPiVuniW8Mbonk"; // WSOL
-    const INPUT_AMOUNT_UI: f64 = 4236.0; // Montant de WSOL de l'image
-    // --- FIN DES CONSTANTES ---
 
-    println!("\n--- Test Raydium CPMM ({}) ---", POOL_ADDRESS);
+
+fn parse_output_amount_from_cpmm_event(logs: &[String]) -> Option<u64> {
+    for log in logs {
+        if let Some(data_str) = log.strip_prefix("Program data: ") {
+            if let Ok(bytes) = base64::decode(data_str) {
+                // Si l'événement est préfixé par un discriminateur de 8 octets
+                const DISCRIMINATOR_SIZE: usize = 8;
+                // Offset de `output_amount` après le discriminateur : 56 + 8 = 64
+                const OUTPUT_AMOUNT_OFFSET: usize = 64;
+
+                if bytes.len() >= OUTPUT_AMOUNT_OFFSET + 8 {
+                    let amount_slice = &bytes[OUTPUT_AMOUNT_OFFSET..OUTPUT_AMOUNT_OFFSET + 8];
+                    if let Ok(amount_bytes) = amount_slice.try_into() {
+                        return Some(u64::from_le_bytes(amount_bytes));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+// --- LA FONCTION DE TEST FINALE ---
+async fn test_cpmm_with_simulation(rpc_client: &RpcClient, payer_keypair: &Keypair, current_timestamp: i64) -> Result<()> {
+    // LA BONNE ADRESSE DE POOL
+    const POOL_ADDRESS: &str = "8ujpQXxnnWvRohU2oCe3eaSzoL7paU2uj3fEn4Zp72US";
+    const INPUT_MINT_STR: &str = "So11111111111111111111111111111111111111112";
+    const INPUT_AMOUNT_UI: f64 = 0.05;
+
+    println!("\n--- Test et Simulation (Final) Raydium CPMM ({}) ---", POOL_ADDRESS);
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
-    let account_data = rpc_client.get_account_data(&pool_pubkey).await?;
-    let mut pool = cpmm::decode_pool(&pool_pubkey, &account_data)?;
 
-    println!("[1/2] Hydratation...");
+    println!("[1/3] Hydratation et prédiction locale...");
+    let pool_account_data = rpc_client.get_account_data(&pool_pubkey).await?;
+    let mut pool = cpmm::decode_pool(&pool_pubkey, &pool_account_data)?;
     cpmm::hydrate(&mut pool, rpc_client).await?;
-    println!("-> Hydratation terminée. Frais: {:.4}%.", pool.fee_as_percent());
 
-    let input_mint_pubkey = Pubkey::from_str(INPUT_MINT)?;
-
-    // --- DÉTERMINATION DYNAMIQUE DES DÉCIMALES ---
-    let (input_decimals, output_decimals) = if input_mint_pubkey == pool.token_0_mint {
-        (pool.mint_0_decimals, pool.mint_1_decimals)
+    let input_mint_pubkey = Pubkey::from_str(INPUT_MINT_STR)?;
+    let (input_decimals, output_decimals, output_mint_pubkey, input_is_token_0) = if input_mint_pubkey == pool.token_0_mint {
+        (pool.mint_0_decimals, pool.mint_1_decimals, pool.token_1_mint, true)
     } else {
-        (pool.mint_1_decimals, pool.mint_0_decimals)
+        (pool.mint_1_decimals, pool.mint_0_decimals, pool.token_0_mint, false)
     };
 
-    println!("   -> Token d'entrée (WSOL): {} ({} décimales détectées)", input_mint_pubkey, input_decimals);
-    println!("   -> Token de sortie (USELESS): {} ({} décimales détectées)", if input_mint_pubkey == pool.token_0_mint { pool.token_1_mint } else { pool.token_0_mint }, output_decimals);
-    // --- FIN DE LA DÉTERMINATION ---
-
     let amount_in_base_units = (INPUT_AMOUNT_UI * 10f64.powi(input_decimals as i32)) as u64;
-    println!("\n[2/2] Calcul du quote pour VENDRE {} UI de WSOL...", INPUT_AMOUNT_UI);
-    print_quote_result(&pool, &input_mint_pubkey, input_decimals, output_decimals, amount_in_base_units, current_timestamp)?;
+    let predicted_amount_out = pool.get_quote(&input_mint_pubkey, amount_in_base_units, current_timestamp)?;
+    let ui_predicted_amount_out = predicted_amount_out as f64 / 10f64.powi(output_decimals as i32);
+    println!("-> PRÉDICTION LOCALE: {} UI", ui_predicted_amount_out);
+
+    println!("\n[2/3] Préparation de la transaction...");
+    let payer_pubkey = payer_keypair.pubkey();
+    let user_source_ata = get_associated_token_address(&payer_pubkey, &input_mint_pubkey);
+    let user_destination_ata = get_associated_token_address(&payer_pubkey, &output_mint_pubkey);
+
+    let mut instructions = Vec::new();
+    if rpc_client.get_account(&user_destination_ata).await.is_err() {
+        instructions.push(
+            spl_associated_token_account::instruction::create_associated_token_account(
+                &payer_pubkey, &payer_pubkey, &output_mint_pubkey, &pool.token_1_program,
+            ),
+        );
+    }
+
+    let swap_ix = pool.create_swap_instruction(
+        &user_source_ata, &user_destination_ata, &payer_pubkey,
+        input_is_token_0, amount_in_base_units, 0,
+    )?;
+    instructions.push(swap_ix);
+
+    let recent_blockhash = rpc_client.get_latest_blockhash().await?;
+    let transaction = Transaction::new_signed_with_payer(
+        &instructions, Some(&payer_pubkey), &[payer_keypair], recent_blockhash,
+    );
+
+    println!("\n[3/3] Exécution de la simulation standard...");
+    let sim_result = rpc_client.simulate_transaction(&transaction).await?.value;
+
+    if let Some(err) = sim_result.err { bail!("La simulation a échoué: {:?}", err); }
+
+    let simulated_amount_out = sim_result.logs
+        .as_ref()
+        .and_then(|logs| parse_output_amount_from_cpmm_event(logs))
+        .ok_or_else(|| {
+            if let Some(logs) = &sim_result.logs {
+                println!("\n--- LOGS COMPLETS (Montant non trouvé) ---");
+                for log in logs {
+                    println!("{}", log);
+                }
+                println!("-------------------------------------------");
+            }
+            anyhow!("Impossible de parser l'événement de swap depuis les logs")
+        })?;
+
+    let ui_simulated_amount_out = simulated_amount_out as f64 / 10f64.powi(output_decimals as i32);
+
+    println!("\n--- COMPARAISON (CPMM) ---");
+    println!("Montant PRÉDIT (local)    : {}", ui_predicted_amount_out);
+    println!("Montant SIMULÉ (on-chain) : {}", ui_simulated_amount_out);
+    let difference = (ui_predicted_amount_out - ui_simulated_amount_out).abs();
+    let difference_percent = if ui_simulated_amount_out > 0.0 { (difference / ui_simulated_amount_out) * 100.0 } else { 0.0 };
+    println!("-> Différence relative: {:.6} %", difference_percent);
+
+    if difference_percent < 0.01 {
+        println!("✅ SUCCÈS ! Le décodeur CPMM est parfaitement précis.");
+    } else {
+        println!("⚠️ ÉCHEC ! La différence est trop grande.");
+    }
 
     Ok(())
 }
-
-// DANS : src/bin/dev_runner.rs
-
 
 
 async fn test_clmm(rpc_client: &RpcClient, payer: &Keypair, current_timestamp: i64) -> Result<()> {
@@ -712,7 +843,7 @@ async fn main() -> Result<()> {
     if args.is_empty() || args.contains(&"all".to_string()) {
         println!("Mode: Exécution de tous les tests.");
         if let Err(e) = test_ammv4(&rpc_client, current_timestamp).await { println!("!! AMMv4 a échoué: {}", e); }
-        if let Err(e) = test_cpmm(&rpc_client, current_timestamp).await { println!("!! CPMM a échoué: {}", e); }
+        if let Err(e) = test_cpmm_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! CPMM a échoué: {}", e); }
         if let Err(e) = test_clmm(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! CLMM a échoué: {}", e); }
         if let Err(e) = test_launchpad(&rpc_client, current_timestamp).await { println!("!! Launchpad a échoué: {}", e); }
         if let Err(e) = test_meteora_amm(&rpc_client, current_timestamp).await { println!("!! Meteora AMM a échoué: {}", e); }
@@ -727,7 +858,7 @@ async fn main() -> Result<()> {
         for test_name in args {
             let result = match test_name.as_str() {
                 "ammv4" => test_ammv4(&rpc_client, current_timestamp).await,
-                "cpmm" => test_cpmm(&rpc_client, current_timestamp).await,
+                "cpmm" => test_cpmm_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await,
                 "clmm" => test_clmm(&rpc_client, &payer_keypair, current_timestamp).await,
                 "launchpad" => test_launchpad(&rpc_client, current_timestamp).await,
                 "meteora_amm" => test_meteora_amm(&rpc_client, current_timestamp).await,
