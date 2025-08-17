@@ -42,6 +42,8 @@ pub struct DecodedWhirlpoolPool {
     // --- CHAMP AJOUTÉ POUR LES TICKS ---
     // Un BTreeMap est parfait pour stocker les tick arrays de manière ordonnée.
     pub tick_arrays: Option<BTreeMap<i32, tick_array::TickArrayData>>,
+    pub mint_a_program: Pubkey,
+    pub mint_b_program: Pubkey,
 }
 
 impl DecodedWhirlpoolPool {
@@ -101,6 +103,8 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedWhirlpoolPool
         mint_a_decimals: 0, mint_b_decimals: 0,
         mint_a_transfer_fee_bps: 0, mint_b_transfer_fee_bps: 0,
         tick_arrays: None, // Initialisé à None
+        mint_a_program: spl_token::id(), // Valeur par défaut
+        mint_b_program: spl_token::id(),
     })
 }
 
@@ -110,16 +114,18 @@ pub async fn hydrate(pool: &mut DecodedWhirlpoolPool, rpc_client: &RpcClient) ->
     let mints_to_fetch = [pool.mint_a, pool.mint_b];
     let mint_accounts = rpc_client.get_multiple_accounts(&mints_to_fetch).await?;
 
-    let mint_a_data = mint_accounts[0].as_ref().ok_or_else(|| anyhow!("Mint A not found"))?.data.clone();
-    let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_data)?;
+    let mint_a_account = mint_accounts[0].as_ref().ok_or_else(|| anyhow!("Mint A not found"))?;
+    pool.mint_a_program = mint_a_account.owner; // <-- ON AJOUTE CETTE LIGNE
+    let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_account.data)?;
     pool.mint_a_decimals = decoded_mint_a.decimals;
     pool.mint_a_transfer_fee_bps = decoded_mint_a.transfer_fee_basis_points;
 
-    let mint_b_data = mint_accounts[1].as_ref().ok_or_else(|| anyhow!("Mint B not found"))?.data.clone();
-    let decoded_mint_b = spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_data)?;
+    // Traitement pour le Mint B
+    let mint_b_account = mint_accounts[1].as_ref().ok_or_else(|| anyhow!("Mint B not found"))?;
+    pool.mint_b_program = mint_b_account.owner; // <-- ON AJOUTE CETTE LIGNE
+    let decoded_mint_b = spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_account.data)?;
     pool.mint_b_decimals = decoded_mint_b.decimals;
     pool.mint_b_transfer_fee_bps = decoded_mint_b.transfer_fee_basis_points;
-
     // Étape 2: Préparer et fetcher les TickArrays
     let active_array_start_index = tick_array::get_start_tick_index(pool.tick_current_index, pool.tick_spacing);
     let ticks_per_array = (tick_array::TICK_ARRAY_SIZE as i32) * (pool.tick_spacing as i32);
