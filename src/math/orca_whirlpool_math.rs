@@ -103,3 +103,53 @@ pub fn compute_swap_step(
 
     (amount_in, amount_out, next_sqrt_price)
 }
+
+
+const LOG_B_2_X32: i128 = 59543866431248i128;
+const BIT_PRECISION: u32 = 14;
+const LOG_B_P_ERR_MARGIN_LOWER_X64: i128 = 184467440737095516i128; // 0.01
+const LOG_B_P_ERR_MARGIN_UPPER_X64: i128 = 15793534762490258745i128;
+
+/// Dérive l'index du tick à partir d'un sqrt_price.
+/// Copie exacte de la logique du SDK d'Orca.
+pub fn sqrt_price_to_tick_index(sqrt_price_x64: u128) -> i32 {
+    let msb: u32 = 128 - sqrt_price_x64.leading_zeros() - 1;
+    let log2p_integer_x32 = (msb as i128 - 64) << 32;
+
+    let mut bit: i128 = 0x8000_0000_0000_0000i128;
+    let mut precision = 0;
+    let mut log2p_fraction_x64 = 0;
+
+    let mut r = if msb >= 64 {
+        sqrt_price_x64 >> (msb - 63)
+    } else {
+        sqrt_price_x64 << (63 - msb)
+    };
+
+    while bit > 0 && precision < BIT_PRECISION {
+        r *= r;
+        let is_r_more_than_two = r >> 127_u32;
+        r >>= 63 + is_r_more_than_two;
+        log2p_fraction_x64 += bit * is_r_more_than_two as i128;
+        bit >>= 1;
+        precision += 1;
+    }
+
+    let log2p_fraction_x32 = log2p_fraction_x64 >> 32;
+    let log2p_x32 = log2p_integer_x32 + log2p_fraction_x32;
+    let logbp_x64 = log2p_x32 * LOG_B_2_X32;
+
+    let tick_low: i32 = ((logbp_x64 - LOG_B_P_ERR_MARGIN_LOWER_X64) >> 64) as i32;
+    let tick_high: i32 = ((logbp_x64 + LOG_B_P_ERR_MARGIN_UPPER_X64) >> 64) as i32;
+
+    if tick_low == tick_high {
+        tick_low
+    } else {
+        let actual_tick_high_sqrt_price_x64: u128 = tick_to_sqrt_price_x64(tick_high);
+        if actual_tick_high_sqrt_price_x64 <= sqrt_price_x64 {
+            tick_high
+        } else {
+            tick_low
+        }
+    }
+}

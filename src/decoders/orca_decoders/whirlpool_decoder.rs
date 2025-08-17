@@ -11,6 +11,9 @@ use solana_sdk::pubkey;
 use crate::decoders::spl_token_decoders;
 use crate::math::orca_whirlpool_math;
 use super::tick_array;
+use crate::math::orca_whirlpool_math::sqrt_price_to_tick_index;
+use tokio::runtime::Runtime;
+use crate::config::Config;
 // --- STRUCTURE DE TRAVAIL "PROPRE" (MODIFIÉE) ---
 #[derive(Debug, Clone)]
 pub struct DecodedWhirlpoolPool {
@@ -46,13 +49,7 @@ pub struct DecodedWhirlpoolPool {
     pub mint_b_program: Pubkey,
 }
 
-impl DecodedWhirlpoolPool {
-    pub fn fee_as_percent(&self) -> f64 {
-        // La fee_rate est en parts par million.
-        // Pour la convertir en pourcentage, on divise par 10,000.
-        self.fee_rate as f64 / 10_000.0
-    }
-}
+
 // --- STRUCTURES BRUTES (INCHANGÉES) ---
 #[repr(C, packed)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
@@ -110,44 +107,34 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedWhirlpoolPool
 
 // --- IMPLÉMENTATION DE LA FONCTION D'HYDRATATION (NOUVEAU) ---
 pub async fn hydrate(pool: &mut DecodedWhirlpoolPool, rpc_client: &RpcClient) -> Result<()> {
-    // Étape 1: Hydrater les mints
+    // --- Étape 1: Hydrater les mints (logique inchangée et correcte) ---
     let mints_to_fetch = [pool.mint_a, pool.mint_b];
     let mint_accounts = rpc_client.get_multiple_accounts(&mints_to_fetch).await?;
 
     let mint_a_account = mint_accounts[0].as_ref().ok_or_else(|| anyhow!("Mint A not found"))?;
-    pool.mint_a_program = mint_a_account.owner; // <-- ON AJOUTE CETTE LIGNE
+    pool.mint_a_program = mint_a_account.owner;
     let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_account.data)?;
     pool.mint_a_decimals = decoded_mint_a.decimals;
     pool.mint_a_transfer_fee_bps = decoded_mint_a.transfer_fee_basis_points;
 
-    // Traitement pour le Mint B
     let mint_b_account = mint_accounts[1].as_ref().ok_or_else(|| anyhow!("Mint B not found"))?;
-    pool.mint_b_program = mint_b_account.owner; // <-- ON AJOUTE CETTE LIGNE
+    pool.mint_b_program = mint_b_account.owner;
     let decoded_mint_b = spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_account.data)?;
     pool.mint_b_decimals = decoded_mint_b.decimals;
     pool.mint_b_transfer_fee_bps = decoded_mint_b.transfer_fee_basis_points;
-    // Étape 2: Préparer et fetcher les TickArrays
-    let active_array_start_index = tick_array::get_start_tick_index(pool.tick_current_index, pool.tick_spacing);
-    let ticks_per_array = (tick_array::TICK_ARRAY_SIZE as i32) * (pool.tick_spacing as i32);
 
-    let mut all_addresses_to_fetch = Vec::new();
-    const WINDOW_SIZE: i32 = 5;
-    for i in -WINDOW_SIZE..=WINDOW_SIZE {
-        let start_tick = active_array_start_index + (i * ticks_per_array);
-        all_addresses_to_fetch.push(tick_array::get_tick_array_address(&pool.address, start_tick, &pool.program_id));
-    }
-
-    let tick_array_accounts = rpc_client.get_multiple_accounts(&all_addresses_to_fetch).await?;
-
-    // Étape 3: Traiter les résultats
+    // --- Étape 2: Charger UNIQUEMENT le TickArray actuel ---
+    // On ne charge plus une fenêtre statique, juste le strict nécessaire.
     let mut hydrated_tick_arrays = BTreeMap::new();
-    for account_opt in tick_array_accounts {
-        if let Some(account) = account_opt {
-            if let Ok(decoded_array) = tick_array::decode_tick_array(&account.data) {
-                hydrated_tick_arrays.insert(decoded_array.start_tick_index, decoded_array);
-            }
+    let current_array_start_index = tick_array::get_start_tick_index(pool.tick_current_index, pool.tick_spacing);
+    let current_array_address = tick_array::get_tick_array_address(&pool.address, current_array_start_index, &pool.program_id);
+
+    if let Ok(account) = rpc_client.get_account(&current_array_address).await {
+        if let Ok(decoded_array) = tick_array::decode_tick_array(&account.data) {
+            hydrated_tick_arrays.insert(decoded_array.start_tick_index, decoded_array);
         }
     }
+
     pool.tick_arrays = Some(hydrated_tick_arrays);
 
     Ok(())
@@ -257,42 +244,95 @@ fn calculate_swap(
     Ok(total_amount_out as u64)
 }
 
-// --- IMPLÉMENTATION FINALE DU TRAIT POOLOPERATIONS ---
 impl PoolOperations for DecodedWhirlpoolPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
 
-    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
-        let tick_arrays = self.tick_arrays.as_ref().ok_or_else(|| anyhow!("Pool is not hydrated."))?;
-        if tick_arrays.is_empty() { return Ok(0); }
+    fn get_quote(&self, _token_in_mint: &Pubkey, _amount_in: u64, _current_timestamp: i64) -> Result<u64> {
+        // Cette fonction ne doit jamais être appelée. Elle est ici pour satisfaire le trait.
+        // Si elle est appelée, c'est un bug dans la logique de notre bot.
+        panic!("BUG: La fonction get_quote synchrone ne doit pas être utilisée pour Whirlpool.");
+    }
+}
 
+impl DecodedWhirlpoolPool {
+    pub fn fee_as_percent(&self) -> f64 {
+        self.fee_rate as f64 / 10_000.0
+    }
+
+    // ON RENOMME LA FONCTION ASYNCHRONE POUR ÉVITER TOUTE AMBIGUÏTÉ
+    pub async fn get_quote_with_rpc(
+        &mut self,
+        token_in_mint: &Pubkey,
+        amount_in: u64,
+        rpc_client: &RpcClient,
+    ) -> Result<u64> {
+        // Le corps de cette fonction est celui qui compile sans erreur de borrow-checker.
+        // (Il reste inchangé)
+        let tick_arrays = self.tick_arrays.as_mut().ok_or_else(|| anyhow!("Pool is not hydrated."))?;
         let a_to_b = *token_in_mint == self.mint_a;
-
-        // --- DÉBUT DE LA CORRECTION DE LA LOGIQUE DES FRAIS ---
-
-        // 1. Appliquer les frais de transfert Token-2022 sur l'input (votre logique est déjà bonne)
         let (in_mint_fee_bps, out_mint_fee_bps) = if a_to_b {
             (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps)
         } else {
             (self.mint_b_transfer_fee_bps, self.mint_a_transfer_fee_bps)
         };
-        let fee_on_input_token2022 = (amount_in as u128 * in_mint_fee_bps as u128) / 10000;
-        let amount_in_after_token2022_fee = amount_in.saturating_sub(fee_on_input_token2022 as u64);
-
-        // 2. Appliquer les frais de pool (LP) sur le montant d'entrée net.
-        // La `fee_rate` est en 1/1,000,000.
-        let pool_fee = (amount_in_after_token2022_fee as u128 * self.fee_rate as u128) / 1_000_000;
-        let amount_to_swap = amount_in_after_token2022_fee.saturating_sub(pool_fee as u64);
-
-        // 3. Calculer le swap avec le montant net de frais.
-        let gross_amount_out = calculate_swap(self, amount_to_swap, a_to_b, tick_arrays)?;
-
-        // 4. Appliquer les frais de transfert Token-2022 sur l'output (votre logique est déjà bonne)
-        let fee_on_output_token2022 = (gross_amount_out as u128 * out_mint_fee_bps as u128) / 10000;
-        let final_amount_out = gross_amount_out.saturating_sub(fee_on_output_token2022 as u64);
-
-        Ok(final_amount_out)
-
-        // --- FIN DE LA CORRECTION ---
+        let fee_on_input = (amount_in as u128 * in_mint_fee_bps as u128) / 10000;
+        let amount_in_after_fee = amount_in.saturating_sub(fee_on_input as u64);
+        let pool_fee = (amount_in_after_fee as u128 * self.fee_rate as u128) / 1_000_000;
+        let mut amount_remaining = amount_in_after_fee.saturating_sub(pool_fee as u64) as u128;
+        let mut total_amount_out: u128 = 0;
+        let mut current_liquidity = self.liquidity;
+        let mut current_sqrt_price = self.sqrt_price;
+        let mut current_tick_index = self.tick_current_index;
+        let mut fetched_array_indices = std::collections::HashSet::new();
+        let current_start_index = tick_array::get_start_tick_index(current_tick_index, self.tick_spacing);
+        fetched_array_indices.insert(current_start_index);
+        while amount_remaining > 0 && current_liquidity > 0 {
+            let (target_sqrt_price, next_liquidity_net) = {
+                let find_result = {
+                    let tick_arrays_ref = self.tick_arrays.as_ref().unwrap();
+                    find_next_initialized_tick(self, current_tick_index, a_to_b, tick_arrays_ref)
+                };
+                match find_result {
+                    Some((tick_index, tick_data)) => {
+                        (orca_whirlpool_math::tick_to_sqrt_price_x64(tick_index), Some(tick_data.liquidity_net))
+                    },
+                    None => {
+                        let last_known_array_index = {
+                            let tick_arrays_ref = self.tick_arrays.as_ref().unwrap();
+                            if a_to_b { *tick_arrays_ref.keys().next().unwrap_or(&current_start_index) } else { *tick_arrays_ref.keys().next_back().unwrap_or(&current_start_index) }
+                        };
+                        let ticks_per_array = (tick_array::TICK_ARRAY_SIZE as i32) * (self.tick_spacing as i32);
+                        let next_array_index_to_fetch = if a_to_b { last_known_array_index - ticks_per_array } else { last_known_array_index + ticks_per_array };
+                        if !fetched_array_indices.contains(&next_array_index_to_fetch) {
+                            let next_array_address = tick_array::get_tick_array_address(&self.address, next_array_index_to_fetch, &self.program_id);
+                            if let Ok(account) = rpc_client.get_account(&next_array_address).await {
+                                if let Ok(decoded_array) = tick_array::decode_tick_array(&account.data) {
+                                    self.tick_arrays.as_mut().unwrap().insert(decoded_array.start_tick_index, decoded_array);
+                                    fetched_array_indices.insert(next_array_index_to_fetch);
+                                    continue;
+                                }
+                            }
+                        }
+                        (if a_to_b { 0 } else { u128::MAX }, None)
+                    }
+                }
+            };
+            let (amount_in_step, amount_out_step, next_sqrt_price) = orca_whirlpool_math::compute_swap_step(
+                amount_remaining, current_sqrt_price, target_sqrt_price, current_liquidity, a_to_b,
+            );
+            amount_remaining -= amount_in_step;
+            total_amount_out += amount_out_step;
+            current_sqrt_price = next_sqrt_price;
+            if current_sqrt_price == target_sqrt_price {
+                if let Some(liquidity_net) = next_liquidity_net {
+                    current_liquidity = (current_liquidity as i128 + liquidity_net) as u128;
+                    current_tick_index = sqrt_price_to_tick_index(current_sqrt_price);
+                } else { break; }
+            }
+        }
+        let fee_on_output = (total_amount_out * out_mint_fee_bps as u128) / 10000;
+        let final_amount_out = total_amount_out.saturating_sub(fee_on_output);
+        Ok(final_amount_out as u64)
     }
 }

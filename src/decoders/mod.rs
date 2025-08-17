@@ -79,7 +79,10 @@ impl PoolOperations for Pool {
             Pool::MeteoraAmm(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
             Pool::MeteoraDammV2(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
             Pool::MeteoraDlmm(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
-            Pool::OrcaWhirlpool(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
+            Pool::OrcaWhirlpool(_) => {
+                // On signale une erreur car cette voie ne doit pas être utilisée.
+                panic!("Ne pas utiliser get_quote synchrone pour OrcaWhirlpool. Le chemin de test doit appeler la méthode async dédiée.");
+            },
             Pool::OrcaAmmV2(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
             Pool::OrcaAmmV1(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
             Pool::PumpAmm(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
