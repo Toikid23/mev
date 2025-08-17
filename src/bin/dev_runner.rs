@@ -700,9 +700,7 @@ async fn test_whirlpool_with_simulation(rpc_client: &RpcClient, payer: &Keypair,
         bail!("Le token d'input {} n'appartient pas au pool {}", input_mint_pubkey, pool_pubkey);
     };
     let amount_in_base_units = (INPUT_AMOUNT_UI * 10f64.powi(input_decimals as i32)) as u64;
-
-    // *** LA MODIFICATION FINALE EST ICI ***
-    // On appelle la méthode async par son nom unique et non-ambigu.
+    
     let predicted_amount_out = pool.get_quote_with_rpc(&input_mint_pubkey, amount_in_base_units, rpc_client).await?;
 
     let ui_predicted_amount_out = predicted_amount_out as f64 / 10f64.powi(output_decimals as i32);

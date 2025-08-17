@@ -14,6 +14,7 @@ use super::tick_array;
 use crate::math::orca_whirlpool_math::sqrt_price_to_tick_index;
 use tokio::runtime::Runtime;
 use crate::config::Config;
+
 // --- STRUCTURE DE TRAVAIL "PROPRE" (MODIFIÉE) ---
 #[derive(Debug, Clone)]
 pub struct DecodedWhirlpoolPool {
@@ -244,31 +245,22 @@ fn calculate_swap(
     Ok(total_amount_out as u64)
 }
 
-impl PoolOperations for DecodedWhirlpoolPool {
-    fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
-    fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
-
-    fn get_quote(&self, _token_in_mint: &Pubkey, _amount_in: u64, _current_timestamp: i64) -> Result<u64> {
-        // Cette fonction ne doit jamais être appelée. Elle est ici pour satisfaire le trait.
-        // Si elle est appelée, c'est un bug dans la logique de notre bot.
-        panic!("BUG: La fonction get_quote synchrone ne doit pas être utilisée pour Whirlpool.");
-    }
-}
-
 impl DecodedWhirlpoolPool {
-    pub fn fee_as_percent(&self) -> f64 {
-        self.fee_rate as f64 / 10_000.0
-    }
+    // Fonctions utilitaires
+    pub fn fee_as_percent(&self) -> f64 { self.fee_rate as f64 / 10_000.0 }
+    pub fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
+    pub fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
 
-    // ON RENOMME LA FONCTION ASYNCHRONE POUR ÉVITER TOUTE AMBIGUÏTÉ
+    // C'est notre fonction de devis spéciale et asynchrone pour Whirlpool.
+    // Elle a un nom unique pour ne pas créer de conflit.
     pub async fn get_quote_with_rpc(
         &mut self,
         token_in_mint: &Pubkey,
         amount_in: u64,
         rpc_client: &RpcClient,
     ) -> Result<u64> {
-        // Le corps de cette fonction est celui qui compile sans erreur de borrow-checker.
-        // (Il reste inchangé)
+        // Le corps de cette fonction est la version que nous avons validée,
+        // qui compile et gère le chargement dynamique.
         let tick_arrays = self.tick_arrays.as_mut().ok_or_else(|| anyhow!("Pool is not hydrated."))?;
         let a_to_b = *token_in_mint == self.mint_a;
         let (in_mint_fee_bps, out_mint_fee_bps) = if a_to_b {
