@@ -873,27 +873,132 @@ async fn test_orca_amm_v2(rpc_client: &RpcClient, current_timestamp: i64) -> Res
     Ok(())
 }
 
-async fn test_meteora_amm(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
-    const POOL_ADDRESS: &str = "7rQd8FhC1rimV3v9edCRZ6RNFsJN1puXM9UmjaURJRNj"; // Constant Product (WSOL-NOBODY)
-    println!("\n--- Test Meteora AMM ({}) ---", POOL_ADDRESS);
+
+
+
+#[derive(BorshDeserialize, Debug)]
+pub struct MeteoraSwapEvent {
+    pub in_amount: u64,
+    pub out_amount: u64,
+    pub trade_fee: u64,
+    pub protocol_fee: u64,
+    pub host_fee: u64,
+}
+
+fn parse_meteora_swap_event_from_logs(logs: &[String]) -> Option<u64> {
+    // Discriminateur pour l'événement "Swap", calculé depuis l'IDL: sha256("event:Swap")[..8]
+    const SWAP_EVENT_DISCRIMINATOR: [u8; 8] = [81, 108, 227, 190, 205, 208, 10, 196];
+
+    for log in logs {
+        if let Some(data_str) = log.strip_prefix("Program data: ") {
+            if let Ok(bytes) = base64::decode(data_str) {
+                if bytes.len() > 8 && bytes.starts_with(&SWAP_EVENT_DISCRIMINATOR) {
+                    let mut event_data: &[u8] = &bytes[8..];
+                    if let Ok(event) = MeteoraSwapEvent::try_from_slice(&mut event_data) {
+                        return Some(event.out_amount);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+
+
+
+async fn test_meteora_amm_with_simulation(rpc_client: &RpcClient, payer_keypair: &Keypair, current_timestamp: i64) -> Result<()> {
+    const POOL_ADDRESS: &str = "ERgpKaq59Nnfm9YRVAAhnq16cZhHxGcDoDWCzXbhiaNw"; // WSOL-NOBODY
+    const INPUT_MINT_STR: &str = "So11111111111111111111111111111111111111112"; // WSOL
+    const INPUT_AMOUNT_UI: f64 = 0.05;
+
+    println!("\n--- Test et Simulation (Comptes Réels) Meteora AMM ({}) ---", POOL_ADDRESS);
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
-    let account_data = rpc_client.get_account_data(&pool_pubkey).await?;
+    let input_mint_pubkey = Pubkey::from_str(INPUT_MINT_STR)?;
 
-    let mut pool = meteora_amm::decode_pool(&pool_pubkey, &account_data)?;
-    println!("-> Décodage initial réussi. Courbe détectée: {:?}", pool.curve_type);
-
-    println!("[1/2] Hydratation...");
+    // --- 1. Prédiction Locale ---
+    println!("[1/3] Hydratation et prédiction locale...");
+    let pool_account_data = rpc_client.get_account_data(&pool_pubkey).await?;
+    let mut pool = meteora_amm::decode_pool(&pool_pubkey, &pool_account_data)?;
     meteora_amm::hydrate(&mut pool, rpc_client).await?;
 
-    let fee_percent = (pool.fees.trade_fee_numerator as f64 * 100.0) / pool.fees.trade_fee_denominator as f64;
-    println!("-> Hydratation terminée. Frais de trading: {:.4}%.", fee_percent);
+    let (input_decimals, output_decimals, output_mint_pubkey) = if input_mint_pubkey == pool.mint_a {
+        (pool.mint_a_decimals, pool.mint_b_decimals, pool.mint_b)
+    } else {
+        (pool.mint_b_decimals, pool.mint_a_decimals, pool.mint_a)
+    };
 
-    let amount_in = 1 * 10u64.pow(pool.mint_a_decimals as u32);
-    println!("\n[2/2] Calcul du quote pour 1 Token A (ex: WSOL)...");
-    print_quote_result(&pool, &pool.mint_a, pool.mint_a_decimals, pool.mint_b_decimals, amount_in, current_timestamp)?;
+    let amount_in_base_units = (INPUT_AMOUNT_UI * 10f64.powi(input_decimals as i32)) as u64;
+    let predicted_amount_out = pool.get_quote(&input_mint_pubkey, amount_in_base_units, current_timestamp)?;
+    let ui_predicted_amount_out = predicted_amount_out as f64 / 10f64.powi(output_decimals as i32);
+    println!("-> PRÉDICTION LOCALE: {} UI", ui_predicted_amount_out);
+
+    // --- 2. Préparation de la Transaction ---
+    println!("\n[2/3] Préparation de la transaction de swap...");
+    let payer_pubkey = payer_keypair.pubkey();
+    let user_source_ata = get_associated_token_address(&payer_pubkey, &input_mint_pubkey);
+    let user_destination_ata = get_associated_token_address(&payer_pubkey, &output_mint_pubkey);
+
+    // Nous utilisons la fonction `create_swap_instruction` que nous venons de finaliser.
+    let swap_ix = pool.create_swap_instruction(
+        &input_mint_pubkey,
+        &user_source_ata,
+        &user_destination_ata,
+        &payer_pubkey,
+        amount_in_base_units,
+        0, // minimum_out_amount à 0 pour la simulation
+    )?;
+
+    let recent_blockhash = rpc_client.get_latest_blockhash().await?;
+    let transaction = Transaction::new_signed_with_payer(
+        &[swap_ix],
+        Some(&payer_pubkey),
+        &[payer_keypair],
+        recent_blockhash,
+    );
+
+    // --- 3. Simulation et Analyse ---
+    println!("\n[3/3] Exécution de la simulation standard...");
+    let sim_result = rpc_client.simulate_transaction(&transaction).await?.value;
+
+    if let Some(err) = sim_result.err {
+        println!("LOGS DE SIMULATION DÉTAILLÉS:\n{:#?}", sim_result.logs);
+        bail!("La simulation a échoué: {:?}", err);
+    }
+
+    let simulated_amount_out = sim_result.logs.as_ref()
+        .and_then(|logs| parse_meteora_swap_event_from_logs(logs))
+        .ok_or_else(|| {
+            if let Some(logs) = &sim_result.logs {
+                println!("\n--- LOGS COMPLETS (Événement non trouvé) ---");
+                for log in logs {
+                    println!("{}", log);
+                }
+                println!("-------------------------------------------");
+            }
+            anyhow!("Impossible de parser l'événement de swap Meteora depuis les logs")
+        })?;
+
+    let ui_simulated_amount_out = simulated_amount_out as f64 / 10f64.powi(output_decimals as i32);
+
+    // --- 4. Comparaison ---
+    println!("\n--- COMPARAISON (Meteora AMM) ---");
+    println!("Montant PRÉDIT (local)    : {}", ui_predicted_amount_out);
+    println!("Montant SIMULÉ (on-chain) : {}", ui_simulated_amount_out);
+    let difference = (ui_predicted_amount_out - ui_simulated_amount_out).abs();
+    let difference_percent = if ui_simulated_amount_out > 0.0 { (difference / ui_simulated_amount_out) * 100.0 } else { 0.0 };
+    println!("-> Différence relative: {:.6} %", difference_percent);
+
+    if difference_percent < 0.01 {
+        println!("✅ SUCCÈS ! Le décodeur Meteora AMM est précis.");
+    } else {
+        println!("⚠️ ÉCHEC ! La différence est trop grande.");
+    }
 
     Ok(())
 }
+
+
 
 async fn test_damm_v2(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
     const POOL_ADDRESS: &str = "BnpqhBcR8jUXZjtZ8GrT1YyXPggfvtUonwHcHvu8LKj9"; // BAG-WSOL
@@ -1159,7 +1264,7 @@ async fn main() -> Result<()> {
         if let Err(e) = test_cpmm_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! CPMM a échoué: {}", e); }
         if let Err(e) = test_clmm(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! CLMM a échoué: {}", e); }
         if let Err(e) = test_launchpad(&rpc_client, current_timestamp).await { println!("!! Launchpad a échoué: {}", e); }
-        if let Err(e) = test_meteora_amm(&rpc_client, current_timestamp).await { println!("!! Meteora AMM a échoué: {}", e); }
+        if let Err(e) = test_meteora_amm_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! Meteora AMM a échoué: {}", e); }
         if let Err(e) = test_damm_v2(&rpc_client, current_timestamp).await { println!("!! Meteora DAMM v2 a echoue: {}", e); }
         if let Err(e) = test_dlmm(&rpc_client, current_timestamp).await { println!("!! DLMM a échoué: {}", e); }
         if let Err(e) = test_whirlpool_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! Whirlpool a échoué: {}", e); }
@@ -1174,7 +1279,7 @@ async fn main() -> Result<()> {
                 "cpmm" => test_cpmm_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await,
                 "clmm" => test_clmm(&rpc_client, &payer_keypair, current_timestamp).await,
                 "launchpad" => test_launchpad(&rpc_client, current_timestamp).await,
-                "meteora_amm" => test_meteora_amm(&rpc_client, current_timestamp).await,
+                "meteora_amm" => test_meteora_amm_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await,
                 "damm_v2" => test_damm_v2(&rpc_client, current_timestamp).await,
                 "dlmm" => test_dlmm(&rpc_client, current_timestamp).await,
                 "whirlpool" => test_whirlpool_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await,
