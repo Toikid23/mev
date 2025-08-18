@@ -1054,38 +1054,186 @@ async fn test_meteora_amm_with_simulation(rpc_client: &RpcClient, payer_keypair:
 
 
 
-async fn test_damm_v2(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
-    const POOL_ADDRESS: &str = "BnpqhBcR8jUXZjtZ8GrT1YyXPggfvtUonwHcHvu8LKj9"; // BAG-WSOL
-    println!("\n--- Test Meteora DAMM v2 (BAG/WSOL: {}) ---", POOL_ADDRESS);
+
+
+#[derive(BorshDeserialize, Debug)]
+pub struct DammSwapResult {
+    pub output_amount: u64,
+    pub next_sqrt_price: u128,
+    pub lp_fee: u64,
+    pub protocol_fee: u64,
+    pub partner_fee: u64,
+    pub referral_fee: u64,
+}
+
+#[derive(BorshDeserialize, Debug)]
+pub struct DammSwapEvent {
+    // Les champs doivent être dans l'ordre exact de l'IDL
+    pub pool: Pubkey,
+    pub trade_direction: u8,
+    pub has_referral: bool,
+    // On ignore les 'params' car ils sont complexes et on n'en a pas besoin
+    // pub params: SwapParameters,
+    // Nous devons sauter les octets des params. `amount_in` et `minimum_amount_out` sont des u64 (8+8=16 octets).
+    // Pour être sûr, on va parser manuellement après avoir trouvé le bon log.
+    // La structure complète de l'événement est trop complexe à parser directement avec Borsh
+    // à cause des champs de taille variable. Nous allons donc extraire le champ manuellement.
+}
+
+
+// LA FONCTION DE PARSING MANUELLE ET ROBUSTE
+fn parse_damm_swap_event_from_logs(logs: &[String]) -> Option<u64> {
+    // Discriminateur pour l'événement "EvtSwap", calculé depuis l'IDL: sha256("event:EvtSwap")[..8]
+    const SWAP_EVENT_DISCRIMINATOR: [u8; 8] = [27, 60, 21, 213, 138, 170, 187, 147];
+
+    for log in logs {
+        if let Some(data_str) = log.strip_prefix("Program data: ") {
+            if let Ok(bytes) = base64::decode(data_str) {
+                if bytes.len() > 8 && bytes.starts_with(&SWAP_EVENT_DISCRIMINATOR) {
+                    // Les données de l'événement commencent après le discriminateur
+                    let event_data = &bytes[8..];
+
+                    // D'après l'IDL, la structure de EvtSwap est :
+                    // 1. pool: Pubkey (32 bytes)
+                    // 2. trade_direction: u8 (1 byte)
+                    // 3. has_referral: bool (1 byte)
+                    // 4. params: { amount_in: u64, minimum_amount_out: u64 } (8 + 8 = 16 bytes)
+                    // 5. swap_result: { output_amount: u64, ... } (le champ qui nous intéresse est le premier u64)
+
+                    // L'offset de `output_amount` est donc : 32 + 1 + 1 + 16 = 50.
+                    // Il faut tenir compte du padding pour l'alignement. bool est 1 byte,
+                    // mais le champ suivant (params) peut forcer un alignement.
+                    // Essayons avec l'offset brut, puis ajustons si nécessaire.
+                    const OFFSET_TO_SWAP_RESULT: usize = 32 + 1 + 1 + 8 + 8; // pool + direction + referral + params
+
+                    if event_data.len() >= OFFSET_TO_SWAP_RESULT + 8 {
+                        let amount_bytes: [u8; 8] = event_data[OFFSET_TO_SWAP_RESULT..OFFSET_TO_SWAP_RESULT + 8].try_into().ok()?;
+                        return Some(u64::from_le_bytes(amount_bytes));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+
+
+
+// DANS src/bin/dev_runner.rs
+// REMPLACEZ la fonction par cette version de débogage
+
+async fn test_damm_v2_with_simulation(rpc_client: &RpcClient, payer_keypair: &Keypair, current_timestamp: i64) -> Result<()> {
+    // --- SETUP DU TEST ---
+    const POOL_ADDRESS: &str = "FiMTgvjJq7dWX5ZetXZv6XeHxXSYJRG2SgNR9mygs9KN"; // BAG-WSOL
+    const INPUT_MINT_STR: &str = "So11111111111111111111111111111111111111112"; // WSOL
+    const INPUT_AMOUNT_UI: f64 = 0.05;
+
+    println!("\n--- Test et Simulation (Lecture de Compte) Meteora DAMM v2 ({}) ---", POOL_ADDRESS);
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
-    let account_data = rpc_client.get_account_data(&pool_pubkey).await?;
+    let input_mint_pubkey = Pubkey::from_str(INPUT_MINT_STR)?;
 
-    let mut pool = damm_v2::decode_pool(&pool_pubkey, &account_data)?;
-    println!("-> Decodage initial reussi.");
-
-    println!("[1/2] Hydratation...");
+    // --- 1. Prédiction Locale ---
+    println!("[1/3] Hydratation et prédiction locale...");
+    let pool_account_data = rpc_client.get_account_data(&pool_pubkey).await?;
+    let mut pool = damm_v2::decode_pool(&pool_pubkey, &pool_account_data)?;
     damm_v2::hydrate(&mut pool, rpc_client).await?;
-    println!("-> Hydratation terminee. Frais de base: {:.4}%.", pool.fee_as_percent());
-    println!("   -> Decimale A (BAG): {}, Decimale B (WSOL): {}", pool.mint_a_decimals, pool.mint_b_decimals);
 
-    // --- DÉBUT DE LA MODIFICATION DU TEST ---
+    let (input_decimals, output_decimals, output_mint_pubkey, output_token_program) = if input_mint_pubkey == pool.mint_a {
+        (pool.mint_a_decimals, pool.mint_b_decimals, pool.mint_b, pool.mint_b_program)
+    } else {
+        (pool.mint_b_decimals, pool.mint_a_decimals, pool.mint_a, pool.mint_a_program)
+    };
 
-    // Nous simulons maintenant la vente de 0.999 WSOL, comme dans la transaction on-chain.
-    // WSOL est mint_b et a 9 décimales.
-    let amount_in_ui = 0.999;
-    let amount_in_base_units = (amount_in_ui * 10f64.powi(pool.mint_b_decimals as i32)) as u64;
+    let amount_in_base_units = (INPUT_AMOUNT_UI * 10f64.powi(input_decimals as i32)) as u64;
+    let predicted_amount_out = pool.get_quote(&input_mint_pubkey, amount_in_base_units, current_timestamp)?;
+    let ui_predicted_amount_out = predicted_amount_out as f64 / 10f64.powi(output_decimals as i32);
+    println!("-> PRÉDICTION LOCALE: {} UI", ui_predicted_amount_out);
 
-    println!("\n[2/2] Calcul du quote pour VENDRE {} WSOL...", amount_in_ui);
-    print_quote_result(
-        &pool,
-        &pool.mint_b, // On entre du WSOL (mint_b)
-        pool.mint_b_decimals, // Décimales de l'input (WSOL)
-        pool.mint_a_decimals, // Décimales de l'output (BAG)
+    // --- 2. Préparation de la Transaction ---
+    println!("\n[2/3] Préparation de la transaction de swap...");
+    let payer_pubkey = payer_keypair.pubkey();
+    let user_source_ata = get_associated_token_address_with_program_id(&payer_pubkey, &input_mint_pubkey, &pool.mint_b_program);
+    let user_destination_ata = get_associated_token_address_with_program_id(&payer_pubkey, &output_mint_pubkey, &output_token_program);
+
+    let swap_ix = pool.create_swap_instruction(
+        &payer_pubkey,
+        &user_source_ata,
+        &user_destination_ata,
+        &input_mint_pubkey,
         amount_in_base_units,
-        current_timestamp
+        0,
     )?;
 
-    // --- FIN DE LA MODIFICATION DU TEST ---
+    let recent_blockhash = rpc_client.get_latest_blockhash().await?;
+    let transaction = Transaction::new_signed_with_payer(
+        &[swap_ix],
+        Some(&payer_pubkey),
+        &[payer_keypair],
+        recent_blockhash,
+    );
+
+    // --- 3. Simulation et Analyse par Lecture de Compte ---
+    println!("\n[3/3] Exécution de la simulation avec lecture de compte...");
+
+    // On récupère la balance du compte de destination AVANT la simulation.
+    let initial_destination_balance = match rpc_client.get_token_account(&user_destination_ata).await {
+        Ok(Some(acc)) => acc.token_amount.amount.parse::<u64>().unwrap_or(0),
+        _ => 0, // Le compte n'existe pas ou erreur, la balance est 0.
+    };
+    println!("-> Balance initiale du compte de destination: {}", initial_destination_balance);
+
+    // Configuration de la simulation pour qu'elle nous retourne l'état du compte de destination.
+    let sim_config = RpcSimulateTransactionConfig {
+        sig_verify: false,
+        replace_recent_blockhash: true,
+        commitment: Some(rpc_client.commitment()),
+        encoding: Some(UiTransactionEncoding::Base64),
+        accounts: Some(solana_client::rpc_config::RpcSimulateTransactionAccountsConfig {
+            encoding: Some(solana_account_decoder::UiAccountEncoding::Base64),
+            addresses: vec![ user_destination_ata.to_string() ],
+        }),
+        ..Default::default()
+    };
+
+    let sim_response = rpc_client.simulate_transaction_with_config(&transaction, sim_config).await?;
+    let sim_result = sim_response.value;
+
+    if let Some(err) = sim_result.err {
+        println!("!! ERREUR DE SIMULATION: {:?}", err);
+        println!("!! LOGS: {:?}", sim_result.logs);
+        bail!("La simulation a échoué.");
+    }
+
+    // Extraction de la balance POST-simulation
+    let post_accounts = sim_result.accounts.ok_or_else(|| anyhow!("La simulation n'a pas retourné l'état des comptes."))?;
+    let destination_account_state = post_accounts.get(0).and_then(|acc| acc.as_ref()).ok_or_else(|| anyhow!("L'état du compte de destination n'a pas été retourné."))?;
+
+    let decoded_data = match &destination_account_state.data {
+        UiAccountData::Binary(data_str, _) => base64::decode(data_str)?,
+        _ => bail!("Format de données de compte inattendu."),
+    };
+
+    let token_account_data = SplTokenAccount::unpack(&decoded_data)?;
+    let post_simulation_balance = token_account_data.amount;
+    println!("-> Balance finale du compte de destination (simulée): {}", post_simulation_balance);
+
+    let simulated_amount_out = post_simulation_balance.saturating_sub(initial_destination_balance);
+    let ui_simulated_amount_out = simulated_amount_out as f64 / 10f64.powi(output_decimals as i32);
+
+    // --- 4. Comparaison ---
+    println!("\n--- COMPARAISON (Meteora DAMM v2) ---");
+    println!("Montant PRÉDIT (local)             : {}", ui_predicted_amount_out);
+    println!("Montant SIMULÉ (lecture de compte) : {}", ui_simulated_amount_out);
+    let difference = (ui_predicted_amount_out - ui_simulated_amount_out).abs();
+    let difference_percent = if ui_simulated_amount_out > 0.0 { (difference / ui_simulated_amount_out) * 100.0 } else { 0.0 };
+    println!("-> Différence relative: {:.6} %", difference_percent);
+
+    if difference_percent < 0.1 {
+        println!("✅ SUCCÈS ! Le décodeur Meteora DAMM v2 est précis.");
+    } else {
+        println!("⚠️ ÉCHEC ! La différence est trop grande.");
+    }
 
     Ok(())
 }
@@ -1319,7 +1467,7 @@ async fn main() -> Result<()> {
         if let Err(e) = test_clmm(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! CLMM a échoué: {}", e); }
         if let Err(e) = test_launchpad(&rpc_client, current_timestamp).await { println!("!! Launchpad a échoué: {}", e); }
         if let Err(e) = test_meteora_amm_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! Meteora AMM a échoué: {}", e); }
-        if let Err(e) = test_damm_v2(&rpc_client, current_timestamp).await { println!("!! Meteora DAMM v2 a echoue: {}", e); }
+        if let Err(e) = test_damm_v2_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! Meteora DAMM v2 a échoué: {}", e); }
         if let Err(e) = test_dlmm(&rpc_client, current_timestamp).await { println!("!! DLMM a échoué: {}", e); }
         if let Err(e) = test_whirlpool_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! Whirlpool a échoué: {}", e); }
         if let Err(e) = test_orca_amm_v2(&rpc_client, current_timestamp).await { println!("!! Orca AMM V2 a échoué: {}", e); }
@@ -1334,7 +1482,7 @@ async fn main() -> Result<()> {
                 "clmm" => test_clmm(&rpc_client, &payer_keypair, current_timestamp).await,
                 "launchpad" => test_launchpad(&rpc_client, current_timestamp).await,
                 "meteora_amm" => test_meteora_amm_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await,
-                "damm_v2" => test_damm_v2(&rpc_client, current_timestamp).await,
+                "damm_v2" => test_damm_v2_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await,
                 "dlmm" => test_dlmm(&rpc_client, current_timestamp).await,
                 "whirlpool" => test_whirlpool_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await,
                 "orca_amm_v2" => test_orca_amm_v2(&rpc_client, current_timestamp).await,
