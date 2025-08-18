@@ -15,7 +15,7 @@ use anyhow::anyhow;
 // Collez ici l'adresse du MINT du jeton pour lequel vous voulez créer un ATA.
 
 
-const MINT_ADDRESS: &str = "7uwNJaMRj9FZuubmzguU8A4cR15ykpBymhAiVJEFTjZ5";
+const MINT_ADDRESS: &str = "3Rt9t4vM1KShncfMgya69ahrktmKewnHz11FUhdapump";
 
 // Pour le test CLMM, utilisez celle-ci :
 // const MINT_ADDRESS: &str = "Ey59PH7Z4BFU4HjyKnyMdWt5GGN76KazTAwQihoUXRnk"; // LAUNCHCOIN (Token-2022)

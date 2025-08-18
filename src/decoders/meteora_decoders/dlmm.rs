@@ -11,6 +11,8 @@ use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::BTreeMap;
 use std::mem;
+use solana_sdk::instruction::{Instruction, AccountMeta}; // Assurez-vous que ces imports sont présents en haut du fichier.
+use spl_associated_token_account::get_associated_token_address_with_program_id;
 
 // --- CONSTANTES ---
 const MAX_BIN_PER_ARRAY: usize = 70;
@@ -22,15 +24,26 @@ const BIN_ARRAY_SEED: &[u8] = b"bin_array";
 
 #[derive(Debug, Clone)]
 pub struct DecodedDlmmPool {
-    pub address: Pubkey, pub program_id: Pubkey, pub mint_a: Pubkey, pub mint_b: Pubkey,
-    pub vault_a: Pubkey, pub vault_b: Pubkey, pub active_bin_id: i32, pub bin_step: u16,
-    pub base_fee_rate: u64, pub mint_a_decimals: u8, pub mint_b_decimals: u8,
-    pub mint_a_transfer_fee_bps: u16, pub mint_b_transfer_fee_bps: u16,
-    // --- AJOUTEZ CES DEUX LIGNES ---
+    pub address: Pubkey,
+    pub program_id: Pubkey,
+    pub mint_a: Pubkey,
+    pub mint_b: Pubkey,
+    pub vault_a: Pubkey,
+    pub vault_b: Pubkey,
+    pub oracle: Pubkey, // <--- CHAMP AJOUTÉ (remplace observation_key)
+    pub active_bin_id: i32,
+    pub bin_step: u16,
+    pub base_fee_rate: u64,
+    pub mint_a_decimals: u8,
+    pub mint_b_decimals: u8,
+    pub mint_a_transfer_fee_bps: u16,
+    pub mint_b_transfer_fee_bps: u16,
     pub mint_a_transfer_fee_max: u64,
     pub mint_b_transfer_fee_max: u64,
-    // --- FIN DE L'AJOUT ---
-    pub parameters: onchain_layouts::StaticParameters, pub v_parameters: onchain_layouts::VariableParameters,
+    pub mint_a_program: Pubkey, // <--- CHAMP AJOUTÉ
+    pub mint_b_program: Pubkey, // <--- CHAMP AJOUTÉ
+    pub parameters: onchain_layouts::StaticParameters,
+    pub v_parameters: onchain_layouts::VariableParameters,
     pub hydrated_bin_arrays: Option<BTreeMap<i64, DecodedBinArray>>,
 }
 
@@ -104,7 +117,77 @@ impl DecodedDlmmPool {
 
         Ok(total_amount_out as u64)
     }
+
+    pub fn create_swap_instruction(
+        &self,
+        user_owner: &Pubkey,
+        input_token_mint: &Pubkey,
+        amount_in: u64,
+        min_amount_out: u64,
+    ) -> Result<Instruction> {
+        let instruction_discriminator: [u8; 8] = [65, 75, 63, 76, 235, 91, 91, 136];
+
+        let mut instruction_data = Vec::with_capacity(8 + 8 + 8 + 4);
+        instruction_data.extend_from_slice(&instruction_discriminator);
+        instruction_data.extend_from_slice(&amount_in.to_le_bytes());
+        instruction_data.extend_from_slice(&min_amount_out.to_le_bytes());
+        instruction_data.extend_from_slice(&0u32.to_le_bytes()); // Longueur du Vec<RemainingAccountsSlice> (0)
+
+        let (in_mint, out_mint, in_token_program, out_token_program) = if *input_token_mint == self.mint_a {
+            (self.mint_a, self.mint_b, self.mint_a_program, self.mint_b_program)
+        } else {
+            (self.mint_b, self.mint_a, self.mint_b_program, self.mint_a_program)
+        };
+
+        let user_token_in = get_associated_token_address_with_program_id(user_owner, &in_mint, &in_token_program);
+        let user_token_out = get_associated_token_address_with_program_id(user_owner, &out_mint, &out_token_program);
+
+        let (event_authority, _) = Pubkey::find_program_address(&[b"__event_authority"], &self.program_id);
+
+        // --- LA CORRECTION EST ICI ---
+        // Le compte `bin_array_bitmap_extension` est optionnel.
+        // Si le pool n'en a pas, l'IDL indique qu'il faut passer le program_id à la place.
+        // Puisque nous ne savons pas s'il existe sans un appel RPC supplémentaire,
+        // passer `program_id` est la solution la plus sûre pour la simulation.
+        let bitmap_extension = self.program_id;
+        // --- FIN DE LA CORRECTION ---
+
+        let mut accounts = vec![
+            AccountMeta { pubkey: self.address, is_signer: false, is_writable: true },
+            AccountMeta { pubkey: bitmap_extension, is_signer: false, is_writable: false }, // Devient readonly
+            AccountMeta { pubkey: self.vault_a, is_signer: false, is_writable: true },
+            AccountMeta { pubkey: self.vault_b, is_signer: false, is_writable: true },
+            AccountMeta { pubkey: user_token_in, is_signer: false, is_writable: true },
+            AccountMeta { pubkey: user_token_out, is_signer: false, is_writable: true },
+            AccountMeta { pubkey: self.mint_a, is_signer: false, is_writable: false },
+            AccountMeta { pubkey: self.mint_b, is_signer: false, is_writable: false },
+            AccountMeta { pubkey: self.oracle, is_signer: false, is_writable: true },
+            AccountMeta { pubkey: self.program_id, is_signer: false, is_writable: true }, // host_fee_in placeholder
+            AccountMeta { pubkey: *user_owner, is_signer: true, is_writable: false },
+            AccountMeta { pubkey: in_token_program, is_signer: false, is_writable: false },
+            AccountMeta { pubkey: out_token_program, is_signer: false, is_writable: false },
+            AccountMeta { pubkey: spl_memo::id(), is_signer: false, is_writable: false },
+            AccountMeta { pubkey: event_authority, is_signer: false, is_writable: false },
+            AccountMeta { pubkey: self.program_id, is_signer: false, is_writable: false },
+        ];
+
+        if let Some(hydrated_arrays) = &self.hydrated_bin_arrays {
+            let mut sorted_keys: Vec<_> = hydrated_arrays.keys().collect();
+            sorted_keys.sort();
+            for key in sorted_keys {
+                let bin_array_address = get_bin_array_address(&self.address, *key, &self.program_id);
+                accounts.push(AccountMeta { pubkey: bin_array_address, is_signer: false, is_writable: true });
+            }
+        }
+
+        Ok(Instruction {
+            program_id: self.program_id,
+            accounts,
+            data: instruction_data,
+        })
+    }
 }
+
 
 impl PoolOperations for DecodedDlmmPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
@@ -162,6 +245,7 @@ pub fn decode_lb_pair(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Res
         mint_b: pool_struct.token_y_mint,
         vault_a: pool_struct.reserve_x,
         vault_b: pool_struct.reserve_y,
+        oracle: pool_struct.oracle, // <-- Initialisation du nouveau champ
         active_bin_id: pool_struct.active_id,
         bin_step: pool_struct.bin_step,
         base_fee_rate,
@@ -171,7 +255,8 @@ pub fn decode_lb_pair(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Res
         mint_b_transfer_fee_bps: 0,
         mint_a_transfer_fee_max: 0,
         mint_b_transfer_fee_max: 0,
-
+        mint_a_program: spl_token::id(), // Valeur par défaut, sera hydratée
+        mint_b_program: spl_token::id(), // Valeur par défaut, sera hydratée
         parameters: pool_struct.parameters,
         v_parameters: pool_struct.v_parameters,
         hydrated_bin_arrays: None,
@@ -179,26 +264,27 @@ pub fn decode_lb_pair(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Res
 }
 
 pub async fn hydrate(pool: &mut DecodedDlmmPool, rpc_client: &RpcClient, bin_array_fetch_range: i32) -> Result<()> {
+    // On utilise get_account pour avoir l'owner et les data
     let (mint_a_res, mint_b_res) = tokio::join!(
-        rpc_client.get_account_data(&pool.mint_a),
-        rpc_client.get_account_data(&pool.mint_b)
+        rpc_client.get_account(&pool.mint_a),
+        rpc_client.get_account(&pool.mint_b)
     );
-    let mint_a_data = mint_a_res?;
-    let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_data)?;
+
+    let mint_a_account = mint_a_res?;
+    let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_account.data)?;
     pool.mint_a_decimals = decoded_mint_a.decimals;
     pool.mint_a_transfer_fee_bps = decoded_mint_a.transfer_fee_basis_points;
-    // --- AJOUTEZ CETTE LIGNE ---
-    // NOTE: Votre `decode_mint` doit être capable d'extraire `maximum_fee`.
-    // S'il ne le fait pas, vous devrez l'ajouter. On suppose qu'il le fait.
     pool.mint_a_transfer_fee_max = decoded_mint_a.max_transfer_fee;
+    pool.mint_a_program = mint_a_account.owner; // <-- On stocke le programme
 
-    let mint_b_data = mint_b_res?;
-    let decoded_mint_b = spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_data)?;
+    let mint_b_account = mint_b_res?;
+    let decoded_mint_b = spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_account.data)?;
     pool.mint_b_decimals = decoded_mint_b.decimals;
     pool.mint_b_transfer_fee_bps = decoded_mint_b.transfer_fee_basis_points;
-    // --- AJOUTEZ CETTE LIGNE ---
     pool.mint_b_transfer_fee_max = decoded_mint_b.max_transfer_fee;
+    pool.mint_b_program = mint_b_account.owner; // <-- On stocke le programme
 
+    // Le reste de la logique pour hydrater les bin_arrays est correct et ne change pas
     let active_array_idx = get_bin_array_index_from_bin_id(pool.active_bin_id);
     let mut addresses_to_fetch = Vec::new();
     let mut index_map = BTreeMap::new();
