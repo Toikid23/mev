@@ -6,6 +6,10 @@ use solana_sdk::pubkey::Pubkey;
 use anyhow::{anyhow, bail, Result};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use crate::decoders::spl_token_decoders;
+use solana_sdk::instruction::{Instruction, AccountMeta};
+use solana_sdk::system_program; // On aura besoin du system_program
+use spl_associated_token_account::get_associated_token_address; // Pour trouver les ATA
+use spl_associated_token_account::get_associated_token_address_with_program_id;
 
 // --- CONSTANTES DU PROTOCOLE ---
 // Trouvées dans l'IDL
@@ -24,6 +28,8 @@ pub struct DecodedPumpAmmPool {
     pub mint_b: Pubkey, // Le "quote_mint" (généralement SOL)
     pub vault_a: Pubkey,
     pub vault_b: Pubkey,
+    pub coin_creator: Pubkey,
+    pub protocol_fee_recipients: [Pubkey; 8],
 
     // Champs à hydrater
     pub reserve_a: u64,
@@ -38,6 +44,8 @@ pub struct DecodedPumpAmmPool {
     pub protocol_fee_basis_points: u64,
     pub coin_creator_fee_basis_points: u64,
     pub total_fee_basis_points: u64,
+    pub mint_a_program: Pubkey,
+    pub mint_b_program: Pubkey,
 }
 
 impl DecodedPumpAmmPool {
@@ -45,13 +53,136 @@ impl DecodedPumpAmmPool {
     pub fn fee_as_percent(&self) -> f64 {
         (self.total_fee_basis_points as f64 / 10_000.0) * 100.0
     }
+
+    pub fn create_swap_instruction(
+        &self,
+        input_token_mint: &Pubkey,
+        user_owner: &Pubkey,
+        amount_in: u64,
+        amount_out_from_quote: u64,
+    ) -> Result<Instruction> {
+        // ... (la logique des `instruction_data` et la dérivation des comptes est correcte et ne change pas) ...
+        let is_buy = *input_token_mint == self.mint_b;
+        let mut instruction_data = Vec::with_capacity(8 + 8 + 8);
+        if is_buy {
+            let discriminator: [u8; 8] = [102, 6, 61, 18, 1, 218, 235, 234];
+            instruction_data.extend_from_slice(&discriminator);
+            instruction_data.extend_from_slice(&amount_out_from_quote.to_le_bytes());
+            instruction_data.extend_from_slice(&amount_in.to_le_bytes());
+        } else {
+            let discriminator: [u8; 8] = [51, 230, 133, 164, 1, 127, 131, 173];
+            instruction_data.extend_from_slice(&discriminator);
+            instruction_data.extend_from_slice(&amount_in.to_le_bytes());
+            instruction_data.extend_from_slice(&amount_out_from_quote.to_le_bytes());
+        };
+        let (user_source_ata, user_destination_ata) = if is_buy {
+            (
+                get_associated_token_address_with_program_id(user_owner, &self.mint_b, &self.mint_b_program),
+                get_associated_token_address_with_program_id(user_owner, &self.mint_a, &self.mint_a_program),
+            )
+        } else {
+            (
+                get_associated_token_address_with_program_id(user_owner, &self.mint_a, &self.mint_a_program),
+                get_associated_token_address_with_program_id(user_owner, &self.mint_b, &self.mint_b_program),
+            )
+        };
+        let (global_config_address, _) = Pubkey::find_program_address(&[b"global_config"], &PUMP_PROGRAM_ID);
+        let (event_authority, _) = Pubkey::find_program_address(&[b"__event_authority"], &PUMP_PROGRAM_ID);
+        let protocol_fee_recipient = self.protocol_fee_recipients.iter().find(|&&key| key != Pubkey::default()).unwrap_or(&self.protocol_fee_recipients[0]);
+        let protocol_fee_recipient_token_account = get_associated_token_address_with_program_id(protocol_fee_recipient, &self.mint_b, &self.mint_b_program);
+        let (coin_creator_vault_authority, _) = Pubkey::find_program_address(&[b"creator_vault", self.coin_creator.as_ref()], &PUMP_PROGRAM_ID);
+        let coin_creator_vault_ata = get_associated_token_address_with_program_id(&coin_creator_vault_authority, &self.mint_b, &self.mint_b_program);
+        let (global_volume_accumulator, _) = Pubkey::find_program_address(&[b"global_volume_accumulator"], &PUMP_PROGRAM_ID);
+        let (user_volume_accumulator, _) = Pubkey::find_program_address(&[b"user_volume_accumulator", user_owner.as_ref()], &PUMP_PROGRAM_ID);
+
+        // --- CORRECTION FINALE : Réorganisation des comptes pour correspondre EXACTEMENT à l'ordre de la transaction de référence ---
+        let accounts = vec![
+            // #1 Pool
+            AccountMeta::new(self.address, false),
+            // #2 User
+            AccountMeta::new(*user_owner, true),
+            // #3 Global Config
+            AccountMeta::new_readonly(global_config_address, false),
+            // #4 Base Mint
+            AccountMeta::new_readonly(self.mint_a, false),
+            // #5 Quote Mint
+            AccountMeta::new_readonly(self.mint_b, false),
+            // #6 User Base Token Account (Source pour SELL, Dest pour BUY)
+            AccountMeta::new(if is_buy { user_destination_ata } else { user_source_ata }, false),
+            // #7 User Quote Token Account (Source pour BUY, Dest pour SELL)
+            AccountMeta::new(if is_buy { user_source_ata } else { user_destination_ata }, false),
+            // #8 Pool Base Token Account
+            AccountMeta::new(self.vault_a, false),
+            // #9 Pool Quote Token Account
+            AccountMeta::new(self.vault_b, false),
+            // #10 Protocol Fee Recipient
+            AccountMeta::new_readonly(*protocol_fee_recipient, false),
+            // #11 Protocol Fee Recipient Token Account
+            AccountMeta::new(protocol_fee_recipient_token_account, false),
+            // #12 Base Token Program
+            AccountMeta::new_readonly(self.mint_a_program, false),
+            // #13 Quote Token Program
+            AccountMeta::new_readonly(self.mint_b_program, false),
+            // #14 System Program
+            AccountMeta::new_readonly(system_program::id(), false),
+            // #15 Associated Token Program
+            AccountMeta::new_readonly(spl_associated_token_account::ID, false),
+            // #16 Event Authority
+            AccountMeta::new_readonly(event_authority, false),
+            // #17 Program
+            AccountMeta::new_readonly(PUMP_PROGRAM_ID, false),
+            // #18 Coin Creator Vault Ata
+            AccountMeta::new(coin_creator_vault_ata, false),
+            // #19 Coin Creator Vault Authority
+            AccountMeta::new_readonly(coin_creator_vault_authority, false),
+            // #20 Global Volume Accumulator
+            AccountMeta::new(global_volume_accumulator, false),
+            // #21 User Volume Accumulator
+            AccountMeta::new(user_volume_accumulator, false),
+        ];
+
+        Ok(Instruction {
+            program_id: PUMP_PROGRAM_ID,
+            accounts,
+            data: instruction_data,
+        })
+    }
+
+    pub fn create_init_user_volume_accumulator_instruction(
+        &self,
+        user_owner: &Pubkey,
+    ) -> Result<Instruction> {
+        // Discriminateur pour `init_user_volume_accumulator` trouvé dans l'IDL
+        let discriminator: [u8; 8] = [94, 6, 202, 115, 255, 96, 232, 183];
+
+        let (user_volume_accumulator, _) = Pubkey::find_program_address(
+            &[b"user_volume_accumulator", user_owner.as_ref()],
+            &PUMP_PROGRAM_ID
+        );
+        let (event_authority, _) = Pubkey::find_program_address(&[b"__event_authority"], &PUMP_PROGRAM_ID);
+
+        let accounts = vec![
+            AccountMeta::new(*user_owner, true), // Payer et Signer
+            AccountMeta::new_readonly(*user_owner, false), // User
+            AccountMeta::new(user_volume_accumulator, false), // Le compte à créer
+            AccountMeta::new_readonly(system_program::id(), false),
+            AccountMeta::new_readonly(event_authority, false),
+            AccountMeta::new_readonly(PUMP_PROGRAM_ID, false),
+        ];
+
+        Ok(Instruction {
+            program_id: PUMP_PROGRAM_ID,
+            accounts,
+            data: discriminator.to_vec(),
+        })
+    }
 }
 
 
 // --- MODULE PRIVÉ POUR LES STRUCTURES ON-CHAIN ---
 // Contient les miroirs exacts des comptes de la blockchain.
 // Pilier d'Excellence #6 : Robuste aux problèmes de layout mémoire.
-mod onchain_layouts {
+pub mod onchain_layouts {
     use super::*;
 
     #[repr(C, packed)]
@@ -87,39 +218,34 @@ mod onchain_layouts {
 /// Cette fonction ne fait que la lecture initiale et ne remplit pas les réserves ni les frais.
 /// L'hydratation est gérée par la fonction `hydrate`.
 pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedPumpAmmPool> {
-    // --- Pilier d'Excellence #6 : Robustesse du décodage ---
-
-    // 1. Vérifier le discriminateur pour s'assurer que c'est le bon type de compte.
     if data.get(..8) != Some(&POOL_ACCOUNT_DISCRIMINATOR) {
         bail!("Invalid discriminator. Not a pump.fun Pool account.");
     }
-
-    // 2. On ignore les 8 bytes du discriminateur.
     let data_slice = &data[8..];
-
-    // 3. Vérifier que la taille des données restantes correspond à notre struct on-chain.
     if data_slice.len() < std::mem::size_of::<onchain_layouts::Pool>() {
-        bail!(
-            "Pump.fun Pool data length mismatch. Expected at least {} bytes, got {}.",
-            std::mem::size_of::<onchain_layouts::Pool>(),
-            data_slice.len()
-        );
+        bail!("Pump.fun Pool data length mismatch.");
     }
 
-    // 4. "Caster" les données brutes vers notre struct Rust via bytemuck pour une performance maximale.
     let pool_struct: &onchain_layouts::Pool = bytemuck::from_bytes(
         &data_slice[..std::mem::size_of::<onchain_layouts::Pool>()]
     );
 
-    // 5. Créer et retourner notre structure "propre", en initialisant les champs à hydrater à zéro.
     Ok(DecodedPumpAmmPool {
         address: *address,
         mint_a: pool_struct.base_mint,
         mint_b: pool_struct.quote_mint,
+
+        // --- LA CORRECTION DÉFINITIVE EST ICI ---
+        // On lit les adresses des vaults directement depuis les données du compte,
+        // comme elles sont stockées on-chain.
         vault_a: pool_struct.pool_base_token_account,
         vault_b: pool_struct.pool_quote_token_account,
 
-        // Tous les champs ci-dessous seront remplis par `hydrate`.
+        // On lit aussi le créateur, qui est nécessaire pour dériver d'autres comptes.
+        coin_creator: pool_struct.coin_creator,
+        // --- FIN DE LA CORRECTION ---
+
+        protocol_fee_recipients: [Pubkey::default(); 8],
         reserve_a: 0,
         reserve_b: 0,
         mint_a_decimals: 0,
@@ -130,6 +256,8 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedPumpAmmPool> 
         protocol_fee_basis_points: 0,
         coin_creator_fee_basis_points: 0,
         total_fee_basis_points: 0,
+        mint_a_program: spl_token::id(),
+        mint_b_program: spl_token::id(),
     })
 }
 
@@ -139,7 +267,6 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedPumpAmmPool> 
 /// Utilise `get_multiple_accounts` pour une efficacité maximale (Pilier #4).
 pub async fn hydrate(pool: &mut DecodedPumpAmmPool, rpc_client: &RpcClient) -> Result<()> {
     // 1. Calculer l'adresse du compte de configuration globale (PDA).
-    // Cette adresse est déterministe et la même pour tous les pools du programme.
     let (global_config_address, _) = Pubkey::find_program_address(
         &[b"global_config"],
         &PUMP_PROGRAM_ID
@@ -168,19 +295,29 @@ pub async fn hydrate(pool: &mut DecodedPumpAmmPool, rpc_client: &RpcClient) -> R
     let vault_b_data = accounts_data[1].as_ref().ok_or_else(|| anyhow!("Vault B not found for pump.fun pool {}", pool.address))?.data.clone();
     pool.reserve_b = u64::from_le_bytes(vault_b_data[64..72].try_into()?);
 
-    // Mint A (Base) - On réutilise notre décodeur SPL existant.
-    let mint_a_data = accounts_data[2].as_ref().ok_or_else(|| anyhow!("Mint A not found for pump.fun pool {}", pool.address))?.data.clone();
-    let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_data)?;
+    // --- DÉBUT DE LA CORRECTION ---
+
+    // Mint A (Base)
+    // On garde l'objet `Account` complet dans `mint_a_account`
+    let mint_a_account = accounts_data[2].as_ref().ok_or_else(|| anyhow!("Mint A not found for pump.fun pool {}", pool.address))?;
+    // On passe `.data` au décodeur de mint
+    let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_account.data)?;
     pool.mint_a_decimals = decoded_mint_a.decimals;
     pool.mint_a_transfer_fee_bps = decoded_mint_a.transfer_fee_basis_points;
+    // On sauvegarde le propriétaire du compte
+    pool.mint_a_program = mint_a_account.owner;
 
     // Mint B (Quote)
-    let mint_b_data = accounts_data[3].as_ref().ok_or_else(|| anyhow!("Mint B not found for pump.fun pool {}", pool.address))?.data.clone();
-    let decoded_mint_b = spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_data)?;
+    // On fait la même chose pour le mint B
+    let mint_b_account = accounts_data[3].as_ref().ok_or_else(|| anyhow!("Mint B not found for pump.fun pool {}", pool.address))?;
+    let decoded_mint_b = spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_account.data)?;
     pool.mint_b_decimals = decoded_mint_b.decimals;
     pool.mint_b_transfer_fee_bps = decoded_mint_b.transfer_fee_basis_points;
+    pool.mint_b_program = mint_b_account.owner;
 
-    // GlobalConfig pour les Frais (Pilier #3)
+    // --- FIN DE LA CORRECTION ---
+
+    // GlobalConfig pour les Frais
     let global_config_data = accounts_data[4].as_ref().ok_or_else(|| anyhow!("GlobalConfig not found for pump.fun program"))?.data.clone();
 
     if global_config_data.get(..8) != Some(&GLOBAL_CONFIG_ACCOUNT_DISCRIMINATOR) {
@@ -195,8 +332,8 @@ pub async fn hydrate(pool: &mut DecodedPumpAmmPool, rpc_client: &RpcClient) -> R
     pool.lp_fee_basis_points = config_struct.lp_fee_basis_points;
     pool.protocol_fee_basis_points = config_struct.protocol_fee_basis_points;
     pool.coin_creator_fee_basis_points = config_struct.coin_creator_fee_basis_points;
+    pool.protocol_fee_recipients = config_struct.protocol_fee_recipients;
 
-    // On somme les frais pour un accès simplifié plus tard.
     pool.total_fee_basis_points = pool.lp_fee_basis_points
         .saturating_add(pool.protocol_fee_basis_points)
         .saturating_add(pool.coin_creator_fee_basis_points);
