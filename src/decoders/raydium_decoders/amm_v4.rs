@@ -1,8 +1,8 @@
 // DANS: src/decoders/raydium_decoders/amm_v4.rs
-// VERSION FINALE - CORRIGE LES ERREURS DE TYPE ET NETTOIE LES AVERTISSEMENTS
+// VERSION AVEC create_swap_instruction DANS L'IMPL
 
 use crate::decoders::pool_operations::PoolOperations;
-use bytemuck::{from_bytes, Pod, Zeroable, cast}; // On importe `cast` pour la conversion de type
+use bytemuck::{from_bytes, Pod, Zeroable, cast};
 use solana_sdk::pubkey::Pubkey;
 use anyhow::{bail, Result, anyhow};
 use solana_client::nonblocking::rpc_client::RpcClient;
@@ -13,7 +13,7 @@ use openbook_dex::state::MarketState;
 use std::mem::size_of;
 
 
-// La structure reste la même
+// La structure de données reste la même
 #[derive(Debug, Clone)]
 pub struct DecodedAmmPool {
     pub address: Pubkey, pub nonce: u64, pub mint_a: Pubkey, pub mint_b: Pubkey,
@@ -28,17 +28,71 @@ pub struct DecodedAmmPool {
     pub coin_lot_size: u64, pub pc_lot_size: u64,
 }
 
+// Les structures on-chain restent les mêmes
+#[repr(C, packed)] #[derive(Clone, Copy, Pod, Zeroable, Debug)] struct Fees { pub min_separate_numerator: u64, pub min_separate_denominator: u64, pub trade_fee_numerator: u64, pub trade_fee_denominator: u64, pub pnl_numerator: u64, pub pnl_denominator: u64, pub swap_fee_numerator: u64, pub swap_fee_denominator: u64, }
+#[repr(C, packed)] #[derive(Clone, Copy, Pod, Zeroable, Debug)] struct OutPutData { pub need_take_pnl_coin: u64, pub need_take_pnl_pc: u64, pub total_pnl_pc: u64, pub total_pnl_coin: u64, pub pool_open_time: u64, pub punish_pc_amount: u64, pub punish_coin_amount: u64, pub orderbook_to_init_time: u64, pub swap_coin_in_amount: u128, pub swap_pc_out_amount: u128, pub swap_take_pc_fee: u64, pub swap_pc_in_amount: u128, pub swap_coin_out_amount: u128, pub swap_take_coin_fee: u64, }
+#[repr(C, packed)] #[derive(Clone, Copy, Pod, Zeroable, Debug)] struct AmmInfoData { pub status: u64, pub nonce: u64, pub order_num: u64, pub depth: u64, pub coin_decimals: u64, pub pc_decimals: u64, pub state: u64, pub reset_flag: u64, pub min_size: u64, pub vol_max_cut_ratio: u64, pub amount_wave: u64, pub coin_lot_size: u64, pub pc_lot_size: u64, pub min_price_multiplier: u64, pub max_price_multiplier: u64, pub sys_decimal_value: u64, pub fees: Fees, pub out_put: OutPutData, pub token_coin: Pubkey, pub token_pc: Pubkey, pub coin_mint: Pubkey, pub pc_mint: Pubkey, pub lp_mint: Pubkey, pub open_orders: Pubkey, pub market: Pubkey, pub serum_dex: Pubkey, pub target_orders: Pubkey, pub withdraw_queue: Pubkey, pub token_temp_lp: Pubkey, pub amm_owner: Pubkey, pub lp_amount: u64, pub client_order_id: u64, pub padding: [u64; 2], }
+
+pub const RAYDIUM_AMM_V4_PROGRAM_ID: Pubkey = pubkey!("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8");
+
+// --- DÉBUT DE LA MODIFICATION ---
 impl DecodedAmmPool {
     pub fn fee_as_percent(&self) -> f64 {
         if self.trade_fee_denominator == 0 { return 0.0; }
         (self.trade_fee_numerator as f64 / self.trade_fee_denominator as f64) * 100.0
     }
+
+    // La fonction est maintenant une méthode de la struct.
+    // Elle prend `&self` au lieu de `pool: &DecodedAmmPool`.
+    pub fn create_swap_instruction(
+        &self,
+        user_source_token_account: &Pubkey,
+        user_destination_token_account: &Pubkey,
+        user_owner: &Pubkey,
+        amount_in: u64,
+        minimum_amount_out: u64,
+    ) -> Result<Instruction> {
+        let mut instruction_data = vec![9]; // Discriminateur pour SwapBaseIn
+        instruction_data.extend_from_slice(&amount_in.to_le_bytes());
+        instruction_data.extend_from_slice(&minimum_amount_out.to_le_bytes());
+
+        let (amm_authority, _) = Pubkey::find_program_address(
+            &[b"amm authority"],
+            &RAYDIUM_AMM_V4_PROGRAM_ID,
+        );
+
+        // On remplace toutes les instances de `pool.` par `self.`
+        let keys = vec![
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new(self.address, false),
+            AccountMeta::new_readonly(amm_authority, false),
+            AccountMeta::new(self.open_orders, false),
+            AccountMeta::new(self.target_orders, false),
+            AccountMeta::new(self.vault_a, false),
+            AccountMeta::new(self.vault_b, false),
+            AccountMeta::new_readonly(self.market_program_id, false),
+            AccountMeta::new(self.market, false),
+            AccountMeta::new(self.market_bids, false),
+            AccountMeta::new(self.market_asks, false),
+            AccountMeta::new(self.market_event_queue, false),
+            AccountMeta::new(self.market_coin_vault, false),
+            AccountMeta::new(self.market_pc_vault, false),
+            AccountMeta::new_readonly(self.market_vault_signer, false),
+            AccountMeta::new(*user_source_token_account, false),
+            AccountMeta::new(*user_destination_token_account, false),
+            AccountMeta::new_readonly(*user_owner, true),
+        ];
+
+        Ok(Instruction {
+            program_id: RAYDIUM_AMM_V4_PROGRAM_ID,
+            accounts: keys,
+            data: instruction_data,
+        })
+    }
 }
+// --- FIN DE LA MODIFICATION ---
 
-#[repr(C, packed)] #[derive(Clone, Copy, Pod, Zeroable, Debug)] struct Fees { pub min_separate_numerator: u64, pub min_separate_denominator: u64, pub trade_fee_numerator: u64, pub trade_fee_denominator: u64, pub pnl_numerator: u64, pub pnl_denominator: u64, pub swap_fee_numerator: u64, pub swap_fee_denominator: u64, }
-#[repr(C, packed)] #[derive(Clone, Copy, Pod, Zeroable, Debug)] struct OutPutData { pub need_take_pnl_coin: u64, pub need_take_pnl_pc: u64, pub total_pnl_pc: u64, pub total_pnl_coin: u64, pub pool_open_time: u64, pub punish_pc_amount: u64, pub punish_coin_amount: u64, pub orderbook_to_init_time: u64, pub swap_coin_in_amount: u128, pub swap_pc_out_amount: u128, pub swap_take_pc_fee: u64, pub swap_pc_in_amount: u128, pub swap_coin_out_amount: u128, pub swap_take_coin_fee: u64, }
-#[repr(C, packed)] #[derive(Clone, Copy, Pod, Zeroable, Debug)] struct AmmInfoData { pub status: u64, pub nonce: u64, pub order_num: u64, pub depth: u64, pub coin_decimals: u64, pub pc_decimals: u64, pub state: u64, pub reset_flag: u64, pub min_size: u64, pub vol_max_cut_ratio: u64, pub amount_wave: u64, pub coin_lot_size: u64, pub pc_lot_size: u64, pub min_price_multiplier: u64, pub max_price_multiplier: u64, pub sys_decimal_value: u64, pub fees: Fees, pub out_put: OutPutData, pub token_coin: Pubkey, pub token_pc: Pubkey, pub coin_mint: Pubkey, pub pc_mint: Pubkey, pub lp_mint: Pubkey, pub open_orders: Pubkey, pub market: Pubkey, pub serum_dex: Pubkey, pub target_orders: Pubkey, pub withdraw_queue: Pubkey, pub token_temp_lp: Pubkey, pub amm_owner: Pubkey, pub lp_amount: u64, pub client_order_id: u64, pub padding: [u64; 2], }
-
+// Les fonctions decode_pool, hydrate, et l'implémentation de PoolOperations restent inchangées.
 pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedAmmPool> {
     if data.len() < size_of::<AmmInfoData>() { bail!("AMM V4 data length mismatch."); }
     let pool_struct: &AmmInfoData = from_bytes(&data[..size_of::<AmmInfoData>()]);
@@ -51,11 +105,12 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedAmmPool> {
         mint_b: pool_struct.pc_mint, vault_a: pool_struct.token_coin,
         vault_b: pool_struct.token_pc, trade_fee_numerator: pool_struct.fees.trade_fee_numerator,
         trade_fee_denominator: pool_struct.fees.trade_fee_denominator, mint_a_decimals: 0,
-        mint_b_decimals: 0, mint_a_transfer_fee_bps: 0, mint_b_transfer_fee_bps: 0,
-        reserve_a: 0, reserve_b: 0, market_bids: Pubkey::default(), market_asks: Pubkey::default(),
-        market_event_queue: Pubkey::default(), market_coin_vault: Pubkey::default(),
-        market_pc_vault: Pubkey::default(), market_vault_signer: Pubkey::default(),
-        bids_order_book: None, asks_order_book: None, coin_lot_size: 0, pc_lot_size: 0,
+        mint_b_decimals: 0, mint_a_transfer_fee_bps: 0,
+        mint_b_transfer_fee_bps: 0, reserve_a: 0, reserve_b: 0, market_bids: Pubkey::default(),
+        market_asks: Pubkey::default(), market_event_queue: Pubkey::default(),
+        market_coin_vault: Pubkey::default(), market_pc_vault: Pubkey::default(),
+        market_vault_signer: Pubkey::default(), bids_order_book: None,
+        asks_order_book: None, coin_lot_size: 0, pc_lot_size: 0,
     })
 }
 
@@ -78,24 +133,17 @@ pub async fn hydrate(pool: &mut DecodedAmmPool, rpc_client: &RpcClient) -> Resul
     pool.mint_b_decimals = decoded_mint_b.decimals;
     pool.mint_b_transfer_fee_bps = decoded_mint_b.transfer_fee_basis_points;
 
-    // --- LA CORRECTION DÉFINITIVE ---
     let market_account = accounts[4].take().ok_or_else(|| anyhow!("Market non trouvé"))?;
     let market_data = &market_account.data;
-
-    // On parse les données du marché en utilisant la struct de la bibliothèque
     let market_state: &MarketState = from_bytes(
         market_data.get(5..5 + size_of::<MarketState>())
             .ok_or_else(|| anyhow!("Données du marché invalides"))?
     );
-
-    // On lit les champs de la struct et on les convertit au bon type
     pool.market_bids = cast(market_state.bids);
     pool.market_asks = cast(market_state.asks);
     pool.market_event_queue = cast(market_state.event_q);
     pool.market_coin_vault = cast(market_state.coin_vault);
     pool.market_pc_vault = cast(market_state.pc_vault);
-
-    // On dérive le vault signer avec le nonce de la struct
     let vault_signer_nonce = market_state.vault_signer_nonce;
     pool.market_vault_signer = Pubkey::create_program_address(
         &[&pool.market.to_bytes(), &vault_signer_nonce.to_le_bytes()],
@@ -108,59 +156,23 @@ pub async fn hydrate(pool: &mut DecodedAmmPool, rpc_client: &RpcClient) -> Resul
 impl PoolOperations for DecodedAmmPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
-
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
-        // --- SETUP ---
         let (in_mint_fee_bps, out_mint_fee_bps, in_reserve, out_reserve) = if *token_in_mint == self.mint_a {
             (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps, self.reserve_a, self.reserve_b)
         } else {
             (self.mint_b_transfer_fee_bps, self.mint_a_transfer_fee_bps, self.reserve_b, self.reserve_a)
         };
-
-        if in_reserve == 0 || out_reserve == 0 {
-            return Ok(0);
-        }
-
-        // --- CALCUL ---
-        // 1. Appliquer les frais de transfert Token-2022
+        if in_reserve == 0 || out_reserve == 0 { return Ok(0); }
         let fee_on_input = (amount_in as u128 * in_mint_fee_bps as u128) / 10000;
         let amount_in_after_transfer_fee = amount_in.saturating_sub(fee_on_input as u64) as u128;
-
-        // 2. Appliquer les frais de SWAP de Raydium (0.25%)
         let swap_fee_numerator = 25;
         let swap_fee_denominator = 10000;
         let amount_in_after_swap_fee = amount_in_after_transfer_fee.saturating_mul(swap_fee_denominator - swap_fee_numerator) / swap_fee_denominator;
-
-        // 3. Calculer le swap x*y=k sur la liquidité TOTALE
         let denominator = (in_reserve as u128).saturating_add(amount_in_after_swap_fee);
         if denominator == 0 { return Ok(0); }
         let gross_amount_out = amount_in_after_swap_fee.saturating_mul(out_reserve as u128) / denominator;
-
-        // 4. Appliquer les frais de transfert sur l'output
         let fee_on_output = (gross_amount_out * out_mint_fee_bps as u128) / 10000;
         let final_amount_out = gross_amount_out.saturating_sub(fee_on_output);
-
         Ok(final_amount_out as u64)
     }
-}
-
-// ... create_swap_instruction reste inchangé ...
-pub const RAYDIUM_AMM_V4_PROGRAM_ID: Pubkey = pubkey!("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8");
-pub fn create_swap_instruction( pool: &DecodedAmmPool, user_source_token_account: &Pubkey, user_destination_token_account: &Pubkey, user_owner: &Pubkey, amount_in: u64, minimum_amount_out: u64, ) -> Result<Instruction> {
-    let mut instruction_data = vec![9];
-    instruction_data.extend_from_slice(&amount_in.to_le_bytes());
-    instruction_data.extend_from_slice(&minimum_amount_out.to_le_bytes());
-    let (amm_authority, _) = Pubkey::find_program_address( &[b"amm authority"], &RAYDIUM_AMM_V4_PROGRAM_ID, );
-    let keys = vec![
-        AccountMeta::new_readonly(spl_token::id(), false), AccountMeta::new(pool.address, false),
-        AccountMeta::new_readonly(amm_authority, false), AccountMeta::new(pool.open_orders, false),
-        AccountMeta::new(pool.target_orders, false), AccountMeta::new(pool.vault_a, false),
-        AccountMeta::new(pool.vault_b, false), AccountMeta::new_readonly(pool.market_program_id, false),
-        AccountMeta::new(pool.market, false), AccountMeta::new(pool.market_bids, false),
-        AccountMeta::new(pool.market_asks, false), AccountMeta::new(pool.market_event_queue, false),
-        AccountMeta::new(pool.market_coin_vault, false), AccountMeta::new(pool.market_pc_vault, false),
-        AccountMeta::new_readonly(pool.market_vault_signer, false), AccountMeta::new(*user_source_token_account, false),
-        AccountMeta::new(*user_destination_token_account, false), AccountMeta::new_readonly(*user_owner, true),
-    ];
-    Ok(Instruction { program_id: RAYDIUM_AMM_V4_PROGRAM_ID, accounts: keys, data: instruction_data, })
 }

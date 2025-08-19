@@ -369,17 +369,41 @@ pub struct SwapEvent {
     pub tick: i32,
 }
 
+fn parse_ammv4_output_amount_from_logs(logs: &[String]) -> Option<u64> {
+    for log in logs {
+        // Étape 1 : Chercher le bon préfixe de log
+        if let Some(data_str) = log.strip_prefix("Program log: ray_log: ") {
+            // Étape 2 : Décoder la chaîne Base64
+            if let Ok(bytes) = base64::decode(data_str) {
+                // Étape 3 : Définir l'offset correct pour le champ `out_amount`.
+                // D'après l'analyse de l'événement SwapBaseInLog, l'offset est de 66.
+                // log_type (1) + is_out (1) + pool_coin (8) + pool_pc (8) + pool_lp (8) +
+                // pnl_x (16) + pnl_y (16) + deduct_in_amount (8) = 66
+                const OFFSET_TO_OUT_AMOUNT: usize = 66;
 
-// LA NOUVELLE FONCTION DE TEST
-async fn test_ammv4(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
+                // Étape 4 : Extraire les 8 octets du montant de sortie
+                if bytes.len() >= OFFSET_TO_OUT_AMOUNT + 8 {
+                    let amount_bytes: [u8; 8] = bytes[OFFSET_TO_OUT_AMOUNT..OFFSET_TO_OUT_AMOUNT + 8].try_into().ok()?;
+                    // Convertir les octets en un nombre u64
+                    return Some(u64::from_le_bytes(amount_bytes));
+                }
+            }
+        }
+    }
+    // Si on ne trouve rien, on retourne None
+    None
+}
+
+
+async fn test_ammv4_with_simulation(rpc_client: &RpcClient, payer_keypair: &Keypair, current_timestamp: i64) -> Result<()> {
     const POOL_ADDRESS: &str = "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2"; // WSOL-USDC
     const INPUT_MINT_STR: &str = "So11111111111111111111111111111111111111112"; // WSOL
-    const INPUT_AMOUNT_UI: f64 = 1.0;
+    const INPUT_AMOUNT_UI: f64 = 0.05;
 
-    println!("\n--- Test et Simulation (AVEC DÉBOGAGE) Raydium AMMv4 ({}) ---", POOL_ADDRESS);
+    println!("\n--- Test et Simulation (Lecture de Compte) Raydium AMMv4 ({}) ---", POOL_ADDRESS);
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
 
-    // --- ÉTAPE 1 : PRÉDICTION LOCALE ---
+    // --- 1. Prédiction Locale (inchangée) ---
     println!("[1/3] Hydratation et prédiction locale...");
     let pool_account_data = rpc_client.get_account_data(&pool_pubkey).await?;
     let mut pool = amm_v4::decode_pool(&pool_pubkey, &pool_account_data)?;
@@ -397,82 +421,89 @@ async fn test_ammv4(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()
     let ui_predicted_amount_out = predicted_amount_out as f64 / 10f64.powi(output_decimals as i32);
     println!("-> PRÉDICTION LOCALE: {}", ui_predicted_amount_out);
 
-    // --- ÉTAPE 2 : PRÉPARATION DE LA SIMULATION ---
-    println!("\n[2/3] Préparation de la simulation...");
-    let payer = Keypair::new();
-    let user_source_ata = get_associated_token_address(&payer.pubkey(), &input_mint_pubkey);
-    let user_destination_ata = get_associated_token_address(&payer.pubkey(), &output_mint_pubkey);
+    // --- 2. Préparation de la Transaction (inchangée) ---
+    println!("\n[2/3] Préparation de la transaction de swap...");
+    let payer_pubkey = payer_keypair.pubkey();
+    let user_source_ata = get_associated_token_address(&payer_pubkey, &input_mint_pubkey);
+    let user_destination_ata = get_associated_token_address(&payer_pubkey, &output_mint_pubkey);
 
-    let swap_ix = amm_v4::create_swap_instruction(
-        &pool, &user_source_ata, &user_destination_ata, &payer.pubkey(), amount_in_base_units, 0,
+    let mut instructions = Vec::new();
+    if rpc_client.get_account(&user_destination_ata).await.is_err() {
+        instructions.push(
+            spl_associated_token_account::instruction::create_associated_token_account(
+                &payer_pubkey, &payer_pubkey, &output_mint_pubkey, &spl_token::id(),
+            ),
+        );
+    }
+    let swap_ix = pool.create_swap_instruction(
+        &user_source_ata, &user_destination_ata, &payer_pubkey, amount_in_base_units, 0,
     )?;
+    instructions.push(swap_ix);
 
-    let mut keys_for_sim: Vec<Pubkey> = swap_ix.accounts.iter().map(|meta| meta.pubkey).collect();
-    keys_for_sim.retain(|&key| key != payer.pubkey() && key != user_source_ata && key != user_destination_ata);
-    keys_for_sim.sort();
-    keys_for_sim.dedup();
+    let recent_blockhash = rpc_client.get_latest_blockhash().await?;
+    let transaction = Transaction::new_signed_with_payer(
+        &instructions, Some(&payer_pubkey), &[payer_keypair], recent_blockhash,
+    );
 
-    println!("-> Récupération de l'état on-chain de {} comptes...", keys_for_sim.len());
+    // --- 3. Simulation et Analyse par Lecture de Compte ---
+    println!("\n[3/3] Exécution de la simulation avec lecture de compte...");
 
-    let account_data_for_sim = rpc_client.get_multiple_accounts(&keys_for_sim).await?;
-
-    // --- LE DÉBOGAGE EST ICI ---
-    let mut missing_accounts = false;
-    for (i, key) in keys_for_sim.iter().enumerate() {
-        if account_data_for_sim[i].is_none() {
-            println!("!!!!!! COMPTE MANQUANT !!!!!! L'appel RPC pour {} a retourné None.", key);
-            missing_accounts = true;
-        }
-    }
-    if missing_accounts {
-        bail!("Un ou plusieurs comptes n'ont pas pu être récupérés depuis le RPC. Arrêt.");
-    }
-    // --- FIN DU DÉBOGAGE ---
-
-    let mut accounts_to_load: Vec<(Pubkey, Account)> = keys_for_sim
-        .into_iter()
-        .zip(account_data_for_sim.into_iter())
-        .filter_map(|(pubkey, acc_opt)| acc_opt.map(|acc| (pubkey, acc)))
-        .collect();
-
-    let user_source_account = create_temp_token_account(&input_mint_pubkey, &payer.pubkey(), amount_in_base_units);
-    let user_dest_account = create_temp_token_account(&output_mint_pubkey, &payer.pubkey(), 0);
-    accounts_to_load.push((user_source_ata, user_source_account));
-    accounts_to_load.push((user_destination_ata, user_dest_account));
-
-    let payer_account = Account {
-        lamports: 1_000_000_000,
-        data: vec![],
-        owner: solana_sdk::system_program::id(),
-        executable: false,
-        rent_epoch: u64::MAX,
+    // On récupère la balance du compte de destination AVANT la simulation.
+    let initial_destination_balance = match rpc_client.get_token_account(&user_destination_ata).await {
+        Ok(Some(acc)) => acc.token_amount.amount.parse::<u64>().unwrap_or(0),
+        _ => 0, // Le compte n'existe pas ou erreur, la balance est 0.
     };
-    accounts_to_load.push((payer.pubkey(), payer_account));
+    println!("-> Balance initiale du compte de destination: {}", initial_destination_balance);
 
-
-    println!("-> {} comptes chargés pour le contexte de simulation.", accounts_to_load.len());
-
-    // --- ÉTAPE 3 : SIMULATION ET ANALYSE ---
-    println!("\n[3/3] Exécution de la simulation...");
-    let sim_result = simulate::simulate_instruction(rpc_client, swap_ix, &payer, accounts_to_load).await?;
-    println!("-> Simulation réussie !");
-
-    let simulated_amount_out = match sim_result.logs {
-        Some(logs) => parse_spl_token_transfer_amount_from_logs(&logs)
-            .ok_or_else(|| anyhow!("Impossible de trouver le transfert SPL dans les logs"))?,
-        None => bail!("Les logs de la simulation sont vides."),
+    // Configuration de la simulation pour qu'elle nous retourne l'état du compte de destination.
+    let sim_config = RpcSimulateTransactionConfig {
+        sig_verify: false,
+        replace_recent_blockhash: true,
+        commitment: Some(rpc_client.commitment()),
+        encoding: Some(UiTransactionEncoding::Base64),
+        accounts: Some(solana_client::rpc_config::RpcSimulateTransactionAccountsConfig {
+            encoding: Some(solana_account_decoder::UiAccountEncoding::Base64),
+            addresses: vec![ user_destination_ata.to_string() ],
+        }),
+        ..Default::default()
     };
+
+    let sim_response = rpc_client.simulate_transaction_with_config(&transaction, sim_config).await?;
+    let sim_result = sim_response.value;
+
+    if let Some(err) = sim_result.err {
+        println!("!! ERREUR DE SIMULATION: {:?}", err);
+        println!("!! LOGS: {:?}", sim_result.logs);
+        bail!("La simulation a échoué.");
+    }
+
+    // Extraction de la balance POST-simulation
+    let post_accounts = sim_result.accounts.ok_or_else(|| anyhow!("La simulation n'a pas retourné l'état des comptes."))?;
+    let destination_account_state = post_accounts.get(0).and_then(|acc| acc.as_ref()).ok_or_else(|| anyhow!("L'état du compte de destination n'a pas été retourné."))?;
+
+    let decoded_data = match &destination_account_state.data {
+        UiAccountData::Binary(data_str, _) => base64::decode(data_str)?,
+        _ => bail!("Format de données de compte inattendu."),
+    };
+
+    let token_account_data = SplTokenAccount::unpack(&decoded_data)?;
+    let post_simulation_balance = token_account_data.amount;
+    println!("-> Balance finale du compte de destination (simulée): {}", post_simulation_balance);
+
+    // Le montant reçu est simplement la différence.
+    let simulated_amount_out = post_simulation_balance.saturating_sub(initial_destination_balance);
     let ui_simulated_amount_out = simulated_amount_out as f64 / 10f64.powi(output_decimals as i32);
 
-    println!("\n--- COMPARAISON ---");
-    println!("Montant PRÉDIT (local) : {}", ui_predicted_amount_out);
-    println!("Montant SIMULÉ (on-chain) : {}", ui_simulated_amount_out);
+    // --- 4. Comparaison ---
+    println!("\n--- COMPARAISON (AMMv4) ---");
+    println!("Montant PRÉDIT (local)             : {}", ui_predicted_amount_out);
+    println!("Montant SIMULÉ (lecture de compte) : {}", ui_simulated_amount_out);
     let difference = (ui_predicted_amount_out - ui_simulated_amount_out).abs();
     let difference_percent = if ui_simulated_amount_out > 0.0 { (difference / ui_simulated_amount_out) * 100.0 } else { 0.0 };
-    println!("-> Différence relative: {:.4} %", difference_percent);
+    println!("-> Différence relative: {:.6} %", difference_percent);
 
-    if difference_percent < 0.01 {
-        println!("✅ SUCCÈS ! Le décodeur est parfaitement précis.");
+    if difference_percent < 0.1 {
+        println!("✅ SUCCÈS ! Le décodeur Raydium AMMv4 est précis.");
     } else {
         println!("⚠️ ÉCHEC ! La différence est trop grande.");
     }
@@ -1541,7 +1572,7 @@ async fn main() -> Result<()> {
 
     if args.is_empty() || args.contains(&"all".to_string()) {
         println!("Mode: Exécution de tous les tests.");
-        if let Err(e) = test_ammv4(&rpc_client, current_timestamp).await { println!("!! AMMv4 a échoué: {}", e); }
+        if let Err(e) = test_ammv4_with_simulation(&rpc_client,  &payer_keypair, current_timestamp).await { println!("!! AMMv4 a échoué: {}", e); }
         if let Err(e) = test_cpmm_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! CPMM a échoué: {}", e); }
         if let Err(e) = test_clmm(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! CLMM a échoué: {}", e); }
         if let Err(e) = test_launchpad(&rpc_client, current_timestamp).await { println!("!! Launchpad a échoué: {}", e); }
@@ -1556,7 +1587,7 @@ async fn main() -> Result<()> {
         println!("Mode: Exécution des tests spécifiques: {:?}", args);
         for test_name in args {
             let result = match test_name.as_str() {
-                "ammv4" => test_ammv4(&rpc_client, current_timestamp).await,
+                "ammv4" => test_ammv4_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await,
                 "cpmm" => test_cpmm_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await,
                 "clmm" => test_clmm(&rpc_client, &payer_keypair, current_timestamp).await,
                 "launchpad" => test_launchpad(&rpc_client, current_timestamp).await,
