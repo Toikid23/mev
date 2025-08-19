@@ -8,11 +8,12 @@ use solana_client::nonblocking::rpc_client::RpcClient;
 use super::config;
 use super::math;
 use crate::decoders::spl_token_decoders;
+use serde::{Serialize, Deserialize};
 
 // --- STRUCTURES PUBLIQUES ---
 
 /// Énumère les types de courbes de prix possibles pour un pool Launchpad.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CurveType {
     ConstantProduct,
     FixedPrice,
@@ -22,7 +23,7 @@ pub enum CurveType {
 
 
 /// Contient toutes les informations, y compris le type de courbe, pour un pool Launchpad.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecodedLaunchpadPool {
     pub address: Pubkey,
     pub mint_a: Pubkey,

@@ -8,6 +8,7 @@ use solana_client::nonblocking::rpc_client::RpcClient;
 use super::config;
 use crate::decoders::spl_token_decoders;
 use num_integer::Integer;
+use serde::{Serialize, Deserialize};
 
 // Discriminator pour les comptes PoolState du programme CPMM
 const CPMM_POOL_STATE_DISCRIMINATOR: [u8; 8] = [247, 237, 227, 245, 215, 195, 222, 70];
@@ -15,7 +16,7 @@ const CPMM_POOL_STATE_DISCRIMINATOR: [u8; 8] = [247, 237, 227, 245, 215, 195, 22
 // --- STRUCTURE DE SORTIE PROPRE ---
 // Contient les infos décodées et utiles du PoolState CPMM.
 // Notez que nous extrayons l'adresse de l'AmmConfig pour une lecture ultérieure.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecodedCpmmPool {
     pub address: Pubkey,
     pub amm_config: Pubkey, // Pour aller chercher les frais plus tard

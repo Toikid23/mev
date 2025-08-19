@@ -7,10 +7,11 @@ use bytemuck::{from_bytes, Pod, Zeroable};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::mem;
+use serde::{Serialize, Deserialize};
 
 // NOTE: Cette structure est intentionnellement quasi-identique à celle de la V2,
 // car les layouts on-chain sont compatibles.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecodedOrcaAmmV1Pool {
     pub address: Pubkey,
     pub mint_a: Pubkey,

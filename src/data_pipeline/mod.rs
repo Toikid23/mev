@@ -4,6 +4,7 @@
 // Rust saura trouver les fichiers et le sous-dossier correspondants.
 pub mod unified_discovery;
 pub mod geyser_connector;
-mod dex_implementations;
+pub mod dex_implementations;
 pub mod onchain_scanner;
+pub mod api_connectors;
 // On le déclare déjà, il sera prêt pour le futur.

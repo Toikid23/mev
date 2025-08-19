@@ -4,12 +4,13 @@ use bytemuck::{Pod, Zeroable};
 use solana_sdk::pubkey::Pubkey;
 use anyhow::{Result, ensure};
 use std::mem;
+use serde::{Serialize, Deserialize};
 
 pub const TICK_ARRAY_SIZE: usize = 88;
 pub const NUM_REWARDS: usize = 3;
 
 #[repr(C, packed)]
-#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, Serialize, Deserialize)]
 pub struct TickData {
     pub initialized: u8, pub liquidity_net: i128, pub liquidity_gross: u128,
     pub fee_growth_outside_a: u128, pub fee_growth_outside_b: u128,
@@ -17,9 +18,13 @@ pub struct TickData {
 }
 
 #[repr(C, packed)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct TickArrayData {
-    pub start_tick_index: i32, pub ticks: [TickData; TICK_ARRAY_SIZE], pub whirlpool: Pubkey,
+    pub start_tick_index: i32,
+    #[serde(with = "serde_arrays")]
+    pub ticks: [TickData; TICK_ARRAY_SIZE],
+
+    pub whirlpool: Pubkey,
 }
 
 // REMPLACEZ VOTRE FONCTION `get_start_tick_index` PAR CELLE-CI :

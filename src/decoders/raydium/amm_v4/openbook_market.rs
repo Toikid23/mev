@@ -6,14 +6,15 @@ use bytemuck::from_bytes;
 use openbook_dex::state::MarketState;
 use openbook_dex::critbit::Slab;
 use std::mem::size_of;
+use serde::{Serialize, Deserialize};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct PriceLevel {
     pub price: u64,
     pub quantity: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderBook {
     pub levels: Vec<PriceLevel>,
 }

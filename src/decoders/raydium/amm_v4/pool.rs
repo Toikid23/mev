@@ -11,10 +11,11 @@ use solana_sdk::{instruction::{AccountMeta, Instruction}, pubkey};
 use crate::decoders::raydium::amm_v4::openbook_market::{OrderBook};
 use openbook_dex::state::MarketState;
 use std::mem::size_of;
+use serde::{Serialize, Deserialize};
 
 
 // La structure de données reste la même
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecodedAmmPool {
     pub address: Pubkey, pub nonce: u64, pub mint_a: Pubkey, pub mint_b: Pubkey,
     pub vault_a: Pubkey, pub vault_b: Pubkey, pub market: Pubkey,

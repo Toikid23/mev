@@ -11,6 +11,7 @@ use uint::construct_uint;
 // --- IMPORT MANQUANT AJOUTÉ ---
 use solana_sdk::instruction::{Instruction, AccountMeta};
 use spl_token; // Pour la valeur par défaut
+use serde::{Serialize, Deserialize};
 
 construct_uint! { pub struct U256(4); }
 
@@ -19,7 +20,7 @@ construct_uint! { pub struct U256(4); }
 pub const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG");
 pub const POOL_STATE_DISCRIMINATOR: [u8; 8] = [241, 154, 109, 4, 17, 177, 109, 188];
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecodedMeteoraDammPool {
     pub address: Pubkey,
     pub mint_a: Pubkey,
@@ -108,11 +109,11 @@ pub mod onchain_layouts {
     use super::*;
     #[repr(C, packed)] #[derive(Copy, Clone, Pod, Zeroable, Debug)]
     pub struct Pool { pub pool_fees: PoolFeesStruct, pub token_a_mint: Pubkey, pub token_b_mint: Pubkey, pub token_a_vault: Pubkey, pub token_b_vault: Pubkey, pub whitelisted_vault: Pubkey, pub partner: Pubkey, pub liquidity: u128, pub _padding: u128, pub protocol_a_fee: u64, pub protocol_b_fee: u64, pub partner_a_fee: u64, pub partner_b_fee: u64, pub sqrt_min_price: u128, pub sqrt_max_price: u128, pub sqrt_price: u128, pub activation_point: u64, pub activation_type: u8, pub pool_status: u8, pub token_a_flag: u8, pub token_b_flag: u8, pub collect_fee_mode: u8, pub pool_type: u8, pub _padding_0: [u8; 2], pub fee_a_per_liquidity: [u8; 32], pub fee_b_per_liquidity: [u8; 32], pub permanent_lock_liquidity: u128, pub metrics: PoolMetrics, pub creator: Pubkey, pub _padding_1: [u64; 6], pub reward_infos: [RewardInfo; 2], }
-    #[repr(C, packed)] #[derive(Copy, Clone, Pod, Zeroable, Debug)]
+    #[repr(C, packed)] #[derive(Copy, Clone, Pod, Zeroable, Debug, Serialize, Deserialize)]
     pub struct PoolFeesStruct { pub base_fee: BaseFeeStruct, pub protocol_fee_percent: u8, pub partner_fee_percent: u8, pub referral_fee_percent: u8, pub padding_0: [u8; 5], pub dynamic_fee: DynamicFeeStruct, pub padding_1: [u64; 2], }
-    #[repr(C, packed)] #[derive(Copy, Clone, Pod, Zeroable, Debug)]
+    #[repr(C, packed)] #[derive(Copy, Clone, Pod, Zeroable, Debug, Serialize, Deserialize)]
     pub struct BaseFeeStruct { pub cliff_fee_numerator: u64, pub fee_scheduler_mode: u8, pub padding_0: [u8; 5], pub number_of_period: u16, pub period_frequency: u64, pub reduction_factor: u64, pub padding_1: u64, }
-    #[repr(C, packed)] #[derive(Copy, Clone, Pod, Zeroable, Debug)]
+    #[repr(C, packed)] #[derive(Copy, Clone, Pod, Zeroable, Debug, Serialize, Deserialize)]
     pub struct DynamicFeeStruct { pub initialized: u8, pub padding: [u8; 7], pub max_volatility_accumulator: u32, pub variable_fee_control: u32, pub bin_step: u16, pub filter_period: u16, pub decay_period: u16, pub reduction_factor: u16, pub last_update_timestamp: u64, pub bin_step_u128: u128, pub sqrt_price_reference: u128, pub volatility_accumulator: u128, pub volatility_reference: u128, }
     #[repr(C, packed)] #[derive(Copy, Clone, Pod, Zeroable, Debug)]
     pub struct PoolMetrics { pub total_lp_a_fee: u128, pub total_lp_b_fee: u128, pub total_protocol_a_fee: u64, pub total_protocol_b_fee: u64, pub total_partner_a_fee: u64, pub total_partner_b_fee: u64, pub total_position: u64, pub padding: u64, }

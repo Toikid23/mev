@@ -14,6 +14,7 @@ use std::mem;
 use solana_sdk::instruction::{Instruction, AccountMeta}; // Assurez-vous que ces imports sont présents en haut du fichier.
 use spl_associated_token_account::get_associated_token_address_with_program_id;
 use solana_sdk::pubkey;
+use serde::{Serialize, Deserialize};
 
 // --- CONSTANTES ---
 pub const PROGRAM_ID: pubkey::Pubkey = pubkey!("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo");
@@ -24,7 +25,7 @@ const BIN_ARRAY_SEED: &[u8] = b"bin_array";
 
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecodedDlmmPool {
     pub address: Pubkey,
     pub program_id: Pubkey,
@@ -49,11 +50,14 @@ pub struct DecodedDlmmPool {
     pub hydrated_bin_arrays: Option<BTreeMap<i64, DecodedBinArray>>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct DecodedBin { pub amount_a: u64, pub amount_b: u64, pub price: u128 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct DecodedBinArray { pub index: i64, pub bins: [DecodedBin; MAX_BIN_PER_ARRAY] }
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct DecodedBinArray {
+    pub index: i64,
+    #[serde(with = "serde_arrays")]
+    pub bins: [DecodedBin; MAX_BIN_PER_ARRAY] }
 
 
 impl DecodedDlmmPool {
@@ -466,7 +470,7 @@ mod onchain_layouts {
     }
 
     #[repr(C)]
-    #[derive(Clone, Copy, Pod, Zeroable, Debug)]
+    #[derive(Clone, Copy, Pod, Zeroable, Debug, Serialize, Deserialize)]
     pub struct StaticParameters {
         pub base_factor: u16, pub filter_period: u16, pub decay_period: u16,
         pub reduction_factor: u16, pub variable_fee_control: u32, pub max_volatility_accumulator: u32,
@@ -475,7 +479,7 @@ mod onchain_layouts {
     }
 
     #[repr(C)]
-    #[derive(Clone, Copy, Pod, Zeroable, Debug)]
+    #[derive(Clone, Copy, Pod, Zeroable, Debug, Serialize, Deserialize)]
     pub struct VariableParameters {
         pub volatility_accumulator: u32, pub volatility_reference: u32,
         pub index_reference: i32, pub padding: [u8; 4], pub last_update_timestamp: i64,
@@ -483,11 +487,11 @@ mod onchain_layouts {
     }
 
     #[repr(C, packed)]
-    #[derive(Clone, Copy, Pod, Zeroable, Debug)]
+    #[derive(Clone, Copy, Pod, Zeroable, Debug, Serialize, Deserialize)]
     pub struct ProtocolFee { pub amount_x: u64, pub amount_y: u64 }
 
     #[repr(C, packed)]
-    #[derive(Clone, Copy, Pod, Zeroable, Debug)]
+    #[derive(Clone, Copy, Pod, Zeroable, Debug, Serialize, Deserialize)]
     pub struct RewardInfo {
         pub mint: Pubkey, pub vault: Pubkey, pub funder: Pubkey, pub reward_duration: u64,
         pub reward_duration_end: u64, pub reward_rate: u128, pub last_update_time: u64,

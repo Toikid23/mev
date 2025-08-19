@@ -5,8 +5,9 @@ use bytemuck::{from_bytes, Pod, Zeroable};
 use solana_sdk::pubkey::Pubkey;
 use anyhow::{bail, Result, anyhow};
 use super::math;
+use serde::{Serialize, Deserialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecodedStableSwapPool {
     pub address: Pubkey,
     pub mint_a: Pubkey,

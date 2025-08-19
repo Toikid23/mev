@@ -3,13 +3,14 @@
 use bytemuck::{from_bytes, Pod, Zeroable};
 use solana_sdk::pubkey::Pubkey;
 use anyhow::{bail, Result};
+use serde::{Serialize, Deserialize};
 
 // Discriminator pour les comptes AmmConfig du programme CPMM
 const AMM_CONFIG_DISCRIMINATOR: [u8; 8] = [218, 244, 33, 104, 203, 203, 43, 111];
 
 // --- STRUCTURE DE SORTIE PROPRE ---
 // Contient les frais, qui sont l'information la plus critique pour nous.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecodedAmmConfig {
     pub trade_fee_rate: u64,
     pub protocol_fee_rate: u64,

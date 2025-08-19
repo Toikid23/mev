@@ -2,6 +2,7 @@
 
 use solana_sdk::pubkey::Pubkey;
 use anyhow::Result;
+use serde::{Serialize, Deserialize};
 
 // --- 1. Déclarer tous nos modules principaux ---
 pub mod pool_operations;
@@ -15,14 +16,14 @@ pub mod pump;
 pub use pool_operations::PoolOperations;
 
 // --- 3. Définir l'enum unifié avec les BONS NOMS ---
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Pool {
     RaydiumAmmV4(raydium::amm_v4::DecodedAmmPool),
     RaydiumCpmm(raydium::cpmm::DecodedCpmmPool),
     RaydiumClmm(raydium::clmm::DecodedClmmPool),
     RaydiumStableSwap(raydium::stable_swap::DecodedStableSwapPool),
     RaydiumLaunchpad(raydium::launchpad::DecodedLaunchpadPool),
-    MeteoraDammV1(meteora::damm_v1::DecodedMeteoraSbpPool), // <-- LA CORRECTION EST ICI
+    MeteoraDammV1(meteora::damm_v1::DecodedMeteoraSbpPool),
     MeteoraDammV2(meteora::damm_v2::DecodedMeteoraDammPool),
     MeteoraDlmm(meteora::dlmm::DecodedDlmmPool),
     OrcaWhirlpool(orca::whirlpool::DecodedWhirlpoolPool),

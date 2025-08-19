@@ -7,6 +7,7 @@ use anyhow::Result;
 pub struct Config {
     pub solana_rpc_url: String,
     pub payer_private_key: String, // <-- AJOUTEZ CETTE LIGNE
+    pub birdeye_api_key: String,
 }
 
 impl Config {

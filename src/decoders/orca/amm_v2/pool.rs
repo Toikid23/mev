@@ -8,10 +8,11 @@ use bytemuck::{from_bytes, Pod, Zeroable};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::mem;
+use serde::{Serialize, Deserialize};
 
 
 // ... (La struct DecodedOrcaAmmPool et son impl fee_as_percent ne changent pas)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecodedOrcaAmmPool {
     pub address: Pubkey,
     pub mint_a: Pubkey,

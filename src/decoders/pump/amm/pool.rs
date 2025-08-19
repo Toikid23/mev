@@ -10,6 +10,7 @@ use solana_sdk::instruction::{Instruction, AccountMeta};
 use solana_sdk::system_program; // On aura besoin du system_program
 use spl_associated_token_account::get_associated_token_address; // Pour trouver les ATA
 use spl_associated_token_account::get_associated_token_address_with_program_id;
+use serde::{Serialize, Deserialize};
 
 // --- CONSTANTES DU PROTOCOLE ---
 // Trouvées dans l'IDL
@@ -21,7 +22,7 @@ const GLOBAL_CONFIG_ACCOUNT_DISCRIMINATOR: [u8; 8] = [149, 8, 156, 202, 160, 252
 // --- STRUCTURE DE SORTIE "PROPRE" ---
 // C'est notre format de travail interne, unifié et prêt pour le `PoolOperations`.
 // Il sera rempli par les fonctions `decode_pool` et `hydrate`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecodedPumpAmmPool {
     pub address: Pubkey,
     pub mint_a: Pubkey, // Le "base_mint" (le token qui est lancé)

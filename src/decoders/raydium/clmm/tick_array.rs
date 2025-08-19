@@ -5,12 +5,13 @@ use bytemuck::{from_bytes, Pod, Zeroable};
 use solana_sdk::pubkey::Pubkey;
 use anyhow::{Result, bail};
 use std::mem;
+use serde::{Serialize, Deserialize};
 
 pub const TICK_ARRAY_SIZE: usize = 60;
 pub const REWARD_NUM: usize = 3;
 
 #[repr(C, packed)]
-#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, Serialize, Deserialize)]
 pub struct TickState {
     pub tick: i32,
     pub liquidity_net: i128,
@@ -21,17 +22,21 @@ pub struct TickState {
     pub padding: [u32; 13],
 }
 
-#[repr(C, packed)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct TickArrayState {
     pub pool_id: Pubkey,
     pub start_tick_index: i32,
+
+    #[serde(with = "serde_arrays")]
     pub ticks: [TickState; TICK_ARRAY_SIZE],
+
     pub initialized_tick_count: u8,
     pub recent_epoch: u64,
+
+    // --- AJOUTEZ L'ATTRIBUT ICI AUSSI ---
+    #[serde(with = "serde_arrays")]
     pub padding: [u8; 107],
 }
-
 // LA MÉTHODE DE CALCUL DE PDA VALIDÉE PAR LE VÉRIFICATEUR : BIG-ENDIAN
 pub fn get_tick_array_address(pool_id: &Pubkey, start_tick_index: i32, program_id: &Pubkey) -> Pubkey {
     let (pda, _) = Pubkey::find_program_address(

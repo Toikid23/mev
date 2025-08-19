@@ -13,11 +13,12 @@ use super::math;
 use super::tick_array::{self, TickArrayState};
 use super::tickarray_bitmap_extension;
 use super::config;
+use serde::{Serialize, Deserialize};
 
 
 
 // --- STRUCTURES (Inchangées) ---
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecodedClmmPool {
     pub address: Pubkey,
     pub program_id: Pubkey,

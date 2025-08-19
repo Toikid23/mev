@@ -7,6 +7,7 @@ use anyhow::{anyhow, Result, bail};
 use std::collections::BTreeMap;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey;
+use serde::{Serialize, Deserialize};
 
 use crate::decoders::spl_token_decoders;
 use super::math as orca_whirlpool_math;
@@ -16,7 +17,7 @@ use tokio::runtime::Runtime;
 use crate::config::Config;
 
 // --- STRUCTURE DE TRAVAIL "PROPRE" (MODIFIÉE) ---
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecodedWhirlpoolPool {
     pub address: Pubkey,
     pub program_id: Pubkey,

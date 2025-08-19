@@ -8,6 +8,7 @@ use solana_sdk::pubkey::Pubkey;
 use spl_token::state::{Account as SplTokenAccount, Mint as SplMint};
 use anyhow::{anyhow, bail, Result};
 use solana_sdk::instruction::{Instruction, AccountMeta};
+use serde::{Serialize, Deserialize};
 
 // --- CONSTANTES ---
 
@@ -21,14 +22,14 @@ mod onchain_layouts {
 
     // --- Structures pour le Vault ---
     #[repr(C, packed)]
-    #[derive(Clone, Copy, Pod, Zeroable, Debug, Default)]
+    #[derive(Clone, Copy, Pod, Zeroable, Debug, Default, Serialize, Deserialize)]
     pub struct VaultBumps {
         pub vault_bump: u8,
         pub token_vault_bump: u8,
     }
 
     #[repr(C, packed)]
-    #[derive(Clone, Copy, Pod, Zeroable, Debug, Default)]
+    #[derive(Clone, Copy, Pod, Zeroable, Debug, Default, Serialize, Deserialize)]
     pub struct LockedProfitTracker {
         pub last_updated_locked_profit: u64,
         pub last_report: u64,
@@ -36,7 +37,7 @@ mod onchain_layouts {
     }
 
     #[repr(C, packed)]
-    #[derive(Clone, Copy, Pod, Zeroable, Debug, Default)]
+    #[derive(Clone, Copy, Pod, Zeroable, Debug, Default, Serialize, Deserialize)]
     pub struct Vault {
         pub enabled: u8,
         pub bumps: VaultBumps,
@@ -54,7 +55,7 @@ mod onchain_layouts {
 
     // --- Structures pour le Pool ---
     #[repr(C, packed)]
-    #[derive(Clone, Copy, Pod, Zeroable, Debug, PartialEq, Eq, Default)]
+    #[derive(Clone, Copy, Pod, Zeroable, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
     pub struct TokenMultiplier {
         pub token_a_multiplier: u64,
         pub token_b_multiplier: u64,
@@ -62,7 +63,7 @@ mod onchain_layouts {
     }
 
     #[repr(C, packed)]
-    #[derive(Clone, Copy, Pod, Zeroable, Debug, Default)]
+    #[derive(Clone, Copy, Pod, Zeroable, Debug, Default, Serialize, Deserialize)]
     pub struct PoolFees {
         pub trade_fee_numerator: u64,
         pub trade_fee_denominator: u64,
@@ -70,7 +71,7 @@ mod onchain_layouts {
         pub protocol_trade_fee_denominator: u64
     }
 
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
     #[repr(u8)]
     pub enum DepegType {
         None,
@@ -115,7 +116,7 @@ mod onchain_layouts {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MeteoraCurveType {
     ConstantProduct,
     Stable {
@@ -124,7 +125,7 @@ pub enum MeteoraCurveType {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecodedMeteoraSbpPool {
     pub address: Pubkey,
     pub mint_a: Pubkey,
