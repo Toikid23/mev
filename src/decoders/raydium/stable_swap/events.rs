@@ -1,0 +1,1 @@
+// Placeholder pour les futurs parsers d'événements Stable Swap.

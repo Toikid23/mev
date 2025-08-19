@@ -1,21 +1,21 @@
-// DANS : src/bin/setup_pump_user.rs
+// src/bin/setup_pump_user.rs
 
 use anyhow::Result;
 use mev::{
     config::Config,
-    decoders::pump_decoders::amm::{PUMP_PROGRAM_ID, DecodedPumpAmmPool, onchain_layouts}
+    // --- CHEMIN CORRIGÉ ---
+    decoders::pump::amm::PUMP_PROGRAM_ID,
 };
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
+    instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
     signer::{keypair::Keypair, Signer},
-    transaction::Transaction,
-    instruction::{Instruction, AccountMeta},
     system_program,
+    transaction::Transaction,
 };
-use std::str::FromStr;
 
-// Cette fonction est une copie de celle dans pump/amm.rs pour créer l'instruction
+// Cette fonction est une copie de celle dans pump/amm/pool.rs pour créer l'instruction
 fn create_init_user_volume_accumulator_instruction(user_owner: &Pubkey) -> Result<Instruction> {
     let discriminator: [u8; 8] = [94, 6, 202, 115, 255, 96, 232, 183];
     let (user_volume_accumulator, _) = Pubkey::find_program_address(&[b"user_volume_accumulator", user_owner.as_ref()], &PUMP_PROGRAM_ID);
@@ -36,7 +36,6 @@ fn create_init_user_volume_accumulator_instruction(user_owner: &Pubkey) -> Resul
         data: discriminator.to_vec(),
     })
 }
-
 
 #[tokio::main]
 async fn main() -> Result<()> {

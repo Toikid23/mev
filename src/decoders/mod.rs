@@ -2,38 +2,36 @@
 
 use solana_sdk::pubkey::Pubkey;
 use anyhow::Result;
-use crate::decoders::meteora_decoders::amm as meteora_amm;
-// --- 1. Déclarer tous nos modules ---
-pub mod pool_operations;
-pub mod raydium_decoders;
-pub mod orca_decoders;
-pub mod meteora_decoders;
-pub mod spl_token_decoders;
-pub mod pump_decoders;
 
+// --- 1. Déclarer tous nos modules principaux ---
+pub mod pool_operations;
+pub mod raydium;
+pub mod orca;
+pub mod meteora;
+pub mod spl_token_decoders;
+pub mod pump;
 
 // --- 2. Importer le trait ---
 pub use pool_operations::PoolOperations;
 
-// --- 3. Définir l'enum unifié en utilisant les chemins complets ---
+// --- 3. Définir l'enum unifié avec les BONS NOMS ---
 #[derive(Debug, Clone)]
 pub enum Pool {
-    RaydiumAmmV4(raydium_decoders::amm_v4::DecodedAmmPool),
-    RaydiumCpmm(raydium_decoders::cpmm::DecodedCpmmPool),
-    RaydiumClmm(raydium_decoders::clmm_pool::DecodedClmmPool),
-    RaydiumStableSwap(raydium_decoders::stable_swap::DecodedStableSwapPool),
-    RaydiumLaunchpad(raydium_decoders::launchpad::DecodedLaunchpadPool),
-    MeteoraAmm(meteora_amm::DecodedMeteoraSbpPool),
-    MeteoraDammV2(meteora_decoders::damm_v2::DecodedMeteoraDammPool),
-    MeteoraDlmm(meteora_decoders::dlmm::DecodedDlmmPool),
-    OrcaWhirlpool(orca_decoders::whirlpool_decoder::DecodedWhirlpoolPool),
-    OrcaAmmV2(orca_decoders::token_swap_v2::DecodedOrcaAmmPool),
-    OrcaAmmV1(orca_decoders::token_swap_v1::DecodedOrcaAmmV1Pool),
-    PumpAmm(pump_decoders::amm::DecodedPumpAmmPool),
-
+    RaydiumAmmV4(raydium::amm_v4::DecodedAmmPool),
+    RaydiumCpmm(raydium::cpmm::DecodedCpmmPool),
+    RaydiumClmm(raydium::clmm::DecodedClmmPool),
+    RaydiumStableSwap(raydium::stable_swap::DecodedStableSwapPool),
+    RaydiumLaunchpad(raydium::launchpad::DecodedLaunchpadPool),
+    MeteoraDammV1(meteora::damm_v1::DecodedMeteoraSbpPool), // <-- LA CORRECTION EST ICI
+    MeteoraDammV2(meteora::damm_v2::DecodedMeteoraDammPool),
+    MeteoraDlmm(meteora::dlmm::DecodedDlmmPool),
+    OrcaWhirlpool(orca::whirlpool::DecodedWhirlpoolPool),
+    OrcaAmmV2(orca::amm_v2::DecodedOrcaAmmPool),
+    OrcaAmmV1(orca::amm_v1::DecodedOrcaAmmV1Pool),
+    PumpAmm(pump::amm::DecodedPumpAmmPool),
 }
 
-// --- 4. Implémenter le trait pour l'enum ---
+// --- 4. Implémenter le trait pour l'enum avec les BONS NOMS ---
 impl PoolOperations for Pool {
     fn get_mints(&self) -> (Pubkey, Pubkey) {
         match self {
@@ -42,7 +40,7 @@ impl PoolOperations for Pool {
             Pool::RaydiumClmm(p) => p.get_mints(),
             Pool::RaydiumStableSwap(p) => p.get_mints(),
             Pool::RaydiumLaunchpad(p) => p.get_mints(),
-            Pool::MeteoraAmm(p) => p.get_mints(),
+            Pool::MeteoraDammV1(p) => p.get_mints(), // <-- LA CORRECTION EST ICI
             Pool::MeteoraDammV2(p) => p.get_mints(),
             Pool::MeteoraDlmm(p) => p.get_mints(),
             Pool::OrcaWhirlpool(p) => p.get_mints(),
@@ -59,7 +57,7 @@ impl PoolOperations for Pool {
             Pool::RaydiumClmm(p) => p.get_vaults(),
             Pool::RaydiumStableSwap(p) => p.get_vaults(),
             Pool::RaydiumLaunchpad(p) => p.get_vaults(),
-            Pool::MeteoraAmm(p) => p.get_vaults(),
+            Pool::MeteoraDammV1(p) => p.get_vaults(), // <-- LA CORRECTION EST ICI
             Pool::MeteoraDammV2(p) => p.get_vaults(),
             Pool::MeteoraDlmm(p) => p.get_vaults(),
             Pool::OrcaWhirlpool(p) => p.get_vaults(),
@@ -69,23 +67,22 @@ impl PoolOperations for Pool {
         }
     }
 
-    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
+    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<u64> {
         match self {
-            Pool::RaydiumAmmV4(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
-            Pool::RaydiumCpmm(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
-            Pool::RaydiumClmm(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
-            Pool::RaydiumStableSwap(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
-            Pool::RaydiumLaunchpad(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
-            Pool::MeteoraAmm(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
-            Pool::MeteoraDammV2(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
-            Pool::MeteoraDlmm(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
+            Pool::RaydiumAmmV4(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
+            Pool::RaydiumCpmm(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
+            Pool::RaydiumClmm(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
+            Pool::RaydiumStableSwap(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
+            Pool::RaydiumLaunchpad(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
+            Pool::MeteoraDammV1(p) => p.get_quote(token_in_mint, amount_in, current_timestamp), // <-- LA CORRECTION EST ICI
+            Pool::MeteoraDammV2(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
+            Pool::MeteoraDlmm(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
             Pool::OrcaWhirlpool(_) => {
-                // On signale une erreur car cette voie ne doit pas être utilisée.
-                panic!("Ne pas utiliser get_quote synchrone pour OrcaWhirlpool. Le chemin de test doit appeler la méthode async dédiée.");
+                panic!("Ne pas utiliser get_quote synchrone pour OrcaWhirlpool.");
             },
-            Pool::OrcaAmmV2(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
-            Pool::OrcaAmmV1(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
-            Pool::PumpAmm(p) => p.get_quote(token_in_mint, amount_in, _current_timestamp),
+            Pool::OrcaAmmV2(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
+            Pool::OrcaAmmV1(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
+            Pool::PumpAmm(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
         }
     }
 }
