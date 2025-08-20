@@ -25,7 +25,7 @@ use crate::decoders::meteora::dlmm::{
 };
 
 // --- Votre fonction de test (rendue publique) ---
-pub async fn test_dlmm_with_simulation(rpc_client: &RpcClient, payer_keypair: &Keypair, current_timestamp: i64) -> Result<()> {
+pub async fn test_dlmm_with_simulation(rpc_client: &RpcClient, payer_keypair: &Keypair, _current_timestamp: i64) -> Result<()> {
     // --- SETUP DU TEST ---
     const POOL_ADDRESS: &str = "GcnHKJgMxeUCy7PUcVEssZ6swiAUt9KFPky3EjSLJL3f"; // WSOL-USDC
     const INPUT_MINT_STR: &str = "So11111111111111111111111111111111111111112"; // WSOL
@@ -40,7 +40,7 @@ pub async fn test_dlmm_with_simulation(rpc_client: &RpcClient, payer_keypair: &K
     let pool_account_data = rpc_client.get_account_data(&pool_pubkey).await?;
     let program_id = Pubkey::from_str("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo")?;
     let mut pool = decode_lb_pair(&pool_pubkey, &pool_account_data, &program_id)?;
-    hydrate(&mut pool, rpc_client, 5).await?;
+    hydrate(&mut pool, rpc_client).await?;
 
     let (input_decimals, output_decimals, output_mint_pubkey, output_token_program) = if input_mint_pubkey == pool.mint_a {
         (pool.mint_a_decimals, pool.mint_b_decimals, pool.mint_b, pool.mint_b_program)
@@ -49,9 +49,12 @@ pub async fn test_dlmm_with_simulation(rpc_client: &RpcClient, payer_keypair: &K
     };
 
     let amount_in_base_units = (INPUT_AMOUNT_UI * 10f64.powi(input_decimals as i32)) as u64;
-    let predicted_amount_out = pool.get_quote(&input_mint_pubkey, amount_in_base_units, current_timestamp)?;
+
+    // On appelle la version asynchrone qui va chercher le timestamp elle-même.
+    let predicted_amount_out = pool.get_quote_async(&input_mint_pubkey, amount_in_base_units, rpc_client).await?;
+
     let ui_predicted_amount_out = predicted_amount_out as f64 / 10f64.powi(output_decimals as i32);
-    println!("-> PRÉDICTION LOCALE: {} UI", ui_predicted_amount_out);
+    println!("-> PRÉDICTION LOCALE (Dynamique et Précise): {} UI", ui_predicted_amount_out);
 
     // --- 2. Préparation de la Transaction ---
     println!("\n[2/3] Préparation de la transaction de swap...");

@@ -52,11 +52,10 @@ pub fn get_tick_array_address(pool_id: &Pubkey, start_tick_index: i32, program_i
 
 pub fn get_start_tick_index(tick_index: i32, tick_spacing: u16) -> i32 {
     let ticks_in_array = (TICK_ARRAY_SIZE as i32) * (tick_spacing as i32);
-    let mut start = tick_index / ticks_in_array;
-    if tick_index < 0 && tick_index % ticks_in_array != 0 {
-        start -= 1;
-    }
-    start * ticks_in_array
+    // div_euclid est l'équivalent mathématique exact de Math.floor pour la division.
+    // Il gère correctement les nombres positifs et négatifs.
+    let start_index = tick_index.div_euclid(ticks_in_array);
+    start_index * ticks_in_array
 }
 
 // LA MÉTHODE DE DÉCODAGE MANUELLE ET ROBUSTE

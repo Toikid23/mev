@@ -64,7 +64,7 @@ impl Graph {
             }
             Pool::MeteoraDlmm(mut p) => {
                 println!("Hydrating Meteora DLMM: {}", p.address);
-                meteora::dlmm::hydrate(&mut p, rpc_client, 10).await?;
+                meteora::dlmm::hydrate(&mut p, rpc_client).await?;
                 Ok(Pool::MeteoraDlmm(p))
             }
 
