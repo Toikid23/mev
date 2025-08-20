@@ -121,31 +121,37 @@ struct CpmmPoolStateData {
     pub fund_fees_token_1: u64,
     pub open_time: u64,
     pub recent_epoch: u64,
-    pub padding: [u64; 31],
+    pub creator_fee_on: u8,
+    pub enable_creator_fee: u8, // bool est 1 byte
+    pub padding1: [u8; 6],
+    pub creator_fees_token_0: u64,
+    pub creator_fees_token_1: u64,
+    // Padding final réduit
+    pub padding: [u64; 28],
 }
 
 /// Tente de décoder les données brutes d'un compte Raydium CPMM PoolState.
 pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedCpmmPool> {
-    // Étape 1: Vérifier le discriminator
+    // Étape 1: Vérifier le discriminateur. C'est le seul moyen fiable d'identifier un PoolState.
     if data.get(..8) != Some(&CPMM_POOL_STATE_DISCRIMINATOR) {
         bail!("Invalid discriminator. Not a Raydium CPMM PoolState account.");
     }
 
     let data_slice = &data[8..];
 
-    // Étape 2: Vérifier la taille
-    if data_slice.len() != std::mem::size_of::<CpmmPoolStateData>() {
+    // Étape 2: Vérifier que les données sont AU MOINS assez longues.
+    // Cela nous protège contre les données corrompues et permet les futures mises à jour du programme.
+    if data_slice.len() < std::mem::size_of::<CpmmPoolStateData>() {
         bail!(
-            "CPMM PoolState data length mismatch. Expected {}, got {}.",
+            "CPMM PoolState data length mismatch. Expected at least {}, got {}.",
             std::mem::size_of::<CpmmPoolStateData>(),
             data_slice.len()
         );
     }
 
-    // Étape 3: "Caster" les données
-    let pool_struct: &CpmmPoolStateData = from_bytes(data_slice);
-
-
+    // Étape 3: "Caster" les données en utilisant la taille de notre struct.
+    // On ignore les octets supplémentaires s'il y en a.
+    let pool_struct: &CpmmPoolStateData = from_bytes(&data_slice[..std::mem::size_of::<CpmmPoolStateData>()]);
 
     // Étape 4: Créer la sortie propre et unifiée
     Ok(DecodedCpmmPool {
@@ -156,14 +162,13 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedCpmmPool> {
         token_1_mint: pool_struct.token_1_mint,
         token_0_vault: pool_struct.token_0_vault,
         token_1_vault: pool_struct.token_1_vault,
-        token_0_program: pool_struct.token_0_program, // <--- AJOUTER
+        token_0_program: pool_struct.token_0_program,
         token_1_program: pool_struct.token_1_program,
         status: pool_struct.status,
         mint_a_transfer_fee_bps: 0,
         mint_b_transfer_fee_bps: 0,
         mint_0_decimals: 0,
         mint_1_decimals: 0,
-        // Les champs "intelligents" sont initialisés à 0
         trade_fee_rate: 0,
         reserve_a: 0,
         reserve_b: 0,

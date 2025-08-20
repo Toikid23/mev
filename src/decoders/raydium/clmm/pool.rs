@@ -299,10 +299,10 @@ pub fn decode_pool(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Result
 
 // REMPLACEZ VOTRE FONCTION HYDRATE PAR CELLE-CI (VERSION CORRIGÉE POUR COMPILER) :
 pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &RpcClient) -> Result<()> {
-    println!("[HYDRATE DEBUG] Début de l'hydratation pour le pool {}", pool.address);
+
 
     let bitmap_ext_address = tickarray_bitmap_extension::get_bitmap_extension_address(&pool.address, &pool.program_id);
-    println!("[HYDRATE DEBUG] Adresse du bitmap d'extension calculée : {}", bitmap_ext_address);
+
 
     let (config_res, mint_a_res, mint_b_res, pool_state_res, bitmap_ext_res) = tokio::join!(
         rpc_client.get_account_data(&pool.amm_config),
@@ -311,7 +311,6 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &RpcClient) -> Resu
         rpc_client.get_account_data(&pool.address),
         rpc_client.get_account(&bitmap_ext_address)
     );
-    println!("[HYDRATE DEBUG] Appels RPC terminés.");
 
     let config_account_data = config_res?;
     let decoded_config = config::decode_config(&config_account_data)?;
@@ -330,7 +329,6 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &RpcClient) -> Resu
 
     // --- Étape 2: Lecture ROBUSTE des bitmaps ---
     let pool_state_data = pool_state_res?;
-    println!("[HYDRATE DEBUG] Taille des données du PoolState reçues : {} octets.", pool_state_data.len());
 
     const POOL_STATE_DISCRIMINATOR: [u8; 8] = [247, 237, 227, 245, 215, 195, 222, 70];
     if pool_state_data.get(..8) != Some(&POOL_STATE_DISCRIMINATOR) {
@@ -344,19 +342,18 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &RpcClient) -> Resu
     // LA CORRECTION DÉFINITIVE : On parse toute la struct et on accède au champ directement.
     let pool_state_struct: &PoolState = from_bytes(&data_slice[..std::mem::size_of::<PoolState>()]);
     let default_bitmap = pool_state_struct.tick_array_bitmap;
-    println!("[HYDRATE DEBUG] Bitmap par défaut lu directement depuis la struct : {:?}", default_bitmap);
 
     // Le reste de la logique reste le même, car il était déjà correct.
     let extension_bitmap_words = if let Ok(account) = bitmap_ext_res {
-        println!("[HYDRATE DEBUG] Compte de bitmap d'extension trouvé !");
+
         tickarray_bitmap_extension::decode_tick_array_bitmap_extension(&account.data)?.bitmap_words
     } else {
-        println!("[HYDRATE DEBUG] Le compte de bitmap d'extension n'a PAS été trouvé.");
+
         Vec::new()
     };
 
     // ... (le reste de la fonction est inchangé)
-    println!("[HYDRATE DEBUG] Début de la génération des adresses de TickArray...");
+
     let mut addresses_to_fetch = Vec::new();
     let multiplier = (tick_array::TICK_ARRAY_SIZE as i32) * (pool.tick_spacing as i32);
 
@@ -368,7 +365,6 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &RpcClient) -> Resu
                 let start_tick_index = (compressed_index as i32 - 512) * multiplier;
                 if start_tick_index >= math::MIN_TICK && start_tick_index <= math::MAX_TICK {
                     let address = tick_array::get_tick_array_address(&pool.address, start_tick_index, &pool.program_id);
-                    println!("[HYDRATE DEBUG][DEFAULT] Bit trouvé ! word[{}], bit {}. start_tick_index: {}, adresse: {}", word_index, bit_index, start_tick_index, address);
                     addresses_to_fetch.push(address);
                 }
             }
@@ -393,23 +389,22 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &RpcClient) -> Resu
                 };
                 if start_tick_index >= math::MIN_TICK && start_tick_index <= math::MAX_TICK {
                     let address = tick_array::get_tick_array_address(&pool.address, start_tick_index, &pool.program_id);
-                    println!("[HYDRATE DEBUG][EXTENSION] Bit trouvé ! word[{}], bit {}. start_tick_index: {}, adresse: {}", word_index, bit_index, start_tick_index, address);
                     addresses_to_fetch.push(address);
                 }
             }
         }
     }
 
-    println!("[HYDRATE DEBUG] Nombre total d'adresses de TickArray à fetcher : {}", addresses_to_fetch.len());
+
     if addresses_to_fetch.is_empty() {
         pool.tick_arrays = Some(BTreeMap::new());
-        println!("[HYDRATE DEBUG] Aucune adresse de TickArray à fetcher. Hydratation terminée.");
+
         return Ok(());
     }
 
     let accounts_results = rpc_client.get_multiple_accounts(&addresses_to_fetch).await?;
     let found_accounts_count = accounts_results.iter().filter(|a| a.is_some()).count();
-    println!("[HYDRATE DEBUG] get_multiple_accounts a retourné {} comptes sur les {} demandés.", found_accounts_count, addresses_to_fetch.len());
+
 
     let mut tick_arrays = BTreeMap::new();
     for account_opt in accounts_results {
@@ -417,11 +412,11 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &RpcClient) -> Resu
             match tick_array::decode_tick_array(&account.data) {
                 Ok(decoded_array) => {
                     let start_tick_index = decoded_array.start_tick_index;
-                    println!("[HYDRATE DEBUG] TickArray décodé avec succès pour start_tick_index: {}", start_tick_index);
+
                     tick_arrays.insert(start_tick_index, decoded_array);
                 }
                 Err(e) => {
-                    println!("[HYDRATE DEBUG] ERREUR lors du décodage d'un TickArray: {}", e);
+
                 }
             }
         }
@@ -429,7 +424,7 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &RpcClient) -> Resu
 
     let tick_arrays_count = tick_arrays.len();
     pool.tick_arrays = Some(tick_arrays);
-    println!("[HYDRATE DEBUG] Hydratation terminée. Trouvé {} TickArray(s) valides.", tick_arrays_count);
+
 
     Ok(())
 }

@@ -8,6 +8,7 @@ use solana_account_decoder::UiAccountEncoding;
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 
+
 #[derive(Debug)]
 pub struct RawPoolData {
     pub address: Pubkey,
@@ -16,11 +17,6 @@ pub struct RawPoolData {
 
 /// Trouve tous les comptes appartenant à un programme donné, avec la possibilité d'appliquer
 /// des filtres au niveau du nœud RPC pour réduire le nombre de résultats.
-///
-/// # Arguments
-/// * `rpc_client` - Le client RPC bloquant pour communiquer avec le nœud.
-/// * `program_id_str` - L'adresse du programme à scanner.
-/// * `filters` - Une `Option` contenant un `Vec` de `RpcFilterType`. Si `None`, aucun filtre n'est appliqué.
 pub fn find_pools_by_program_id_with_filters(
     rpc_client: &RpcClient,
     program_id_str: &str,
@@ -40,7 +36,10 @@ pub fn find_pools_by_program_id_with_filters(
         min_context_slot: None,
     };
 
-    // --- LA CORRECTION EST ICI ---
+    // --- LA CORRECTION FINALE ---
+    // On restaure le champ `sort_results` qui est obligatoire pour la version
+    // de la librairie `solana-client` utilisée dans ce projet.
+    // Lui donner la valeur `None` est valide et correct.
     let config = RpcProgramAccountsConfig {
         filters,
         account_config,

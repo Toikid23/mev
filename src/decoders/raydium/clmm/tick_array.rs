@@ -62,15 +62,12 @@ pub fn get_start_tick_index(tick_index: i32, tick_spacing: u16) -> i32 {
 // LA MÉTHODE DE DÉCODAGE MANUELLE ET ROBUSTE
 pub fn decode_tick_array(data: &[u8]) -> Result<TickArrayState> {
 
-    println!("[DEBUG decode_tick_array] Reçu {} octets. Les 8 premiers sont : {:?}", data.len(), &data.get(..8));
 
     const DISCRIMINATOR: [u8; 8] = [192, 155, 85, 205, 49, 249, 129, 42];
 
     // --- DÉBOGAGE DU DISCRIMINATEUR ---
     if data.len() >= 8 {
         let received_discriminator: [u8; 8] = data[..8].try_into().unwrap();
-        println!("[DEBUG decode_tick_array] Discriminateur ATTENDU: {:?}", DISCRIMINATOR);
-        println!("[DEBUG decode_tick_array] Discriminateur REÇU   : {:?}", received_discriminator);
     }
     // --- FIN DU DÉBOGAGE ---
 
