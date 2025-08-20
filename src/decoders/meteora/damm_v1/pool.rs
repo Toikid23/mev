@@ -9,6 +9,9 @@ use spl_token::state::{Account as SplTokenAccount, Mint as SplMint};
 use anyhow::{anyhow, bail, Result};
 use solana_sdk::instruction::{Instruction, AccountMeta};
 use serde::{Serialize, Deserialize};
+use async_trait::async_trait;
+
+
 
 // --- CONSTANTES ---
 
@@ -156,6 +159,7 @@ pub struct DecodedMeteoraSbpPool {
     pub curve_type: MeteoraCurveType,
     pub enabled: bool,
     pub stake: Pubkey,
+    pub last_swap_timestamp: i64,
 }
 
 
@@ -209,6 +213,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraSbpPoo
         vault_b_lp_supply: 0,
         pool_a_vault_lp_amount: 0,
         pool_b_vault_lp_amount: 0,
+        last_swap_timestamp: 0,
     })
 }
 
@@ -314,7 +319,7 @@ fn get_tokens_for_lp(lp_amount: u64, vault_total_tokens: u64, vault_lp_supply: u
 
 // DANS : src/decoders/meteora_decoders/pool
 // REMPLACEZ TOUT LE BLOC `impl PoolOperations for DecodedMeteoraSbpPool`
-
+#[async_trait]
 impl PoolOperations for DecodedMeteoraSbpPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
@@ -371,6 +376,9 @@ impl PoolOperations for DecodedMeteoraSbpPool {
         };
 
         Ok(amount_out)
+    }
+    async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
+        self.get_quote(token_in_mint, amount_in, 0)
     }
 }
 

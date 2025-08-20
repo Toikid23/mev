@@ -44,12 +44,12 @@ pub fn tick_to_sqrt_price_x64(tick: i32) -> u128 {
 }
 
 // --- Fonctions de calcul de montant (Traduites de `liquidity_math.rs`) ---
-fn get_amount_y(sqrt_price_a: u128, sqrt_price_b: u128, liquidity: u128) -> u128 {
+pub fn get_amount_y(sqrt_price_a: u128, sqrt_price_b: u128, liquidity: u128) -> u128 {
     let (sqrt_price_a, sqrt_price_b) = if sqrt_price_a > sqrt_price_b { (sqrt_price_b, sqrt_price_a) } else { (sqrt_price_a, sqrt_price_b) };
     (U256::from(liquidity) * U256::from(sqrt_price_b - sqrt_price_a) >> BITS).as_u128()
 }
 
-fn get_amount_x(sqrt_price_a: u128, sqrt_price_b: u128, liquidity: u128) -> u128 {
+pub fn get_amount_x(sqrt_price_a: u128, sqrt_price_b: u128, liquidity: u128) -> u128 {
     let (sqrt_price_a, sqrt_price_b) = if sqrt_price_a > sqrt_price_b { (sqrt_price_b, sqrt_price_a) } else { (sqrt_price_a, sqrt_price_b) };
     if sqrt_price_a == 0 { return 0; }
     let numerator = U256::from(liquidity) << (BITS * 2);
@@ -60,7 +60,7 @@ fn get_amount_x(sqrt_price_a: u128, sqrt_price_b: u128, liquidity: u128) -> u128
 }
 
 // --- Fonctions de calcul de prix (Traduites de `sqrt_price_math.rs`) ---
-fn get_next_sqrt_price_from_amount_x_in(sqrt_price: u128, liquidity: u128, amount_in: u128) -> u128 {
+pub fn get_next_sqrt_price_from_amount_x_in(sqrt_price: u128, liquidity: u128, amount_in: u128) -> u128 {
     if amount_in == 0 { return sqrt_price; }
     let numerator = U256::from(liquidity) << BITS;
     let product = U256::from(amount_in) * U256::from(sqrt_price);
@@ -69,7 +69,7 @@ fn get_next_sqrt_price_from_amount_x_in(sqrt_price: u128, liquidity: u128, amoun
     (numerator * U256::from(sqrt_price) / denominator).as_u128()
 }
 
-fn get_next_sqrt_price_from_amount_y_in(sqrt_price: u128, liquidity: u128, amount_in: u128) -> u128 {
+pub fn get_next_sqrt_price_from_amount_y_in(sqrt_price: u128, liquidity: u128, amount_in: u128) -> u128 {
     if liquidity == 0 { return sqrt_price; }
     sqrt_price + ((U256::from(amount_in) << BITS) / U256::from(liquidity)).as_u128()
 }

@@ -9,6 +9,7 @@ use super::config;
 use crate::decoders::spl_token_decoders;
 use num_integer::Integer;
 use serde::{Serialize, Deserialize};
+use async_trait::async_trait;
 
 // Discriminator pour les comptes PoolState du programme CPMM
 const CPMM_POOL_STATE_DISCRIMINATOR: [u8; 8] = [247, 237, 227, 245, 215, 195, 222, 70];
@@ -36,6 +37,7 @@ pub struct DecodedCpmmPool {
     pub trade_fee_rate: u64,
     pub reserve_a: u64,
     pub reserve_b: u64,
+    pub last_swap_timestamp: i64,
 }
 
 // Dans pool, après la struct DecodedCpmmPool
@@ -172,10 +174,11 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedCpmmPool> {
         trade_fee_rate: 0,
         reserve_a: 0,
         reserve_b: 0,
+        last_swap_timestamp: 0,
     })
 }
 
-// --- IMPLEMENTATION DE LA LOGIQUE DU POOL ---
+#[async_trait]
 impl PoolOperations for DecodedCpmmPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) {
         (self.token_0_mint, self.token_1_mint)
@@ -226,6 +229,9 @@ impl PoolOperations for DecodedCpmmPool {
         let final_amount_out = gross_amount_out.saturating_sub(fee_on_output as u64);
 
         Ok(final_amount_out)
+    }
+    async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
+        self.get_quote(token_in_mint, amount_in, 0)
     }
 }
 pub async fn hydrate(pool: &mut DecodedCpmmPool, rpc_client: &RpcClient) -> Result<()> {

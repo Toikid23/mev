@@ -3,6 +3,8 @@
 use solana_sdk::pubkey::Pubkey;
 use anyhow::Result;
 use serde::{Serialize, Deserialize};
+use solana_client::nonblocking::rpc_client::RpcClient; // <-- AJOUTER
+use async_trait::async_trait;
 
 // --- 1. Déclarer tous nos modules principaux ---
 pub mod pool_operations;
@@ -33,6 +35,7 @@ pub enum Pool {
 }
 
 // --- 4. Implémenter le trait pour l'enum avec les BONS NOMS ---
+#[async_trait]
 impl PoolOperations for Pool {
     fn get_mints(&self) -> (Pubkey, Pubkey) {
         match self {
@@ -72,18 +75,34 @@ impl PoolOperations for Pool {
         match self {
             Pool::RaydiumAmmV4(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
             Pool::RaydiumCpmm(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
-            Pool::RaydiumClmm(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
             Pool::RaydiumStableSwap(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
             Pool::RaydiumLaunchpad(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
-            Pool::MeteoraDammV1(p) => p.get_quote(token_in_mint, amount_in, current_timestamp), // <-- LA CORRECTION EST ICI
+            Pool::MeteoraDammV1(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
             Pool::MeteoraDammV2(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
-            Pool::MeteoraDlmm(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
-            Pool::OrcaWhirlpool(_) => {
-                panic!("Ne pas utiliser get_quote synchrone pour OrcaWhirlpool.");
-            },
             Pool::OrcaAmmV2(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
             Pool::OrcaAmmV1(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
             Pool::PumpAmm(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
+
+            // --- Pools Complexes (Synchrone NON FIABLE) ---
+            Pool::RaydiumClmm(_) => Err(anyhow::anyhow!("Utiliser get_quote_async pour Raydium CLMM")),
+            Pool::MeteoraDlmm(_) => Err(anyhow::anyhow!("Utiliser get_quote_async pour Meteora DLMM")),
+            Pool::OrcaWhirlpool(_) => Err(anyhow::anyhow!("Utiliser get_quote_async pour Orca Whirlpool")),
+        }
+    }
+
+    async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, rpc_client: &RpcClient) -> Result<u64> {
+        match self {
+            // On gère déjà le cas Whirlpool
+            Pool::OrcaWhirlpool(p) => p.get_quote_with_rpc(token_in_mint, amount_in, rpc_client).await,
+
+            // TODO: Implémenter la logique async pour CLMM et DLMM
+            // Pour l'instant, ils vont utiliser leur `get_quote` synchrone qui est une estimation.
+            // Le jour où on les intègrera, on créera leur propre `get_quote_with_rpc`.
+            Pool::RaydiumClmm(p) => p.get_quote(token_in_mint, amount_in, 0),
+            Pool::MeteoraDlmm(p) => p.get_quote(token_in_mint, amount_in, 0),
+
+            // Pour les pools simples, on appelle simplement leur version synchrone
+            _ => self.get_quote(token_in_mint, amount_in, 0),
         }
     }
 }

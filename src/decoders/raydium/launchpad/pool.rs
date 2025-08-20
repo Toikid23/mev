@@ -9,6 +9,7 @@ use super::config;
 use super::math;
 use crate::decoders::spl_token_decoders;
 use serde::{Serialize, Deserialize};
+use async_trait::async_trait;
 
 // --- STRUCTURES PUBLIQUES ---
 
@@ -41,6 +42,7 @@ pub struct DecodedLaunchpadPool {
     // --- CHAMP AJOUTÉ POUR LA COURBE LINÉAIRE ---
     pub total_base_sell: u64,
     pub curve_type: CurveType, // Le champ clé pour la logique polymorphe
+    pub last_swap_timestamp: i64,
 }
 
 // Dans pool, après la struct DecodedLaunchpadPool
@@ -107,10 +109,10 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedLaunchpadPool
         mint_b_transfer_fee_bps: 0,
 
         curve_type: CurveType::Unknown, // Sera hydraté par le graph_engine
+        last_swap_timestamp: 0,
     })
 }
-
-// --- LOGIQUE DE POOL ---
+#[async_trait]
 impl PoolOperations for DecodedLaunchpadPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
@@ -181,6 +183,9 @@ impl PoolOperations for DecodedLaunchpadPool {
         let final_amount_out = (amount_out_after_pool_fee).saturating_sub(fee_on_output);
 
         Ok(final_amount_out as u64)
+    }
+    async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
+        self.get_quote(token_in_mint, amount_in, 0)
     }
 }
 

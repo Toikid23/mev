@@ -11,6 +11,7 @@ use solana_sdk::system_program; // On aura besoin du system_program
 use spl_associated_token_account::get_associated_token_address; // Pour trouver les ATA
 use spl_associated_token_account::get_associated_token_address_with_program_id;
 use serde::{Serialize, Deserialize};
+use async_trait::async_trait;
 
 // --- CONSTANTES DU PROTOCOLE ---
 // Trouvées dans l'IDL
@@ -47,6 +48,7 @@ pub struct DecodedPumpAmmPool {
     pub total_fee_basis_points: u64,
     pub mint_a_program: Pubkey,
     pub mint_b_program: Pubkey,
+    pub last_swap_timestamp: i64,
 }
 
 impl DecodedPumpAmmPool {
@@ -259,6 +261,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedPumpAmmPool> 
         total_fee_basis_points: 0,
         mint_a_program: spl_token::id(),
         mint_b_program: spl_token::id(),
+        last_swap_timestamp: 0,
     })
 }
 
@@ -348,7 +351,7 @@ fn ceil_div(a: u128, b: u128) -> Option<u128> {
     a.checked_add(b)?.checked_sub(1)?.checked_div(b)
 }
 
-
+#[async_trait]
 impl PoolOperations for DecodedPumpAmmPool {
     /// Retourne les adresses des deux tokens du pool.
     fn get_mints(&self) -> (Pubkey, Pubkey) {
@@ -409,5 +412,8 @@ impl PoolOperations for DecodedPumpAmmPool {
         let final_amount_out = amount_out_after_pool_fee.saturating_sub(fee_on_output);
 
         Ok(final_amount_out as u64)
+    }
+    async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
+        self.get_quote(token_in_mint, amount_in, 0)
     }
 }

@@ -14,6 +14,7 @@ use super::tick_array::{self, TickArrayState};
 use super::tickarray_bitmap_extension;
 use super::config;
 use serde::{Serialize, Deserialize};
+use async_trait::async_trait;
 
 
 
@@ -430,7 +431,7 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &RpcClient) -> Resu
 }
 
 
-
+#[async_trait]
 impl PoolOperations for DecodedClmmPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) {
         (self.mint_a, self.mint_b)
@@ -461,6 +462,9 @@ impl PoolOperations for DecodedClmmPool {
         let final_amount_out = gross_amount_out.saturating_sub(fee_on_output as u64);
 
         Ok(final_amount_out)
+    }
+    async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
+        self.get_quote(token_in_mint, amount_in, 0)
     }
 }
 
@@ -498,5 +502,4 @@ fn find_next_initialized_tick<'a>(
 
     Err(anyhow!("Aucun tick initialisé trouvé dans la direction du swap parmi les arrays chargés."))
 }
-
 

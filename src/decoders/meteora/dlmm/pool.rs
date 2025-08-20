@@ -15,6 +15,7 @@ use solana_sdk::instruction::{Instruction, AccountMeta}; // Assurez-vous que ces
 use spl_associated_token_account::get_associated_token_address_with_program_id;
 use solana_sdk::pubkey;
 use serde::{Serialize, Deserialize};
+use async_trait::async_trait;
 
 // --- CONSTANTES ---
 pub const PROGRAM_ID: pubkey::Pubkey = pubkey!("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo");
@@ -48,6 +49,7 @@ pub struct DecodedDlmmPool {
     pub parameters: onchain_layouts::StaticParameters,
     pub v_parameters: onchain_layouts::VariableParameters,
     pub hydrated_bin_arrays: Option<BTreeMap<i64, DecodedBinArray>>,
+    pub last_swap_timestamp: i64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -194,7 +196,7 @@ impl DecodedDlmmPool {
     }
 }
 
-
+#[async_trait]
 impl PoolOperations for DecodedDlmmPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
@@ -226,6 +228,9 @@ impl PoolOperations for DecodedDlmmPool {
         let final_amount_out = gross_amount_out.saturating_sub(fee_on_output);
 
         Ok(final_amount_out)
+    }
+    async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
+        self.get_quote(token_in_mint, amount_in, 0)
     }
 }
 
@@ -266,6 +271,7 @@ pub fn decode_lb_pair(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Res
         parameters: pool_struct.parameters,
         v_parameters: pool_struct.v_parameters,
         hydrated_bin_arrays: None,
+        last_swap_timestamp: 0,
     })
 }
 

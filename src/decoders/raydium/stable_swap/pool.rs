@@ -6,6 +6,9 @@ use solana_sdk::pubkey::Pubkey;
 use anyhow::{bail, Result, anyhow};
 use super::math;
 use serde::{Serialize, Deserialize};
+use async_trait::async_trait;
+use solana_client::nonblocking::rpc_client::RpcClient;
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecodedStableSwapPool {
@@ -21,6 +24,7 @@ pub struct DecodedStableSwapPool {
     // Les réserves seront hydratées plus tard
     pub reserve_a: u64,
     pub reserve_b: u64,
+    pub last_swap_timestamp: i64,
 }
 
 
@@ -98,7 +102,7 @@ pub fn decode_model_data(data: &[u8]) -> Result<u64> {
     Ok(u64::from_le_bytes(amp_bytes))
 }
 
-// --- IMPLEMENTATION DE LA LOGIQUE DU POOL ---
+#[async_trait]
 impl PoolOperations for DecodedStableSwapPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) {
         (self.mint_a, self.mint_b)
@@ -131,5 +135,8 @@ impl PoolOperations for DecodedStableSwapPool {
         )?;
 
         Ok(amount_out as u64)
+    }
+    async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
+        self.get_quote(token_in_mint, amount_in, 0)
     }
 }

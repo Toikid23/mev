@@ -8,6 +8,7 @@ use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::mem;
 use serde::{Serialize, Deserialize};
+use async_trait::async_trait;
 
 // NOTE: Cette structure est intentionnellement quasi-identique à celle de la V2,
 // car les layouts on-chain sont compatibles.
@@ -27,6 +28,7 @@ pub struct DecodedOrcaAmmV1Pool {
     pub mint_a_decimals: u8,
     pub mint_b_decimals: u8,
     pub curve_type: u8,
+    pub last_swap_timestamp: i64,
 }
 
 impl DecodedOrcaAmmV1Pool {
@@ -87,6 +89,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedOrcaAmmV1Pool
         curve_type: pool_struct.swap_curve.curve_type,
         reserve_a: 0, reserve_b: 0, mint_a_transfer_fee_bps: 0, mint_b_transfer_fee_bps: 0,
         mint_a_decimals: 0, mint_b_decimals: 0,
+        last_swap_timestamp: 0,
     })
 }
 
@@ -114,7 +117,7 @@ pub async fn hydrate(pool: &mut DecodedOrcaAmmV1Pool, rpc_client: &RpcClient) ->
 
     Ok(())
 }
-
+#[async_trait]
 impl PoolOperations for DecodedOrcaAmmV1Pool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
@@ -144,5 +147,8 @@ impl PoolOperations for DecodedOrcaAmmV1Pool {
             }
             _ => Err(anyhow!("Curve type {} is not supported for Orca AMM.", self.curve_type)),
         }
+    }
+    async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
+        self.get_quote(token_in_mint, amount_in, 0)
     }
 }

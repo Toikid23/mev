@@ -51,3 +51,14 @@ openbook_dex = "0.5.6"
 spl-memo = "6.0.0"
 async-trait = "0.1.89"
 serde_arrays = "0.2.0"
+futures-util = "0.3.31"
+chrono = "0.4.41"
+
+
+[[bin]]
+name = "filter_engine"
+path = "src/bin/filter_engine.rs"
+
+[[bin]]
+name = "execution_bot"
+path = "src/bin/execution_bot.rs"

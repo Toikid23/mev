@@ -15,6 +15,7 @@ use super::tick_array;
 use super::math::sqrt_price_to_tick_index;
 use tokio::runtime::Runtime;
 use crate::config::Config;
+use async_trait::async_trait;
 
 // --- STRUCTURE DE TRAVAIL "PROPRE" (MODIFIÉE) ---
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +50,7 @@ pub struct DecodedWhirlpoolPool {
     pub tick_arrays: Option<BTreeMap<i32, tick_array::TickArrayData>>,
     pub mint_a_program: Pubkey,
     pub mint_b_program: Pubkey,
+    pub last_swap_timestamp: i64,
 }
 
 
@@ -104,6 +106,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedWhirlpoolPool
         tick_arrays: None, // Initialisé à None
         mint_a_program: spl_token::id(), // Valeur par défaut
         mint_b_program: spl_token::id(),
+        last_swap_timestamp: 0,
     })
 }
 
@@ -327,5 +330,28 @@ impl DecodedWhirlpoolPool {
         let fee_on_output = (total_amount_out * out_mint_fee_bps as u128) / 10000;
         let final_amount_out = total_amount_out.saturating_sub(fee_on_output);
         Ok(final_amount_out as u64)
+    }
+}
+
+#[async_trait]
+impl PoolOperations for DecodedWhirlpoolPool {
+    fn get_mints(&self) -> (Pubkey, Pubkey) {
+        (self.mint_a, self.mint_b)
+    }
+
+    fn get_vaults(&self) -> (Pubkey, Pubkey) {
+        (self.vault_a, self.vault_b)
+    }
+
+    /// La version synchrone pour Whirlpool retourne une erreur car elle est intrinsèquement
+    /// imprécise sans appels RPC.
+    fn get_quote(&self, _token_in_mint: &Pubkey, _amount_in: u64, _current_timestamp: i64) -> Result<u64> {
+        Err(anyhow!("get_quote synchrone n'est pas supporté pour Whirlpool. Utilisez get_quote_async."))
+    }
+
+    /// La version asynchrone est la méthode correcte pour obtenir un quote de Whirlpool.
+    async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, rpc_client: &RpcClient) -> Result<u64> {
+        // On délègue simplement à la fonction que nous avons déjà écrite.
+        self.get_quote_with_rpc(token_in_mint, amount_in, rpc_client).await
     }
 }

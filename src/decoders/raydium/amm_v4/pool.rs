@@ -12,6 +12,7 @@ use crate::decoders::raydium::amm_v4::openbook_market::{OrderBook};
 use openbook_dex::state::MarketState;
 use std::mem::size_of;
 use serde::{Serialize, Deserialize};
+use async_trait::async_trait;
 
 
 // La structure de données reste la même
@@ -27,6 +28,7 @@ pub struct DecodedAmmPool {
     pub reserve_a: u64, pub reserve_b: u64,
     pub bids_order_book: Option<OrderBook>, pub asks_order_book: Option<OrderBook>,
     pub coin_lot_size: u64, pub pc_lot_size: u64,
+    pub last_swap_timestamp: i64,
 }
 
 // Les structures on-chain restent les mêmes
@@ -112,6 +114,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedAmmPool> {
         market_coin_vault: Pubkey::default(), market_pc_vault: Pubkey::default(),
         market_vault_signer: Pubkey::default(), bids_order_book: None,
         asks_order_book: None, coin_lot_size: 0, pc_lot_size: 0,
+        last_swap_timestamp: 0,
     })
 }
 
@@ -153,7 +156,7 @@ pub async fn hydrate(pool: &mut DecodedAmmPool, rpc_client: &RpcClient) -> Resul
 
     Ok(())
 }
-
+#[async_trait]
 impl PoolOperations for DecodedAmmPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
@@ -175,5 +178,8 @@ impl PoolOperations for DecodedAmmPool {
         let fee_on_output = (gross_amount_out * out_mint_fee_bps as u128) / 10000;
         let final_amount_out = gross_amount_out.saturating_sub(fee_on_output);
         Ok(final_amount_out as u64)
+    }
+    async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
+        self.get_quote(token_in_mint, amount_in, 0)
     }
 }

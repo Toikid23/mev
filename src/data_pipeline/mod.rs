@@ -7,4 +7,5 @@ pub mod geyser_connector;
 pub mod dex_implementations;
 pub mod onchain_scanner;
 pub mod api_connectors;
+pub mod manual_pools;
 // On le déclare déjà, il sera prêt pour le futur.

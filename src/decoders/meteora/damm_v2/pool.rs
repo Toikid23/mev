@@ -12,6 +12,9 @@ use uint::construct_uint;
 use solana_sdk::instruction::{Instruction, AccountMeta};
 use spl_token; // Pour la valeur par défaut
 use serde::{Serialize, Deserialize};
+use async_trait::async_trait;
+
+
 
 construct_uint! { pub struct U256(4); }
 
@@ -42,6 +45,7 @@ pub struct DecodedMeteoraDammPool {
     // --- FIN DES AJOUTS ---
     pub pool_fees: onchain_layouts::PoolFeesStruct,
     pub activation_point: u64,
+    pub last_swap_timestamp: i64,
 }
 
 impl DecodedMeteoraDammPool {
@@ -151,6 +155,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraDammPo
         // --- INITIALISATION DES NOUVEAUX CHAMPS ---
         mint_a_program: spl_token::id(),
         mint_b_program: spl_token::id(),
+        last_swap_timestamp: 0,
     })
 }
 
@@ -178,6 +183,7 @@ pub async fn hydrate(pool: &mut DecodedMeteoraDammPool, rpc_client: &RpcClient) 
 }
 
 // ... (Le bloc `impl PoolOperations` et les fonctions mathématiques que nous avons ajoutées précédemment restent ici, inchangés) ...
+#[async_trait]
 impl PoolOperations for DecodedMeteoraDammPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
@@ -230,6 +236,9 @@ impl PoolOperations for DecodedMeteoraDammPool {
         let fee_on_output = (amount_out_after_pool_fee as u128 * out_mint_fee_bps as u128) / 10000;
         let final_amount_out = amount_out_after_pool_fee.saturating_sub(fee_on_output as u64);
         Ok(final_amount_out)
+    }
+    async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
+        self.get_quote(token_in_mint, amount_in, 0)
     }
 }
 fn get_base_fee(base_fee: &onchain_layouts::BaseFeeStruct, current_timestamp: i64, activation_point: u64) -> Result<u64> {
