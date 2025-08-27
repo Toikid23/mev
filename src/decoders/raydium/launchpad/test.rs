@@ -1,9 +1,18 @@
 // src/decoders/raydium/launchpad/tests.rs
 
-use anyhow::Result;
+use anyhow::{anyhow, bail, Result};
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_sdk::pubkey::Pubkey;
+use solana_sdk::{
+    pubkey::Pubkey,
+    signature::Keypair, // <-- Ajouter
+    signer::Signer,      // <-- Ajouter
+    transaction::Transaction, // <-- Ajouter
+};
 use std::str::FromStr;
+use spl_associated_token_account::get_associated_token_address; // <-- Ajouter
+
+// --- Imports depuis notre propre crate ---
+use crate::decoders::pool_operations::UserSwapAccounts;
 
 // --- Imports depuis notre propre crate ---
 use crate::decoders::PoolOperations; // <-- NÉCESSAIRE pour print_quote_result
@@ -12,52 +21,40 @@ use crate::decoders::raydium::launchpad::{
     hydrate,
 };
 
-// --- Fonction utilitaire de test (copiée depuis dev_runner.rs) ---
-// Note : Le '<T: PoolOperations + ?Sized>' signifie que cette fonction accepte
-// n'importe quel type de pool tant qu'il implémente notre trait PoolOperations.
-fn print_quote_result<T: PoolOperations + ?Sized>(
-    pool: &T,
-    token_in_mint: &Pubkey,
-    in_decimals: u8,
-    out_decimals: u8,
-    amount_in: u64,
-    current_timestamp: i64
-) -> Result<()> {
-    match pool.get_quote(token_in_mint, amount_in, current_timestamp) {
-        Ok(amount_out) => {
-            let ui_amount_in = amount_in as f64 / 10f64.powi(in_decimals as i32);
-            let ui_amount_out = amount_out as f64 / 10f64.powi(out_decimals as i32);
-            let price = if ui_amount_in > 0.0 { ui_amount_out / ui_amount_in } else { 0.0 };
-            println!("-> Succès ! Pour {} UI du token d'entrée, vous obtenez {} UI du token de sortie.", ui_amount_in, ui_amount_out);
-            println!("   Token d'entrée: {}", token_in_mint);
-            println!("-> Prix effectif: {:.9}", price);
-        },
-        Err(e) => {
-            println!("!! Erreur lors du calcul du quote: {}", e);
-            return Err(e.into());
-        },
-    }
-    Ok(())
-}
-
-
-// --- Votre fonction de test (rendue publique) ---
-pub async fn test_launchpad(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
+pub async fn test_launchpad(rpc_client: &RpcClient, payer: &Keypair, current_timestamp: i64) -> Result<()> {
     const POOL_ADDRESS: &str = "DReGGrVpi1Czq5tC1Juu2NjZh1jtack4GwckuJqbQd7H"; // ZETA-USDC
-    println!("\n--- Test Raydium Launchpad ({}) ---", POOL_ADDRESS);
+    println!("\n--- Test et Simulation Raydium Launchpad ({}) ---", POOL_ADDRESS);
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
-    let account_data = rpc_client.get_account_data(&pool_pubkey).await?;
 
-    // On utilise les fonctions importées directement
-    let mut pool = decode_pool(&pool_pubkey, &account_data)?;
-
-    println!("[1/2] Hydratation...");
+    let mut pool = decode_pool(&pool_pubkey, &rpc_client.get_account_data(&pool_pubkey).await?)?;
     hydrate(&mut pool, rpc_client).await?;
-    println!("-> Hydratation terminée. Frais: {:.4}%. Courbe: {:?}", pool.fee_as_percent(), pool.curve_type);
 
-    let small_amount_in = 1_000_000; // 1 USDC (6 décimales)
-    println!("\n[2/2] Calcul du quote pour 1 USDC...");
-    print_quote_result(&pool, &pool.mint_b, 6, 6, small_amount_in, current_timestamp)?;
+    let amount_in = 1_000_000; // 1 USDC
+    let input_mint = pool.mint_b;
+    let output_mint = pool.mint_a;
 
+    println!("[1/2] Préparation de la simulation...");
+    let user_accounts = UserSwapAccounts {
+        owner: payer.pubkey(),
+        source: get_associated_token_address(&payer.pubkey(), &input_mint),
+        destination: get_associated_token_address(&payer.pubkey(), &output_mint),
+    };
+
+    let swap_ix = pool.create_swap_instruction(&input_mint, amount_in, 0, &user_accounts)?;
+
+    let transaction = Transaction::new_signed_with_payer(
+        &[swap_ix], Some(&payer.pubkey()), &[payer], rpc_client.get_latest_blockhash().await?,
+    );
+
+    println!("[2/2] Exécution de la simulation...");
+    let sim_result = rpc_client.simulate_transaction(&transaction).await?;
+
+    if let Some(err) = sim_result.value.err {
+        bail!("La simulation a échoué: {:?}\nLogs: {:?}", err, sim_result.value.logs);
+    }
+
+    println!("✅ SUCCÈS ! La simulation de swap Launchpad a réussi.");
+    // NOTE: On ne peut pas comparer le montant car events.rs est vide.
+    // L'objectif ici est de valider que la création de l'instruction est correcte.
     Ok(())
 }

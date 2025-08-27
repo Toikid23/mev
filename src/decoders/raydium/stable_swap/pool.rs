@@ -1,6 +1,5 @@
 // src/decoders/raydium_decoders/pool
 
-use crate::decoders::pool_operations::PoolOperations;
 use bytemuck::{from_bytes, Pod, Zeroable};
 use solana_sdk::pubkey::Pubkey;
 use anyhow::{bail, Result, anyhow};
@@ -8,6 +7,10 @@ use super::math;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 use solana_client::nonblocking::rpc_client::RpcClient;
+use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts}; // Le trait et la struct
+use solana_sdk::instruction::{AccountMeta, Instruction}; // Les types pour l'instruction
+use spl_associated_token_account::get_associated_token_address; // Pour dériver un compte
+use std::str::FromStr;
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,5 +142,47 @@ impl PoolOperations for DecodedStableSwapPool {
     }
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
         self.get_quote(token_in_mint, amount_in, 0)
+    }
+    fn create_swap_instruction(
+        &self,
+        token_in_mint: &Pubkey,
+        amount_in: u64,
+        min_amount_out: u64,
+        user_accounts: &UserSwapAccounts,
+    ) -> Result<Instruction> {
+        // Discriminateur pour l'instruction `swap`
+        let instruction_discriminator: [u8; 8] = [248, 198, 158, 145, 225, 117, 135, 200];
+        let mut instruction_data = Vec::new();
+        instruction_data.extend_from_slice(&instruction_discriminator);
+        instruction_data.extend_from_slice(&amount_in.to_le_bytes());
+        instruction_data.extend_from_slice(&min_amount_out.to_le_bytes());
+
+        let (pool_authority, _) = Pubkey::find_program_address(&[b"amm_authority"], &Pubkey::from_str("SSwpkEEcbUqx4vtoEsgK9bGAoTVis3ZMrBPyGZ5eebT").unwrap());
+
+        // Le compte de frais de l'admin est l'ATA du token de SORTIE, possédé par l'autorité du pool.
+        let admin_fee_account = if *token_in_mint == self.mint_a {
+            get_associated_token_address(&pool_authority, &self.mint_b)
+        } else {
+            get_associated_token_address(&pool_authority, &self.mint_a)
+        };
+
+        let accounts = vec![
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new(self.address, false),
+            AccountMeta::new_readonly(pool_authority, false),
+            AccountMeta::new(user_accounts.source, false),
+            AccountMeta::new(user_accounts.destination, false),
+            AccountMeta::new(self.vault_a, false),
+            AccountMeta::new(self.vault_b, false),
+            AccountMeta::new(admin_fee_account, false),
+            AccountMeta::new_readonly(user_accounts.owner, true),
+            AccountMeta::new_readonly(solana_sdk::sysvar::clock::ID, false),
+        ];
+
+        Ok(Instruction {
+            program_id: Pubkey::from_str("SSwpkEEcbUqx4vtoEsgK9bGAoTVis3ZMrBPyGZ5eebT").unwrap(),
+            accounts,
+            data: instruction_data,
+        })
     }
 }

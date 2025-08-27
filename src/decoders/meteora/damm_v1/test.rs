@@ -16,6 +16,7 @@ use solana_transaction_status::UiTransactionEncoding;
 use solana_account_decoder::UiAccountData;
 use spl_token::state::Account as SplTokenAccount;
 use solana_program_pack::Pack;
+use crate::decoders::pool_operations::UserSwapAccounts;
 
 // --- Imports depuis notre propre crate ---
 use crate::decoders::PoolOperations;
@@ -52,31 +53,34 @@ pub async fn test_damm_v1_with_simulation(rpc_client: &RpcClient, payer_keypair:
 
     // --- 2. Préparation de la Transaction ---
     println!("\n[2/3] Préparation de la transaction de swap...");
-    let payer_pubkey = payer_keypair.pubkey();
-    let user_source_ata = get_associated_token_address(&payer_pubkey, &input_mint_pubkey);
-    let user_destination_ata = get_associated_token_address(&payer_pubkey, &output_mint_pubkey);
 
+    // On regroupe les comptes utilisateur dans la struct unifiée
+    let user_accounts = UserSwapAccounts {
+        owner: payer_keypair.pubkey(),
+        source: get_associated_token_address(&payer_keypair.pubkey(), &input_mint_pubkey),
+        destination: get_associated_token_address(&payer_keypair.pubkey(), &output_mint_pubkey),
+    };
+
+    // On appelle la nouvelle fonction unifiée
     let swap_ix = pool.create_swap_instruction(
         &input_mint_pubkey,
-        &user_source_ata,
-        &user_destination_ata,
-        &payer_pubkey,
         amount_in_base_units,
-        0,
+        0, // min_amount_out
+        &user_accounts,
     )?;
 
     let recent_blockhash = rpc_client.get_latest_blockhash().await?;
     let transaction = Transaction::new_signed_with_payer(
         &[swap_ix],
-        Some(&payer_pubkey),
+        Some(&payer_keypair.pubkey()),
         &[payer_keypair],
         recent_blockhash,
     );
 
     // --- 3. Simulation et Analyse par Lecture de Compte ---
-    println!("\n[3/3] Exécution de la simulation avec lecture de compte...");
+    let user_destination_ata = user_accounts.destination;
 
-    let initial_destination_balance = match rpc_client.get_token_account(&user_destination_ata).await {
+    let initial_destination_balance = match rpc_client.get_token_account(&user_destination_ata).await { // <-- Maintenant, ça compile
         Ok(Some(acc)) => acc.token_amount.amount.parse::<u64>().unwrap_or(0),
         _ => 0,
     };
@@ -89,7 +93,7 @@ pub async fn test_damm_v1_with_simulation(rpc_client: &RpcClient, payer_keypair:
         encoding: Some(UiTransactionEncoding::Base64),
         accounts: Some(solana_client::rpc_config::RpcSimulateTransactionAccountsConfig {
             encoding: Some(solana_account_decoder::UiAccountEncoding::Base64),
-            addresses: vec![ user_destination_ata.to_string() ],
+            addresses: vec![ user_destination_ata.to_string() ], // <-- Et ça aussi
         }),
         ..Default::default()
     };

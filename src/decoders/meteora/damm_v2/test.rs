@@ -10,12 +10,13 @@ use solana_sdk::{
     transaction::Transaction,
 };
 use std::str::FromStr;
-use spl_associated_token_account::get_associated_token_address_with_program_id;
 use solana_client::rpc_config::RpcSimulateTransactionConfig;
 use solana_transaction_status::UiTransactionEncoding;
 use solana_account_decoder::UiAccountData;
 use spl_token::state::Account as SplTokenAccount;
 use solana_program_pack::Pack;
+use crate::decoders::pool_operations::UserSwapAccounts; // <-- Ajouter cet import
+use spl_associated_token_account::get_associated_token_address_with_program_id;
 
 // --- Imports depuis notre propre crate ---
 use crate::decoders::PoolOperations;
@@ -55,28 +56,35 @@ pub async fn test_damm_v2_with_simulation(rpc_client: &RpcClient, payer_keypair:
     // --- 2. Préparation de la Transaction ---
     println!("\n[2/3] Préparation de la transaction de swap...");
     let payer_pubkey = payer_keypair.pubkey();
-    let user_source_ata = get_associated_token_address_with_program_id(&payer_pubkey, &input_mint_pubkey, &pool.mint_b_program);
-    let user_destination_ata = get_associated_token_address_with_program_id(&payer_pubkey, &output_mint_pubkey, &output_token_program);
+
+    // On regroupe les comptes dans la struct
+    let user_accounts = UserSwapAccounts {
+        owner: payer_pubkey,
+        // On dérive les ATAs directement ici
+        source: get_associated_token_address_with_program_id(&payer_pubkey, &input_mint_pubkey, &pool.mint_b_program), // Correction: WSOL est mint_b pour ce pool
+        destination: get_associated_token_address_with_program_id(&payer_pubkey, &output_mint_pubkey, &output_token_program),
+    };
 
     let swap_ix = pool.create_swap_instruction(
-        &payer_pubkey,
-        &user_source_ata,
-        &user_destination_ata,
         &input_mint_pubkey,
         amount_in_base_units,
         0,
+        &user_accounts,
     )?;
 
     let recent_blockhash = rpc_client.get_latest_blockhash().await?;
     let transaction = Transaction::new_signed_with_payer(
         &[swap_ix],
-        Some(&payer_pubkey),
+        Some(&payer_pubkey), // <-- Correction 1
         &[payer_keypair],
         recent_blockhash,
     );
 
     // --- 3. Simulation et Analyse par Lecture de Compte ---
     println!("\n[3/3] Exécution de la simulation avec lecture de compte...");
+
+    // --- CORRECTION 2 : On récupère la variable depuis la struct, comme pour DAMM V1 ---
+    let user_destination_ata = user_accounts.destination;
 
     let initial_destination_balance = match rpc_client.get_token_account(&user_destination_ata).await {
         Ok(Some(acc)) => acc.token_amount.amount.parse::<u64>().unwrap_or(0),

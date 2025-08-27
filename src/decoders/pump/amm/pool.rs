@@ -1,6 +1,6 @@
 // DANS: src/decoders/pump_decoders/pool
 
-use crate::decoders::pool_operations::PoolOperations;
+
 use bytemuck::{Pod, Zeroable};
 use solana_sdk::pubkey::Pubkey;
 use anyhow::{anyhow, bail, Result};
@@ -12,6 +12,7 @@ use spl_associated_token_account::get_associated_token_address; // Pour trouver 
 use spl_associated_token_account::get_associated_token_address_with_program_id;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
+use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 
 // --- CONSTANTES DU PROTOCOLE ---
 // Trouvées dans l'IDL
@@ -55,100 +56,6 @@ impl DecodedPumpAmmPool {
     /// Retourne le total des frais de pool en pourcentage.
     pub fn fee_as_percent(&self) -> f64 {
         (self.total_fee_basis_points as f64 / 10_000.0) * 100.0
-    }
-
-    pub fn create_swap_instruction(
-        &self,
-        input_token_mint: &Pubkey,
-        user_owner: &Pubkey,
-        amount_in: u64,
-        amount_out_from_quote: u64,
-    ) -> Result<Instruction> {
-        // ... (la logique des `instruction_data` et la dérivation des comptes est correcte et ne change pas) ...
-        let is_buy = *input_token_mint == self.mint_b;
-        let mut instruction_data = Vec::with_capacity(8 + 8 + 8);
-        if is_buy {
-            let discriminator: [u8; 8] = [102, 6, 61, 18, 1, 218, 235, 234];
-            instruction_data.extend_from_slice(&discriminator);
-            instruction_data.extend_from_slice(&amount_out_from_quote.to_le_bytes());
-            instruction_data.extend_from_slice(&amount_in.to_le_bytes());
-        } else {
-            let discriminator: [u8; 8] = [51, 230, 133, 164, 1, 127, 131, 173];
-            instruction_data.extend_from_slice(&discriminator);
-            instruction_data.extend_from_slice(&amount_in.to_le_bytes());
-            instruction_data.extend_from_slice(&amount_out_from_quote.to_le_bytes());
-        };
-        let (user_source_ata, user_destination_ata) = if is_buy {
-            (
-                get_associated_token_address_with_program_id(user_owner, &self.mint_b, &self.mint_b_program),
-                get_associated_token_address_with_program_id(user_owner, &self.mint_a, &self.mint_a_program),
-            )
-        } else {
-            (
-                get_associated_token_address_with_program_id(user_owner, &self.mint_a, &self.mint_a_program),
-                get_associated_token_address_with_program_id(user_owner, &self.mint_b, &self.mint_b_program),
-            )
-        };
-        let (global_config_address, _) = Pubkey::find_program_address(&[b"global_config"], &PUMP_PROGRAM_ID);
-        let (event_authority, _) = Pubkey::find_program_address(&[b"__event_authority"], &PUMP_PROGRAM_ID);
-        let protocol_fee_recipient = self.protocol_fee_recipients.iter().find(|&&key| key != Pubkey::default()).unwrap_or(&self.protocol_fee_recipients[0]);
-        let protocol_fee_recipient_token_account = get_associated_token_address_with_program_id(protocol_fee_recipient, &self.mint_b, &self.mint_b_program);
-        let (coin_creator_vault_authority, _) = Pubkey::find_program_address(&[b"creator_vault", self.coin_creator.as_ref()], &PUMP_PROGRAM_ID);
-        let coin_creator_vault_ata = get_associated_token_address_with_program_id(&coin_creator_vault_authority, &self.mint_b, &self.mint_b_program);
-        let (global_volume_accumulator, _) = Pubkey::find_program_address(&[b"global_volume_accumulator"], &PUMP_PROGRAM_ID);
-        let (user_volume_accumulator, _) = Pubkey::find_program_address(&[b"user_volume_accumulator", user_owner.as_ref()], &PUMP_PROGRAM_ID);
-
-        // --- CORRECTION FINALE : Réorganisation des comptes pour correspondre EXACTEMENT à l'ordre de la transaction de référence ---
-        let accounts = vec![
-            // #1 Pool
-            AccountMeta::new(self.address, false),
-            // #2 User
-            AccountMeta::new(*user_owner, true),
-            // #3 Global Config
-            AccountMeta::new_readonly(global_config_address, false),
-            // #4 Base Mint
-            AccountMeta::new_readonly(self.mint_a, false),
-            // #5 Quote Mint
-            AccountMeta::new_readonly(self.mint_b, false),
-            // #6 User Base Token Account (Source pour SELL, Dest pour BUY)
-            AccountMeta::new(if is_buy { user_destination_ata } else { user_source_ata }, false),
-            // #7 User Quote Token Account (Source pour BUY, Dest pour SELL)
-            AccountMeta::new(if is_buy { user_source_ata } else { user_destination_ata }, false),
-            // #8 Pool Base Token Account
-            AccountMeta::new(self.vault_a, false),
-            // #9 Pool Quote Token Account
-            AccountMeta::new(self.vault_b, false),
-            // #10 Protocol Fee Recipient
-            AccountMeta::new_readonly(*protocol_fee_recipient, false),
-            // #11 Protocol Fee Recipient Token Account
-            AccountMeta::new(protocol_fee_recipient_token_account, false),
-            // #12 Base Token Program
-            AccountMeta::new_readonly(self.mint_a_program, false),
-            // #13 Quote Token Program
-            AccountMeta::new_readonly(self.mint_b_program, false),
-            // #14 System Program
-            AccountMeta::new_readonly(system_program::id(), false),
-            // #15 Associated Token Program
-            AccountMeta::new_readonly(spl_associated_token_account::ID, false),
-            // #16 Event Authority
-            AccountMeta::new_readonly(event_authority, false),
-            // #17 Program
-            AccountMeta::new_readonly(PUMP_PROGRAM_ID, false),
-            // #18 Coin Creator Vault Ata
-            AccountMeta::new(coin_creator_vault_ata, false),
-            // #19 Coin Creator Vault Authority
-            AccountMeta::new_readonly(coin_creator_vault_authority, false),
-            // #20 Global Volume Accumulator
-            AccountMeta::new(global_volume_accumulator, false),
-            // #21 User Volume Accumulator
-            AccountMeta::new(user_volume_accumulator, false),
-        ];
-
-        Ok(Instruction {
-            program_id: PUMP_PROGRAM_ID,
-            accounts,
-            data: instruction_data,
-        })
     }
 
     pub fn create_init_user_volume_accumulator_instruction(
@@ -417,5 +324,77 @@ impl PoolOperations for DecodedPumpAmmPool {
     }
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
         self.get_quote(token_in_mint, amount_in, 0)
+    }
+    fn create_swap_instruction(
+        &self,
+        token_in_mint: &Pubkey,
+        amount_in: u64,
+        min_amount_out: u64,
+        user_accounts: &UserSwapAccounts,
+    ) -> Result<Instruction> {
+        let is_buy = *token_in_mint == self.mint_b;
+
+        // ... (la logique de `instruction_data` reste la même)
+        let mut instruction_data = Vec::with_capacity(8 + 8 + 8);
+        if is_buy {
+            let discriminator: [u8; 8] = [102, 6, 61, 18, 1, 218, 235, 234];
+            instruction_data.extend_from_slice(&discriminator);
+            instruction_data.extend_from_slice(&min_amount_out.to_le_bytes());
+            instruction_data.extend_from_slice(&amount_in.to_le_bytes());
+        } else {
+            let discriminator: [u8; 8] = [51, 230, 133, 164, 1, 127, 131, 173];
+            instruction_data.extend_from_slice(&discriminator);
+            instruction_data.extend_from_slice(&amount_in.to_le_bytes());
+            instruction_data.extend_from_slice(&min_amount_out.to_le_bytes());
+        };
+
+        // --- LA LOGIQUE AMÉLIORÉE ET PLUS CLAIRE ---
+        // On détermine explicitement quel est le compte de base et de quote
+        let (user_base_token_account, user_quote_token_account) = if is_buy {
+            (user_accounts.destination, user_accounts.source)
+        } else {
+            (user_accounts.source, user_accounts.destination)
+        };
+
+        // ... (la logique de dérivation des autres comptes reste la même)
+        let (global_config_address, _) = Pubkey::find_program_address(&[b"global_config"], &PUMP_PROGRAM_ID);
+        let (event_authority, _) = Pubkey::find_program_address(&[b"__event_authority"], &PUMP_PROGRAM_ID);
+        let protocol_fee_recipient = self.protocol_fee_recipients.iter().find(|&&key| key != Pubkey::default()).unwrap_or(&self.protocol_fee_recipients[0]);
+        let protocol_fee_recipient_token_account = get_associated_token_address_with_program_id(protocol_fee_recipient, &self.mint_b, &self.mint_b_program);
+        let (coin_creator_vault_authority, _) = Pubkey::find_program_address(&[b"creator_vault", self.coin_creator.as_ref()], &PUMP_PROGRAM_ID);
+        let coin_creator_vault_ata = get_associated_token_address_with_program_id(&coin_creator_vault_authority, &self.mint_b, &self.mint_b_program);
+        let (global_volume_accumulator, _) = Pubkey::find_program_address(&[b"global_volume_accumulator"], &PUMP_PROGRAM_ID);
+        let (user_volume_accumulator, _) = Pubkey::find_program_address(&[b"user_volume_accumulator", user_accounts.owner.as_ref()], &PUMP_PROGRAM_ID);
+
+        // On construit la liste des comptes dans l'ordre strict attendu par le programme
+        let accounts = vec![
+            AccountMeta::new(self.address, false),
+            AccountMeta::new(user_accounts.owner, true),
+            AccountMeta::new_readonly(global_config_address, false),
+            AccountMeta::new_readonly(self.mint_a, false),
+            AccountMeta::new_readonly(self.mint_b, false),
+            AccountMeta::new(user_base_token_account, false),  // <-- Compte #6 : Toujours le compte de base
+            AccountMeta::new(user_quote_token_account, false), // <-- Compte #7 : Toujours le compte de quote
+            AccountMeta::new(self.vault_a, false),
+            AccountMeta::new(self.vault_b, false),
+            AccountMeta::new_readonly(*protocol_fee_recipient, false),
+            AccountMeta::new(protocol_fee_recipient_token_account, false),
+            AccountMeta::new_readonly(self.mint_a_program, false),
+            AccountMeta::new_readonly(self.mint_b_program, false),
+            AccountMeta::new_readonly(system_program::id(), false),
+            AccountMeta::new_readonly(spl_associated_token_account::ID, false),
+            AccountMeta::new_readonly(event_authority, false),
+            AccountMeta::new_readonly(PUMP_PROGRAM_ID, false),
+            AccountMeta::new(coin_creator_vault_ata, false),
+            AccountMeta::new_readonly(coin_creator_vault_authority, false),
+            AccountMeta::new(global_volume_accumulator, false),
+            AccountMeta::new(user_volume_accumulator, false),
+        ];
+
+        Ok(Instruction {
+            program_id: PUMP_PROGRAM_ID,
+            accounts,
+            data: instruction_data,
+        })
     }
 }

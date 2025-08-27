@@ -2,7 +2,6 @@
 
 use crate::decoders::pool_operations::PoolOperations;
 use bytemuck::{from_bytes, Pod, Zeroable};
-use solana_sdk::pubkey::Pubkey;
 use anyhow::{bail, Result, anyhow};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use super::config;
@@ -10,7 +9,12 @@ use super::math;
 use crate::decoders::spl_token_decoders;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
-
+use crate::decoders::pool_operations::UserSwapAccounts;
+use solana_sdk::{
+    instruction::{AccountMeta, Instruction}, // <-- On importe les types ici
+    pubkey::Pubkey,
+};
+use std::str::FromStr;
 // --- STRUCTURES PUBLIQUES ---
 
 /// Énumère les types de courbes de prix possibles pour un pool Launchpad.
@@ -187,6 +191,40 @@ impl PoolOperations for DecodedLaunchpadPool {
     }
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
         self.get_quote(token_in_mint, amount_in, 0)
+    }
+    fn create_swap_instruction(
+        &self,
+        token_in_mint: &Pubkey,
+        amount_in: u64,
+        min_amount_out: u64,
+        user_accounts: &UserSwapAccounts,
+    ) -> Result<Instruction> {
+        // Discriminateur pour l'instruction `swap`
+        let instruction_discriminator: [u8; 8] = [142, 10, 203, 114, 153, 22, 166, 137];
+        let mut instruction_data = Vec::new();
+        instruction_data.extend_from_slice(&instruction_discriminator);
+        instruction_data.extend_from_slice(&amount_in.to_le_bytes());
+        instruction_data.extend_from_slice(&min_amount_out.to_le_bytes());
+
+        let (pool_authority, _) = Pubkey::find_program_address(&[b"amm_authority"], &self.address);
+
+        let accounts = vec![
+            AccountMeta::new_readonly(user_accounts.owner, true),
+            AccountMeta::new_readonly(self.global_config, false),
+            AccountMeta::new(self.address, false),
+            AccountMeta::new(user_accounts.source, false),
+            AccountMeta::new(user_accounts.destination, false),
+            AccountMeta::new(self.vault_a, false),
+            AccountMeta::new(self.vault_b, false),
+            AccountMeta::new_readonly(pool_authority, false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+        ];
+
+        Ok(Instruction {
+            program_id: Pubkey::from_str("LPadV31sBCi2t5tWvN2b7N66aYhM6fw21n5v9r2i").unwrap(),
+            accounts,
+            data: instruction_data,
+        })
     }
 }
 

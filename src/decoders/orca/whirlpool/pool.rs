@@ -1,6 +1,5 @@
 // DANS: src/decoders/orca_decoders/pool
 
-use crate::decoders::pool_operations::PoolOperations;
 use bytemuck::{Pod, Zeroable, from_bytes};
 use solana_sdk::pubkey::Pubkey;
 use anyhow::{anyhow, Result, bail};
@@ -16,6 +15,9 @@ use super::math::sqrt_price_to_tick_index;
 use tokio::runtime::Runtime;
 use crate::config::Config;
 use async_trait::async_trait;
+use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
+use solana_sdk::instruction::{Instruction, AccountMeta};
+use spl_associated_token_account::get_associated_token_address;
 
 // --- STRUCTURE DE TRAVAIL "PROPRE" (MODIFIÉE) ---
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,50 +206,7 @@ fn find_next_initialized_tick<'a>(
     None
 }
 
-fn calculate_swap(
-    pool: &DecodedWhirlpoolPool,
-    amount_in: u64,
-    a_to_b: bool,
-    tick_arrays: &BTreeMap<i32, tick_array::TickArrayData>,
-) -> Result<u64> {
-    let mut amount_remaining = amount_in as u128;
-    let mut total_amount_out: u128 = 0;
 
-    let mut current_liquidity = pool.liquidity;
-    let mut current_sqrt_price = pool.sqrt_price;
-    let mut current_tick_index = pool.tick_current_index;
-
-    while amount_remaining > 0 && current_liquidity > 0 {
-        let next_initialized_tick = find_next_initialized_tick(pool, current_tick_index, a_to_b, tick_arrays);
-
-        // CORRECTION E0609: On utilise l'index retourné pour calculer le sqrt_price
-        let sqrt_price_target = if let Some((tick_index, _)) = next_initialized_tick {
-            orca_whirlpool_math::tick_to_sqrt_price_x64(tick_index)
-        } else {
-            if a_to_b { 0 } else { u128::MAX }
-        };
-
-        let (amount_in_step, amount_out_step, next_sqrt_price) = orca_whirlpool_math::compute_swap_step(
-            amount_remaining, current_sqrt_price, sqrt_price_target, current_liquidity, a_to_b,
-        );
-
-        amount_remaining -= amount_in_step;
-        total_amount_out += amount_out_step;
-        current_sqrt_price = next_sqrt_price;
-
-        if current_sqrt_price == sqrt_price_target {
-            // CORRECTION E0609: On utilise les données du tick retourné
-            if let Some((tick_index, tick_data)) = next_initialized_tick {
-                current_liquidity = (current_liquidity as i128 + tick_data.liquidity_net) as u128;
-                current_tick_index = tick_index;
-            } else {
-                break;
-            }
-        }
-    }
-
-    Ok(total_amount_out as u64)
-}
 
 impl DecodedWhirlpoolPool {
     // Fonctions utilitaires
@@ -355,5 +314,75 @@ impl PoolOperations for DecodedWhirlpoolPool {
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, rpc_client: &RpcClient) -> Result<u64> {
         // On délègue simplement à la fonction que nous avons déjà écrite.
         self.get_quote_with_rpc(token_in_mint, amount_in, rpc_client).await
+    }
+
+    fn create_swap_instruction(
+        &self,
+        token_in_mint: &Pubkey,
+        amount_in: u64,
+        min_amount_out: u64,
+        user_accounts: &UserSwapAccounts,
+    ) -> Result<Instruction> {
+        let a_to_b = *token_in_mint == self.mint_a;
+
+        // --- Début de la logique de construction (tirée de votre test.rs) ---
+
+        // 1. Calculer les adresses des 3 tick_arrays
+        let ticks_in_array = (tick_array::TICK_ARRAY_SIZE as i32) * (self.tick_spacing as i32);
+        let current_array_start_index = tick_array::get_start_tick_index(self.tick_current_index, self.tick_spacing);
+
+        let tick_array_addresses: [Pubkey; 3] = if a_to_b {
+            [
+                tick_array::get_tick_array_address(&self.address, current_array_start_index, &self.program_id),
+                tick_array::get_tick_array_address(&self.address, current_array_start_index - ticks_in_array, &self.program_id),
+                tick_array::get_tick_array_address(&self.address, current_array_start_index - (2 * ticks_in_array), &self.program_id),
+            ]
+        } else {
+            [
+                tick_array::get_tick_array_address(&self.address, current_array_start_index, &self.program_id),
+                tick_array::get_tick_array_address(&self.address, current_array_start_index + ticks_in_array, &self.program_id),
+                tick_array::get_tick_array_address(&self.address, current_array_start_index + (2 * ticks_in_array), &self.program_id),
+            ]
+        };
+
+        // 2. Déterminer la limite de prix
+        let sqrt_price_limit: u128 = if a_to_b { 4295048016 } else { 79226673515401279992447579055 };
+
+        // 3. Construire les données de l'instruction
+        let swap_discriminator: [u8; 8] = [248, 198, 158, 145, 225, 117, 135, 200];
+        let mut instruction_data = Vec::new();
+        instruction_data.extend_from_slice(&swap_discriminator);
+        instruction_data.extend_from_slice(&amount_in.to_le_bytes());
+        instruction_data.extend_from_slice(&min_amount_out.to_le_bytes());
+        instruction_data.extend_from_slice(&sqrt_price_limit.to_le_bytes());
+        instruction_data.push(u8::from(true)); // amount_specified_is_input
+        instruction_data.push(u8::from(a_to_b));
+
+        // 4. Trouver le PDA de l'oracle
+        let (oracle_pda, _) = Pubkey::find_program_address(&[b"oracle", self.address.as_ref()], &self.program_id);
+
+        // 5. Construire la liste des comptes
+        let user_ata_for_token_a = get_associated_token_address(&user_accounts.owner, &self.mint_a);
+        let user_ata_for_token_b = get_associated_token_address(&user_accounts.owner, &self.mint_b);
+
+        let accounts = vec![
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(user_accounts.owner, true),
+            AccountMeta::new(self.address, false),
+            AccountMeta::new(user_ata_for_token_a, false),
+            AccountMeta::new(self.vault_a, false),
+            AccountMeta::new(user_ata_for_token_b, false),
+            AccountMeta::new(self.vault_b, false),
+            AccountMeta::new(tick_array_addresses[0], false),
+            AccountMeta::new(tick_array_addresses[1], false),
+            AccountMeta::new(tick_array_addresses[2], false),
+            AccountMeta::new_readonly(oracle_pda, false),
+        ];
+
+        Ok(Instruction {
+            program_id: self.program_id,
+            accounts,
+            data: instruction_data,
+        })
     }
 }

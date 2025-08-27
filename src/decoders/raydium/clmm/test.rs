@@ -14,6 +14,8 @@ use crate::decoders::raydium::clmm::{
     events::parse_swap_event_from_logs,
     tick_array,
 };
+use crate::decoders::PoolOperations;
+use crate::decoders::pool_operations::UserSwapAccounts;
 
 pub async fn test_clmm(rpc_client: &RpcClient, payer: &Keypair, current_timestamp: i64) -> Result<()> {
     const POOL_ADDRESS: &str = "YrrUStgPugDp8BbfosqDeFssen6sA75ZS1QJvgnHtmY";
@@ -41,47 +43,27 @@ pub async fn test_clmm(rpc_client: &RpcClient, payer: &Keypair, current_timestam
 
     println!("\n[2/3] Préparation de la simulation...");
 
-    // --- LA LOGIQUE DE TICK_ARRAY CORRECTE ET DYNAMIQUE (selon les logs d'erreur) ---
-    let is_base_input = input_mint_pubkey == pool.mint_a;
-    let ticks_in_array = (tick_array::TICK_ARRAY_SIZE as i32) * (pool.tick_spacing as i32);
-
-    // 1. Obtenir tous les index des TickArrays initialisés que nous avons hydratés.
-    let mut initialized_indices: Vec<i32> = pool.tick_arrays.as_ref().unwrap().keys().cloned().collect();
-    initialized_indices.sort(); // S'assurer qu'ils sont triés
-
-    // 2. Trouver le premier TickArray initialisé dans la direction du swap, COMME LE DEMANDE LE LOG D'ERREUR.
-    let first_array_start_index = if is_base_input {
-        // Le prix baisse, on cherche le plus grand index <= au tick actuel.
-        *initialized_indices.iter().rev().find(|&&i| i <= pool.tick_current).unwrap_or(&pool.tick_current)
-    } else {
-        // Le prix monte, on cherche le plus petit index >= au tick actuel.
-        *initialized_indices.iter().find(|&&i| i >= pool.tick_current).unwrap_or(&pool.tick_current)
-    };
-
-    // 3. Construire la liste des 3 TickArrays attendus à partir de ce point de départ.
-    let final_tick_arrays: Vec<Pubkey> = if is_base_input {
-        vec![
-            first_array_start_index,
-            first_array_start_index - ticks_in_array,
-            first_array_start_index - (2 * ticks_in_array),
-        ]
-    } else {
-        vec![
-            first_array_start_index,
-            first_array_start_index + ticks_in_array,
-            first_array_start_index + (2 * ticks_in_array),
-        ]
-    }.into_iter().map(|index| {
-        tick_array::get_tick_array_address(&pool.address, index, &pool.program_id)
-    }).collect();
-    // --- FIN DE LA LOGIQUE CORRECTE ---
 
     let user_source_ata = get_associated_token_address(&payer.pubkey(), &input_mint_pubkey);
-    let user_destination_ata = spl_associated_token_account::get_associated_token_address_with_program_id(&payer.pubkey(), &output_mint_pubkey, &spl_token_2022::id());
+    let user_destination_ata = spl_associated_token_account::get_associated_token_address_with_program_id(
+        &payer.pubkey(),
+        &output_mint_pubkey,
+        &spl_token_2022::id()
+    );
 
+    // On regroupe les comptes utilisateur dans la struct unifiée
+    let user_accounts = UserSwapAccounts {
+        owner: payer.pubkey(),
+        source: user_source_ata,
+        destination: user_destination_ata,
+    };
+
+    // L'appel devient simple et cohérent avec les autres décodeurs
     let swap_ix = pool.create_swap_instruction(
-        &input_mint_pubkey, &user_source_ata, &user_destination_ata, &payer.pubkey(),
-        amount_in_base_units, 0, final_tick_arrays,
+        &input_mint_pubkey,
+        amount_in_base_units,
+        0, // min_amount_out
+        &user_accounts,
     )?;
 
     let mut transaction = Transaction::new_with_payer(&[swap_ix], Some(&payer.pubkey()));
@@ -97,6 +79,8 @@ pub async fn test_clmm(rpc_client: &RpcClient, payer: &Keypair, current_timestam
 
     println!("✅✅✅ VICTOIRE ! La simulation a réussi !");
     println!("Maintenant, vérifions le résultat...");
+
+    let is_base_input = input_mint_pubkey == pool.mint_a;
 
     let simulated_amount_out = match sim_result.logs {
         Some(logs) => parse_swap_event_from_logs(&logs, is_base_input).ok_or_else(|| {

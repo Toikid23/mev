@@ -7,6 +7,8 @@ use solana_sdk::{
     transaction::Transaction,
 };
 use std::str::FromStr;
+use crate::decoders::pool_operations::UserSwapAccounts;
+use spl_associated_token_account::get_associated_token_address_with_program_id;
 
 // --- Imports depuis notre propre crate ---
 use crate::decoders::PoolOperations; // <-- NÉCESSAIRE pour pool.get_quote()
@@ -45,11 +47,20 @@ pub async fn test_amm_with_simulation(rpc_client: &RpcClient, payer_keypair: &Ke
 
     // --- 2. Préparation de la Transaction Simple ---
     println!("\n[2/3] Préparation de la transaction d'ACHAT simple...");
+
+    // On regroupe les comptes utilisateur dans la struct unifiée
+    let user_accounts = UserSwapAccounts {
+        owner: payer_keypair.pubkey(),
+        source: get_associated_token_address_with_program_id(&payer_keypair.pubkey(), &pool.mint_b, &pool.mint_b_program),
+        destination: get_associated_token_address_with_program_id(&payer_keypair.pubkey(), &pool.mint_a, &pool.mint_a_program),
+    };
+
+    // On appelle la nouvelle fonction unifiée
     let swap_ix = pool.create_swap_instruction(
-        &input_mint_pubkey,         // Le token d'entrée (SOL)
-        &payer_keypair.pubkey(),
-        amount_in_base_units,       // Le montant de SOL à dépenser
-        predicted_amount_out,       // Le montant de TADC qu'on s'attend à recevoir
+        &input_mint_pubkey,     // Le token d'entrée (SOL)
+        amount_in_base_units,   // Le montant de SOL à dépenser
+        predicted_amount_out,   // Le minimum de TADC attendu
+        &user_accounts,
     )?;
 
     // La transaction ne contient qu'une seule instruction : le swap.

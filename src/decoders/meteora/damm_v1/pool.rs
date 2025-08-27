@@ -1,5 +1,4 @@
 
-use crate::decoders::pool_operations::PoolOperations;
 use super::math;
 use bytemuck::{pod_read_unaligned, Pod, Zeroable};
 use solana_client::nonblocking::rpc_client::RpcClient;
@@ -10,6 +9,7 @@ use anyhow::{anyhow, bail, Result};
 use solana_sdk::instruction::{Instruction, AccountMeta};
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
+use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 
 
 
@@ -381,29 +381,18 @@ impl PoolOperations for DecodedMeteoraSbpPool {
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
         self.get_quote(token_in_mint, amount_in, 0)
     }
-}
-
-impl DecodedMeteoraSbpPool {
-    pub fn fee_as_percent(&self) -> f64 {
-        if self.fees.trade_fee_denominator == 0 { return 0.0; }
-        (self.fees.trade_fee_numerator as f64 * 100.0) / self.fees.trade_fee_denominator as f64
-    }
-
-    pub fn create_swap_instruction(
+    fn create_swap_instruction(
         &self,
         token_in_mint: &Pubkey,
-        user_source_token_account: &Pubkey,
-        user_destination_token_account: &Pubkey,
-        user_owner: &Pubkey,
-        in_amount: u64,
-        minimum_out_amount: u64,
+        amount_in: u64,
+        min_amount_out: u64,
+        user_accounts: &UserSwapAccounts,
     ) -> Result<Instruction> {
         let instruction_discriminator: [u8; 8] = [248, 198, 158, 145, 225, 117, 135, 200];
-
         let mut instruction_data = Vec::with_capacity(8 + 8 + 8);
         instruction_data.extend_from_slice(&instruction_discriminator);
-        instruction_data.extend_from_slice(&in_amount.to_le_bytes());
-        instruction_data.extend_from_slice(&minimum_out_amount.to_le_bytes());
+        instruction_data.extend_from_slice(&amount_in.to_le_bytes());
+        instruction_data.extend_from_slice(&min_amount_out.to_le_bytes());
 
         let protocol_fee = if *token_in_mint == self.mint_a {
             Pubkey::find_program_address(&[b"fee", self.mint_a.as_ref(), self.address.as_ref()], &PROGRAM_ID).0
@@ -413,8 +402,8 @@ impl DecodedMeteoraSbpPool {
 
         let mut accounts = vec![
             AccountMeta::new(self.address, false),
-            AccountMeta::new(*user_source_token_account, false),
-            AccountMeta::new(*user_destination_token_account, false),
+            AccountMeta::new(user_accounts.source, false),
+            AccountMeta::new(user_accounts.destination, false),
             AccountMeta::new(self.vault_a, false),
             AccountMeta::new(self.vault_b, false),
             AccountMeta::new(self.a_token_vault, false),
@@ -424,15 +413,12 @@ impl DecodedMeteoraSbpPool {
             AccountMeta::new(self.a_vault_lp, false),
             AccountMeta::new(self.b_vault_lp, false),
             AccountMeta::new(protocol_fee, false),
-            AccountMeta::new_readonly(*user_owner, true),
+            AccountMeta::new_readonly(user_accounts.owner, true),
             AccountMeta::new_readonly(VAULT_PROGRAM_ID, false),
             AccountMeta::new_readonly(spl_token::id(), false),
         ];
 
-        // --- LOGIQUE COMPLÈTE POUR LES COMPTES RESTANTS ---
         if let MeteoraCurveType::Stable {..} = self.curve_type {
-            // D'après le SDK, pour un pool de type "splStake", il faut passer le compte `stake`.
-            // Votre screenshot confirme que c'est le cas pour votre pool.
             if self.stake != Pubkey::default() {
                 accounts.push(AccountMeta::new_readonly(self.stake, false));
             }
@@ -443,5 +429,12 @@ impl DecodedMeteoraSbpPool {
             accounts,
             data: instruction_data,
         })
+    }
+}
+
+impl DecodedMeteoraSbpPool {
+    pub fn fee_as_percent(&self) -> f64 {
+        if self.fees.trade_fee_denominator == 0 { return 0.0; }
+        (self.fees.trade_fee_numerator as f64 * 100.0) / self.fees.trade_fee_denominator as f64
     }
 }

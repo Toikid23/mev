@@ -5,6 +5,8 @@ use anyhow::Result;
 use serde::{Serialize, Deserialize};
 use solana_client::nonblocking::rpc_client::RpcClient; // <-- AJOUTER
 use async_trait::async_trait;
+use solana_sdk::instruction::Instruction;
+
 
 // --- 1. Déclarer tous nos modules principaux ---
 pub mod pool_operations;
@@ -118,6 +120,29 @@ impl PoolOperations for Pool {
 
             // Pour les pools simples, on appelle simplement leur version synchrone
             _ => self.get_quote(token_in_mint, amount_in, 0),
+        }
+    }
+
+    fn create_swap_instruction(
+        &self,
+        token_in_mint: &Pubkey,
+        amount_in: u64,
+        min_amount_out: u64,
+        user_accounts: &pool_operations::UserSwapAccounts, // Utiliser le chemin complet pour éviter l'ambiguïté
+    ) -> Result<Instruction> {
+        match self {
+            Pool::RaydiumAmmV4(p) => p.create_swap_instruction(token_in_mint, amount_in, min_amount_out, user_accounts),
+            Pool::RaydiumCpmm(p) => p.create_swap_instruction(token_in_mint, amount_in, min_amount_out, user_accounts),
+            Pool::RaydiumClmm(p) => p.create_swap_instruction(token_in_mint, amount_in, min_amount_out, user_accounts),
+            Pool::RaydiumStableSwap(p) => p.create_swap_instruction(token_in_mint, amount_in, min_amount_out, user_accounts),
+            Pool::RaydiumLaunchpad(p) => p.create_swap_instruction(token_in_mint, amount_in, min_amount_out, user_accounts),
+            Pool::MeteoraDammV1(p) => p.create_swap_instruction(token_in_mint, amount_in, min_amount_out, user_accounts),
+            Pool::MeteoraDammV2(p) => p.create_swap_instruction(token_in_mint, amount_in, min_amount_out, user_accounts),
+            Pool::MeteoraDlmm(p) => p.create_swap_instruction(token_in_mint, amount_in, min_amount_out, user_accounts),
+            Pool::OrcaWhirlpool(p) => p.create_swap_instruction(token_in_mint, amount_in, min_amount_out, user_accounts),
+            Pool::OrcaAmmV2(p) => p.create_swap_instruction(token_in_mint, amount_in, min_amount_out, user_accounts),
+            Pool::OrcaAmmV1(p) => p.create_swap_instruction(token_in_mint, amount_in, min_amount_out, user_accounts),
+            Pool::PumpAmm(p) => p.create_swap_instruction(token_in_mint, amount_in, min_amount_out, user_accounts),
         }
     }
 }

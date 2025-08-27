@@ -1,46 +1,26 @@
-use anyhow::Result;
+// Fichier : src/decoders/orca/amm_v2/test.rs (Version Complète)
+
+use anyhow::{bail, Result};
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_sdk::pubkey::Pubkey;
-use std::str::FromStr;
-
-// --- Imports depuis notre propre crate ---
-use crate::decoders::PoolOperations;
-use crate::decoders::orca::amm_v2::{
-    decode_pool,
-    hydrate,
+use solana_sdk::{
+    pubkey::Pubkey,
+    signature::Keypair,
+    signer::Signer,
+    transaction::Transaction,
 };
+use std::str::FromStr;
+use spl_associated_token_account::get_associated_token_address;
 
-// --- Fonction utilitaire de test (copiée depuis dev_runner.rs) ---
-fn print_quote_result<T: PoolOperations + ?Sized>(
-    pool: &T,
-    token_in_mint: &Pubkey,
-    in_decimals: u8,
-    out_decimals: u8,
-    amount_in: u64,
-    current_timestamp: i64
-) -> Result<()> {
-    match pool.get_quote(token_in_mint, amount_in, current_timestamp) {
-        Ok(amount_out) => {
-            let ui_amount_in = amount_in as f64 / 10f64.powi(in_decimals as i32);
-            let ui_amount_out = amount_out as f64 / 10f64.powi(out_decimals as i32);
-            let price = if ui_amount_in > 0.0 { ui_amount_out / ui_amount_in } else { 0.0 };
-            println!("-> Succès ! Pour {} UI du token d'entrée, vous obtenez {} UI du token de sortie.", ui_amount_in, ui_amount_out);
-            println!("   Token d'entrée: {}", token_in_mint);
-            println!("-> Prix effectif: {:.9}", price);
-        },
-        Err(e) => {
-            println!("!! Erreur lors du calcul du quote: {}", e);
-            return Err(e.into());
-        },
-    }
-    Ok(())
-}
+// Imports nécessaires pour le test
+use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
+use crate::decoders::orca::amm_v2::{decode_pool, hydrate};
 
+// --- Supprimer l'ancienne fonction print_quote_result ---
 
-// --- Votre fonction de test (rendue publique) ---
-pub async fn test_orca_amm_v2(rpc_client: &RpcClient, current_timestamp: i64) -> Result<()> {
+// --- Remplacer toute la fonction de test ---
+pub async fn test_orca_amm_v2(rpc_client: &RpcClient, payer: &Keypair, current_timestamp: i64) -> Result<()> {
     const POOL_ADDRESS: &str = "EGZ7tiLeH62TPV1gL8WwbXGzEPa9zmcpVnnkPKKnrE2U"; // SOL/USDC
-    println!("\n--- Test Orca AMM V2 ({}) ---", POOL_ADDRESS);
+    println!("\n--- Test et Simulation Orca AMM V2 ({}) ---", POOL_ADDRESS);
 
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
 
@@ -50,21 +30,30 @@ pub async fn test_orca_amm_v2(rpc_client: &RpcClient, current_timestamp: i64) ->
 
     println!("[1/2] Hydratation...");
     hydrate(&mut pool, rpc_client).await?;
-    println!("-> Hydratation terminée. Frais: {:.4}%.", pool.fee_as_percent());
-    println!("   -> Réserve A ({}): {} (décimales: {})", pool.mint_a, pool.reserve_a, pool.mint_a_decimals);
-    println!("   -> Réserve B ({}): {} (décimales: {})", pool.mint_b, pool.reserve_b, pool.mint_b_decimals);
 
-    let amount_in_sol = 1_000_000_000;
-    println!("\n[2/2] Calcul pour VENDRE 1 SOL...");
+    let amount_in_sol = 1_000_000_000; // 1 SOL
+    let input_mint = pool.mint_a;
 
-    print_quote_result(
-        &pool,
-        &pool.mint_a,
-        pool.mint_a_decimals,
-        pool.mint_b_decimals,
-        amount_in_sol,
-        current_timestamp
-    )?;
+    println!("\n[2/2] Préparation et simulation pour VENDRE 1 SOL...");
 
+    let user_accounts = UserSwapAccounts {
+        owner: payer.pubkey(),
+        source: get_associated_token_address(&payer.pubkey(), &pool.mint_a),
+        destination: get_associated_token_address(&payer.pubkey(), &pool.mint_b),
+    };
+
+    let swap_ix = pool.create_swap_instruction(&input_mint, amount_in_sol, 0, &user_accounts)?;
+
+    let transaction = Transaction::new_signed_with_payer(
+        &[swap_ix], Some(&payer.pubkey()), &[payer], rpc_client.get_latest_blockhash().await?,
+    );
+
+    let sim_result = rpc_client.simulate_transaction(&transaction).await?;
+
+    if let Some(err) = sim_result.value.err {
+        bail!("La simulation a échoué: {:?}\nLogs: {:?}", err, sim_result.value.logs);
+    }
+
+    println!("✅ SUCCÈS ! La simulation de swap Orca AMM V2 a réussi.");
     Ok(())
 }

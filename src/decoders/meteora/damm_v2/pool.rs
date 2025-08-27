@@ -1,7 +1,4 @@
-// DANS: src/decoders/meteora_decoders/pool
-// VERSION FINALE, CORRIGÉE ET FIDÈLE AU SDK (AVEC GESTION TOKEN-2022)
 
-use crate::decoders::pool_operations::PoolOperations;
 use crate::decoders::spl_token_decoders;
 use anyhow::{anyhow, bail, Result};
 use bytemuck::{Pod, Zeroable};
@@ -13,6 +10,8 @@ use solana_sdk::instruction::{Instruction, AccountMeta};
 use spl_token; // Pour la valeur par défaut
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
+use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
+use spl_associated_token_account::get_associated_token_address_with_program_id;
 
 
 
@@ -53,57 +52,6 @@ impl DecodedMeteoraDammPool {
         let base_fee = self.pool_fees.base_fee.cliff_fee_numerator;
         if base_fee == 0 { return 0.0; }
         (base_fee as f64 / 1_000_000_000.0) * 100.0
-    }
-
-    // --- NOUVELLE FONCTION create_swap_instruction (PLUS ROBUSTE) ---
-    pub fn create_swap_instruction(
-        &self,
-        user_owner: &Pubkey,
-        user_source_token_account: &Pubkey,
-        user_destination_token_account: &Pubkey,
-        input_token_mint: &Pubkey, // On se base sur le mint d'entrée
-        amount_in: u64,
-        minimum_amount_out: u64,
-    ) -> Result<Instruction> {
-        let instruction_discriminator: [u8; 8] = [248, 198, 158, 145, 225, 117, 135, 200];
-
-        let mut instruction_data = Vec::with_capacity(8 + 8 + 8);
-        instruction_data.extend_from_slice(&instruction_discriminator);
-        instruction_data.extend_from_slice(&amount_in.to_le_bytes());
-        instruction_data.extend_from_slice(&minimum_amount_out.to_le_bytes());
-
-        let (pool_authority, _) = Pubkey::find_program_address(&[b"pool_authority"], &PROGRAM_ID);
-        let (event_authority, _) = Pubkey::find_program_address(&[b"__event_authority"], &PROGRAM_ID);
-
-        // La direction est déterminée par le MINT, pas par l'adresse de l'ATA.
-        let (input_token_program, output_token_program) = if *input_token_mint == self.mint_a {
-            (self.mint_a_program, self.mint_b_program)
-        } else {
-            (self.mint_b_program, self.mint_a_program)
-        };
-
-        let accounts = vec![
-            AccountMeta::new_readonly(pool_authority, false),
-            AccountMeta::new(self.address, false),
-            AccountMeta::new(*user_source_token_account, false),
-            AccountMeta::new(*user_destination_token_account, false),
-            AccountMeta::new(self.vault_a, false),
-            AccountMeta::new(self.vault_b, false),
-            AccountMeta::new_readonly(self.mint_a, false),
-            AccountMeta::new_readonly(self.mint_b, false),
-            AccountMeta::new_readonly(*user_owner, true),
-            AccountMeta::new_readonly(input_token_program, false),
-            AccountMeta::new_readonly(output_token_program, false),
-            AccountMeta::new_readonly(PROGRAM_ID, false), // referral_token_account (optionnel)
-            AccountMeta::new_readonly(event_authority, false),
-            AccountMeta::new_readonly(PROGRAM_ID, false), // program
-        ];
-
-        Ok(Instruction {
-            program_id: PROGRAM_ID,
-            accounts,
-            data: instruction_data,
-        })
     }
 }
 
@@ -241,7 +189,55 @@ impl PoolOperations for DecodedMeteoraDammPool {
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
         self.get_quote(token_in_mint, amount_in, 0)
     }
+
+    fn create_swap_instruction(
+        &self,
+        token_in_mint: &Pubkey,
+        amount_in: u64,
+        min_amount_out: u64,
+        user_accounts: &UserSwapAccounts,
+    ) -> Result<Instruction> {
+        let instruction_discriminator: [u8; 8] = [248, 198, 158, 145, 225, 117, 135, 200];
+        let mut instruction_data = Vec::with_capacity(8 + 8 + 8);
+        instruction_data.extend_from_slice(&instruction_discriminator);
+        instruction_data.extend_from_slice(&amount_in.to_le_bytes());
+        instruction_data.extend_from_slice(&min_amount_out.to_le_bytes());
+
+        let (pool_authority, _) = Pubkey::find_program_address(&[b"pool_authority"], &PROGRAM_ID);
+        let (event_authority, _) = Pubkey::find_program_address(&[b"__event_authority"], &PROGRAM_ID);
+
+        let (input_token_program, output_token_program) = if *token_in_mint == self.mint_a {
+            (self.mint_a_program, self.mint_b_program)
+        } else {
+            (self.mint_b_program, self.mint_a_program)
+        };
+
+        let accounts = vec![
+            AccountMeta::new_readonly(pool_authority, false),
+            AccountMeta::new(self.address, false),
+            AccountMeta::new(user_accounts.source, false),
+            AccountMeta::new(user_accounts.destination, false),
+            AccountMeta::new(self.vault_a, false),
+            AccountMeta::new(self.vault_b, false),
+            AccountMeta::new_readonly(self.mint_a, false),
+            AccountMeta::new_readonly(self.mint_b, false),
+            AccountMeta::new_readonly(user_accounts.owner, true),
+            AccountMeta::new_readonly(input_token_program, false),
+            AccountMeta::new_readonly(output_token_program, false),
+            AccountMeta::new_readonly(PROGRAM_ID, false), // referral_token_account
+            AccountMeta::new_readonly(event_authority, false),
+            AccountMeta::new_readonly(PROGRAM_ID, false),
+        ];
+
+        Ok(Instruction {
+            program_id: PROGRAM_ID,
+            accounts,
+            data: instruction_data,
+        })
+    }
 }
+
+
 fn get_base_fee(base_fee: &onchain_layouts::BaseFeeStruct, current_timestamp: i64, activation_point: u64) -> Result<u64> {
     if base_fee.period_frequency == 0 { return Ok(base_fee.cliff_fee_numerator); }
     let current_timestamp_u64 = u64::try_from(current_timestamp).unwrap_or(0);

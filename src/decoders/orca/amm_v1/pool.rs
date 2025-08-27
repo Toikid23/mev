@@ -1,6 +1,5 @@
 // DANS: src/decoders/orca_decoders/pool
 
-use crate::decoders::pool_operations::PoolOperations;
 use crate::decoders::spl_token_decoders;
 use anyhow::{anyhow, bail, Result};
 use bytemuck::{from_bytes, Pod, Zeroable};
@@ -9,6 +8,9 @@ use solana_sdk::pubkey::Pubkey;
 use std::mem;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
+use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
+use solana_sdk::instruction::{AccountMeta, Instruction};
+use std::str::FromStr;
 
 // NOTE: Cette structure est intentionnellement quasi-identique à celle de la V2,
 // car les layouts on-chain sont compatibles.
@@ -151,5 +153,43 @@ impl PoolOperations for DecodedOrcaAmmV1Pool {
     }
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
         self.get_quote(token_in_mint, amount_in, 0)
+    }
+    fn create_swap_instruction(
+        &self,
+        _token_in_mint: &Pubkey, // Le programme Orca ne se base pas sur le mint mais sur les comptes
+        amount_in: u64,
+        min_amount_out: u64,
+        user_accounts: &UserSwapAccounts,
+    ) -> Result<Instruction> {
+        // Discriminateur pour l'instruction `swap` (valeur de 1)
+        let mut instruction_data = vec![1];
+        instruction_data.extend_from_slice(&amount_in.to_le_bytes());
+        instruction_data.extend_from_slice(&min_amount_out.to_le_bytes());
+
+        let (pool_authority, _) = Pubkey::find_program_address(
+            &[&self.address.to_bytes()],
+            &Pubkey::from_str("9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP").unwrap(), // Programme Token Swap V1
+        );
+
+        // Le programme Orca AMM V1/V2 utilise le programme Token Swap sous-jacent.
+        // La structure des comptes est donc définie par ce programme.
+        let accounts = vec![
+            AccountMeta::new_readonly(self.address, false),
+            AccountMeta::new_readonly(pool_authority, false),
+            AccountMeta::new_readonly(user_accounts.owner, true),
+            AccountMeta::new(user_accounts.source, false),
+            AccountMeta::new(user_accounts.destination, false),
+            AccountMeta::new(self.vault_a, false),
+            AccountMeta::new(self.vault_b, false),
+            AccountMeta::new(Pubkey::from_str("3wVrtQZ4C4H4D2E2zwy622m5Kjw3z1h76hA6F2SCL2sE").unwrap(), false), // Pool Mint (statique pour ce pool)
+            AccountMeta::new(Pubkey::from_str("54q2ctpQ35a93r5wsd4p5a7Yw5f2s4ZifbUTk2MCR2Gq").unwrap(), false), // Fee Account (statique pour ce pool)
+            AccountMeta::new_readonly(spl_token::id(), false),
+        ];
+
+        Ok(Instruction {
+            program_id: Pubkey::from_str("9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP").unwrap(), // Programme Token Swap V1
+            accounts,
+            data: instruction_data,
+        })
     }
 }

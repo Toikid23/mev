@@ -140,76 +140,6 @@ impl DecodedClmmPool {
         }
         result
     }
-
-    pub fn create_swap_instruction(
-        &self,
-        input_token_mint: &Pubkey,
-        user_source_token_account: &Pubkey,
-        user_destination_token_account: &Pubkey,
-        user_owner: &Pubkey,
-        amount_in: u64,
-        minimum_amount_out: u64,
-        // La fonction attend une liste de 3 tick_arrays
-        tick_arrays: Vec<Pubkey>,
-    ) -> Result<Instruction> {
-        if tick_arrays.len() != 3 {
-            bail!("L'instruction de swap CLMM de Raydium requiert exactement 3 comptes de tick_array.");
-        }
-
-        let is_base_input = *input_token_mint == self.mint_a;
-
-        let sqrt_price_limit = if is_base_input {
-            4295128739_u128 // MIN_SQRT_PRICE_X64 + 1
-        } else {
-            79226673515401279992447579055_u128 // MAX_SQRT_PRICE_X64 - 1
-        };
-
-        let mut instruction_data: Vec<u8> = vec![43, 4, 237, 11, 26, 201, 30, 98]; // Discriminator `swap_v2`
-        instruction_data.extend_from_slice(&amount_in.to_le_bytes());
-        instruction_data.extend_from_slice(&minimum_amount_out.to_le_bytes());
-        instruction_data.extend_from_slice(&sqrt_price_limit.to_le_bytes());
-        instruction_data.push(u8::from(is_base_input));
-
-        let (input_vault, output_vault, input_vault_mint, output_vault_mint) = if is_base_input {
-            (self.vault_a, self.vault_b, self.mint_a, self.mint_b)
-        } else {
-            (self.vault_b, self.vault_a, self.mint_b, self.mint_a)
-        };
-
-        // --- LA STRUCTURE FINALE ET CORRECTE ---
-        let mut accounts = vec![
-            // 1. Les 13 comptes principaux de l'IDL
-            AccountMeta { pubkey: *user_owner, is_signer: true, is_writable: false },
-            AccountMeta { pubkey: self.amm_config, is_signer: false, is_writable: false },
-            AccountMeta { pubkey: self.address, is_signer: false, is_writable: true },
-            AccountMeta { pubkey: *user_source_token_account, is_signer: false, is_writable: true },
-            AccountMeta { pubkey: *user_destination_token_account, is_signer: false, is_writable: true },
-            AccountMeta { pubkey: input_vault, is_signer: false, is_writable: true },
-            AccountMeta { pubkey: output_vault, is_signer: false, is_writable: true },
-            AccountMeta { pubkey: self.observation_key, is_signer: false, is_writable: true },
-            AccountMeta { pubkey: spl_token::id(), is_signer: false, is_writable: false },
-            AccountMeta { pubkey: spl_token_2022::id(), is_signer: false, is_writable: false },
-            AccountMeta { pubkey: spl_memo::id(), is_signer: false, is_writable: false },
-            AccountMeta { pubkey: input_vault_mint, is_signer: false, is_writable: false },
-            AccountMeta { pubkey: output_vault_mint, is_signer: false, is_writable: false },
-        ];
-
-        // 2. Le compte d'extension du bitmap, qui doit être `writable`.
-        let tick_array_bitmap_extension = tickarray_bitmap_extension::get_bitmap_extension_address(&self.address, &self.program_id);
-        accounts.push(AccountMeta { pubkey: tick_array_bitmap_extension, is_signer: false, is_writable: true });
-
-        // 3. Les 3 comptes de TickArray, tous `writable`.
-        for key in tick_arrays {
-            accounts.push(AccountMeta { pubkey: key, is_signer: false, is_writable: true });
-        }
-        // --- FIN DE LA STRUCTURE CORRECTE ---
-
-        Ok(solana_sdk::instruction::Instruction {
-            program_id: self.program_id,
-            accounts,
-            data: instruction_data,
-        })
-    }
 }
 
 #[repr(C, packed)]
@@ -470,6 +400,75 @@ impl PoolOperations for DecodedClmmPool {
     }
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
         self.get_quote(token_in_mint, amount_in, 0)
+    }
+
+    fn create_swap_instruction(
+        &self,
+        token_in_mint: &Pubkey,
+        amount_in: u64,
+        min_amount_out: u64, // Renommé pour correspondre au trait
+        user_accounts: &UserSwapAccounts,
+    ) -> Result<Instruction> {
+
+        // Étape 1 : Calculer les tick_arrays requis en interne (logique prise de votre test)
+        let is_base_input = *token_in_mint == self.mint_a;
+        let mut tick_arrays = self.get_next_initialized_tick_arrays(is_base_input, 3);
+        if tick_arrays.is_empty() {
+            bail!("Impossible de trouver des tick_arrays initialisés pour le swap CLMM.");
+        }
+        while tick_arrays.len() < 3 {
+            tick_arrays.push(*tick_arrays.last().unwrap());
+        }
+
+        // --- DÉBUT DE VOTRE CODE ORIGINAL, LÉGÈREMENT ADAPTÉ ---
+        let sqrt_price_limit = if is_base_input {
+            4295128739_u128 // MIN_SQRT_PRICE_X64 + 1
+        } else {
+            79226673515401279992447579055_u128 // MAX_SQRT_PRICE_X64 - 1
+        };
+
+        let mut instruction_data: Vec<u8> = vec![43, 4, 237, 11, 26, 201, 30, 98]; // Discriminator `swap_v2`
+        instruction_data.extend_from_slice(&amount_in.to_le_bytes());
+        instruction_data.extend_from_slice(&min_amount_out.to_le_bytes()); // Utilise le nouvel argument
+        instruction_data.extend_from_slice(&sqrt_price_limit.to_le_bytes());
+        instruction_data.push(u8::from(is_base_input));
+
+        let (input_vault, output_vault, input_vault_mint, output_vault_mint) = if is_base_input {
+            (self.vault_a, self.vault_b, self.mint_a, self.mint_b)
+        } else {
+            (self.vault_b, self.vault_a, self.mint_b, self.mint_a)
+        };
+
+        let mut accounts = vec![
+            // On utilise les champs de `user_accounts` pour remplacer les anciens arguments
+            AccountMeta { pubkey: user_accounts.owner, is_signer: true, is_writable: false },
+            AccountMeta { pubkey: self.amm_config, is_signer: false, is_writable: false },
+            AccountMeta { pubkey: self.address, is_signer: false, is_writable: true },
+            AccountMeta { pubkey: user_accounts.source, is_signer: false, is_writable: true },
+            AccountMeta { pubkey: user_accounts.destination, is_signer: false, is_writable: true },
+            AccountMeta { pubkey: input_vault, is_signer: false, is_writable: true },
+            AccountMeta { pubkey: output_vault, is_signer: false, is_writable: true },
+            AccountMeta { pubkey: self.observation_key, is_signer: false, is_writable: true },
+            AccountMeta { pubkey: spl_token::id(), is_signer: false, is_writable: false },
+            AccountMeta { pubkey: spl_token_2022::id(), is_signer: false, is_writable: false },
+            AccountMeta { pubkey: spl_memo::id(), is_signer: false, is_writable: false },
+            AccountMeta { pubkey: input_vault_mint, is_signer: false, is_writable: false },
+            AccountMeta { pubkey: output_vault_mint, is_signer: false, is_writable: false },
+        ];
+
+        let tick_array_bitmap_extension = tickarray_bitmap_extension::get_bitmap_extension_address(&self.address, &self.program_id);
+        accounts.push(AccountMeta { pubkey: tick_array_bitmap_extension, is_signer: false, is_writable: true });
+
+        // On utilise le vecteur `tick_arrays` qu'on a calculé au début de la fonction
+        for key in tick_arrays {
+            accounts.push(AccountMeta { pubkey: key, is_signer: false, is_writable: true });
+        }
+
+        Ok(Instruction {
+            program_id: self.program_id,
+            accounts,
+            data: instruction_data,
+        })
     }
 }
 

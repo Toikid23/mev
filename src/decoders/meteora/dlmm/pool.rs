@@ -1,7 +1,4 @@
-// DANS : src/decoders/meteora_decoders/pool
-// VERSION FINALE CORRIGÉE (avec les warnings en moins)
 
-use crate::decoders::pool_operations::PoolOperations;
 use crate::decoders::spl_token_decoders;
 use super::math::{self, FEE_PRECISION};
 use anyhow::{anyhow, bail, Result};
@@ -16,6 +13,7 @@ use spl_associated_token_account::get_associated_token_address_with_program_id;
 use solana_sdk::pubkey;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
+use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 
 // --- CONSTANTES ---
 pub const PROGRAM_ID: pubkey::Pubkey = pubkey!("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo");
@@ -228,75 +226,6 @@ impl DecodedDlmmPool {
 
         Ok(total_amount_out as u64)
     }
-
-    pub fn create_swap_instruction(
-        &self,
-        user_owner: &Pubkey,
-        input_token_mint: &Pubkey,
-        amount_in: u64,
-        min_amount_out: u64,
-    ) -> Result<Instruction> {
-        let instruction_discriminator: [u8; 8] = [65, 75, 63, 76, 235, 91, 91, 136];
-
-        let mut instruction_data = Vec::with_capacity(8 + 8 + 8 + 4);
-        instruction_data.extend_from_slice(&instruction_discriminator);
-        instruction_data.extend_from_slice(&amount_in.to_le_bytes());
-        instruction_data.extend_from_slice(&min_amount_out.to_le_bytes());
-        instruction_data.extend_from_slice(&0u32.to_le_bytes()); // Longueur du Vec<RemainingAccountsSlice> (0)
-
-        let (in_mint, out_mint, in_token_program, out_token_program) = if *input_token_mint == self.mint_a {
-            (self.mint_a, self.mint_b, self.mint_a_program, self.mint_b_program)
-        } else {
-            (self.mint_b, self.mint_a, self.mint_b_program, self.mint_a_program)
-        };
-
-        let user_token_in = get_associated_token_address_with_program_id(user_owner, &in_mint, &in_token_program);
-        let user_token_out = get_associated_token_address_with_program_id(user_owner, &out_mint, &out_token_program);
-
-        let (event_authority, _) = Pubkey::find_program_address(&[b"__event_authority"], &self.program_id);
-
-        // --- LA CORRECTION EST ICI ---
-        // Le compte `bin_array_bitmap_extension` est optionnel.
-        // Si le pool n'en a pas, l'IDL indique qu'il faut passer le program_id à la place.
-        // Puisque nous ne savons pas s'il existe sans un appel RPC supplémentaire,
-        // passer `program_id` est la solution la plus sûre pour la simulation.
-        let bitmap_extension = self.program_id;
-        // --- FIN DE LA CORRECTION ---
-
-        let mut accounts = vec![
-            AccountMeta { pubkey: self.address, is_signer: false, is_writable: true },
-            AccountMeta { pubkey: bitmap_extension, is_signer: false, is_writable: false }, // Devient readonly
-            AccountMeta { pubkey: self.vault_a, is_signer: false, is_writable: true },
-            AccountMeta { pubkey: self.vault_b, is_signer: false, is_writable: true },
-            AccountMeta { pubkey: user_token_in, is_signer: false, is_writable: true },
-            AccountMeta { pubkey: user_token_out, is_signer: false, is_writable: true },
-            AccountMeta { pubkey: self.mint_a, is_signer: false, is_writable: false },
-            AccountMeta { pubkey: self.mint_b, is_signer: false, is_writable: false },
-            AccountMeta { pubkey: self.oracle, is_signer: false, is_writable: true },
-            AccountMeta { pubkey: self.program_id, is_signer: false, is_writable: true }, // host_fee_in placeholder
-            AccountMeta { pubkey: *user_owner, is_signer: true, is_writable: false },
-            AccountMeta { pubkey: in_token_program, is_signer: false, is_writable: false },
-            AccountMeta { pubkey: out_token_program, is_signer: false, is_writable: false },
-            AccountMeta { pubkey: spl_memo::id(), is_signer: false, is_writable: false },
-            AccountMeta { pubkey: event_authority, is_signer: false, is_writable: false },
-            AccountMeta { pubkey: self.program_id, is_signer: false, is_writable: false },
-        ];
-
-        if let Some(hydrated_arrays) = &self.hydrated_bin_arrays {
-            let mut sorted_keys: Vec<_> = hydrated_arrays.keys().collect();
-            sorted_keys.sort();
-            for key in sorted_keys {
-                let bin_array_address = get_bin_array_address(&self.address, *key, &self.program_id);
-                accounts.push(AccountMeta { pubkey: bin_array_address, is_signer: false, is_writable: true });
-            }
-        }
-
-        Ok(Instruction {
-            program_id: self.program_id,
-            accounts,
-            data: instruction_data,
-        })
-    }
 }
 
 #[async_trait]
@@ -327,6 +256,65 @@ impl PoolOperations for DecodedDlmmPool {
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, rpc_client: &RpcClient) -> Result<u64> {
         // Cet appel est maintenant correct car la signature correspond
         self.get_quote_with_rpc(token_in_mint, amount_in, rpc_client).await
+    }
+
+    fn create_swap_instruction(
+        &self,
+        token_in_mint: &Pubkey,
+        amount_in: u64,
+        min_amount_out: u64,
+        user_accounts: &UserSwapAccounts,
+    ) -> Result<Instruction> {
+        let instruction_discriminator: [u8; 8] = [65, 75, 63, 76, 235, 91, 91, 136];
+        let mut instruction_data = Vec::with_capacity(8 + 8 + 8 + 4);
+        instruction_data.extend_from_slice(&instruction_discriminator);
+        instruction_data.extend_from_slice(&amount_in.to_le_bytes());
+        instruction_data.extend_from_slice(&min_amount_out.to_le_bytes());
+        instruction_data.extend_from_slice(&0u32.to_le_bytes()); // remaining_accounts_len
+
+        let (in_token_program, out_token_program) = if *token_in_mint == self.mint_a {
+            (self.mint_a_program, self.mint_b_program)
+        } else {
+            (self.mint_b_program, self.mint_a_program)
+        };
+
+        let (event_authority, _) = Pubkey::find_program_address(&[b"__event_authority"], &self.program_id);
+        let bitmap_extension = self.program_id; // Placeholder sûr, comme dans votre code original
+
+        let mut accounts = vec![
+            AccountMeta { pubkey: self.address, is_signer: false, is_writable: true },
+            AccountMeta { pubkey: bitmap_extension, is_signer: false, is_writable: false },
+            AccountMeta { pubkey: self.vault_a, is_signer: false, is_writable: true },
+            AccountMeta { pubkey: self.vault_b, is_signer: false, is_writable: true },
+            AccountMeta { pubkey: user_accounts.source, is_signer: false, is_writable: true },
+            AccountMeta { pubkey: user_accounts.destination, is_signer: false, is_writable: true },
+            AccountMeta { pubkey: self.mint_a, is_signer: false, is_writable: false },
+            AccountMeta { pubkey: self.mint_b, is_signer: false, is_writable: false },
+            AccountMeta { pubkey: self.oracle, is_signer: false, is_writable: true },
+            AccountMeta { pubkey: self.program_id, is_signer: false, is_writable: true }, // host_fee_in
+            AccountMeta { pubkey: user_accounts.owner, is_signer: true, is_writable: false },
+            AccountMeta { pubkey: in_token_program, is_signer: false, is_writable: false },
+            AccountMeta { pubkey: out_token_program, is_signer: false, is_writable: false },
+            AccountMeta { pubkey: spl_memo::id(), is_signer: false, is_writable: false },
+            AccountMeta { pubkey: event_authority, is_signer: false, is_writable: false },
+            AccountMeta { pubkey: self.program_id, is_signer: false, is_writable: false },
+        ];
+
+        // La partie la plus importante : ajouter les bin_arrays
+        if let Some(hydrated_arrays) = &self.hydrated_bin_arrays {
+            let mut sorted_keys: Vec<_> = hydrated_arrays.keys().collect();
+            sorted_keys.sort();
+            for key in sorted_keys {
+                let bin_array_address = get_bin_array_address(&self.address, *key, &self.program_id);
+                accounts.push(AccountMeta { pubkey: bin_array_address, is_signer: false, is_writable: true });
+            }
+        }
+
+        Ok(Instruction {
+            program_id: self.program_id,
+            accounts,
+            data: instruction_data,
+        })
     }
 }
 // ... le reste du fichier pool (decode_lb_pair, hydrate, etc.) est correct.

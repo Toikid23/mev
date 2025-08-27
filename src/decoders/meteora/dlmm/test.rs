@@ -16,6 +16,7 @@ use solana_transaction_status::UiTransactionEncoding;
 use solana_account_decoder::UiAccountData;
 use spl_token::state::Account as SplTokenAccount;
 use solana_program_pack::Pack;
+use crate::decoders::pool_operations::UserSwapAccounts;
 
 // --- Imports depuis notre propre crate ---
 use crate::decoders::PoolOperations;
@@ -56,13 +57,22 @@ pub async fn test_dlmm_with_simulation(rpc_client: &RpcClient, payer_keypair: &K
     let ui_predicted_amount_out = predicted_amount_out as f64 / 10f64.powi(output_decimals as i32);
     println!("-> PRÉDICTION LOCALE (Dynamique et Précise): {} UI", ui_predicted_amount_out);
 
-    // --- 2. Préparation de la Transaction ---
+    // --- 2. Préparation de la Transaction (simplifié) ---
     println!("\n[2/3] Préparation de la transaction de swap...");
+
+    // On regroupe les comptes dans la struct
+    let user_accounts = UserSwapAccounts {
+        owner: payer_keypair.pubkey(),
+        source: get_associated_token_address_with_program_id(&payer_keypair.pubkey(), &input_mint_pubkey, &pool.mint_a_program),
+        destination: get_associated_token_address_with_program_id(&payer_keypair.pubkey(), &output_mint_pubkey, &output_token_program),
+    };
+
+    // On appelle la fonction unifiée
     let swap_ix = pool.create_swap_instruction(
-        &payer_keypair.pubkey(),
         &input_mint_pubkey,
         amount_in_base_units,
-        0, // min_amount_out à 0 pour la simulation
+        0, // min_amount_out
+        &user_accounts
     )?;
 
     let recent_blockhash = rpc_client.get_latest_blockhash().await?;
@@ -73,14 +83,10 @@ pub async fn test_dlmm_with_simulation(rpc_client: &RpcClient, payer_keypair: &K
         recent_blockhash,
     );
 
-    // --- 3. Simulation et Analyse par Lecture de Compte ---
+    // --- 3. Simulation et Analyse (logique légèrement adaptée) ---
     println!("\n[3/3] Exécution de la simulation avec lecture de compte...");
 
-    let user_destination_ata = get_associated_token_address_with_program_id(
-        &payer_keypair.pubkey(),
-        &output_mint_pubkey,
-        &output_token_program,
-    );
+    let user_destination_ata = user_accounts.destination;
 
     let initial_destination_balance = match rpc_client.get_token_account(&user_destination_ata).await {
         Ok(Some(acc)) => acc.token_amount.amount.parse::<u64>().unwrap_or(0),

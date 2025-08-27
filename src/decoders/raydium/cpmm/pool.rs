@@ -2,7 +2,6 @@
 
 use crate::decoders::pool_operations::PoolOperations; // On importe le contrat
 use bytemuck::{from_bytes, Pod, Zeroable};
-use solana_sdk::pubkey::Pubkey;
 use anyhow::{bail, Result, anyhow};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use super::config;
@@ -10,6 +9,11 @@ use crate::decoders::spl_token_decoders;
 use num_integer::Integer;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
+use crate::decoders::pool_operations::UserSwapAccounts;
+use solana_sdk::{
+    instruction::{AccountMeta, Instruction}, // <-- On importe les types ici
+    pubkey::Pubkey,
+};
 
 // Discriminator pour les comptes PoolState du programme CPMM
 const CPMM_POOL_STATE_DISCRIMINATOR: [u8; 8] = [247, 237, 227, 245, 215, 195, 222, 70];
@@ -44,56 +48,6 @@ pub struct DecodedCpmmPool {
 impl DecodedCpmmPool {
     pub fn fee_as_percent(&self) -> f64 {
         (self.trade_fee_rate as f64 / 1_000_000.0) * 100.0
-    }
-
-    // dans src/decoders/raydium/cpmm/pool.rs
-
-    pub fn create_swap_instruction(
-        &self,
-        user_source_token_account: &Pubkey,
-        user_destination_token_account: &Pubkey,
-        user_owner: &Pubkey,
-        input_is_token_0: bool,
-        amount_in: u64,
-        minimum_amount_out: u64,
-    ) -> Result<solana_sdk::instruction::Instruction> {
-        let instruction_discriminator: [u8; 8] = [143, 190, 90, 218, 196, 30, 51, 222];
-
-        let mut instruction_data = Vec::new();
-        instruction_data.extend_from_slice(&instruction_discriminator);
-        instruction_data.extend_from_slice(&amount_in.to_le_bytes());
-        instruction_data.extend_from_slice(&minimum_amount_out.to_le_bytes());
-
-        let (input_vault, output_vault, input_mint, output_mint, input_token_program, output_token_program) = if input_is_token_0 {
-            (self.token_0_vault, self.token_1_vault, self.token_0_mint, self.token_1_mint, self.token_0_program, self.token_1_program)
-        } else {
-            (self.token_1_vault, self.token_0_vault, self.token_1_mint, self.token_0_mint, self.token_1_program, self.token_0_program)
-        };
-
-        let (authority, _) = Pubkey::find_program_address(&[b"vault_and_lp_mint_auth_seed"], &solana_sdk::pubkey!("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C"));
-
-        // --- LISTE DES COMPTES DE LA VERSION ORIGINALE QUI FONCTIONNAIT ---
-        let accounts = vec![
-            solana_sdk::instruction::AccountMeta::new_readonly(*user_owner, true),
-            solana_sdk::instruction::AccountMeta::new_readonly(authority, false),
-            solana_sdk::instruction::AccountMeta::new_readonly(self.amm_config, false),
-            solana_sdk::instruction::AccountMeta::new(self.address, false),
-            solana_sdk::instruction::AccountMeta::new(*user_source_token_account, false),
-            solana_sdk::instruction::AccountMeta::new(*user_destination_token_account, false),
-            solana_sdk::instruction::AccountMeta::new(input_vault, false),
-            solana_sdk::instruction::AccountMeta::new(output_vault, false),
-            solana_sdk::instruction::AccountMeta::new_readonly(input_token_program, false),
-            solana_sdk::instruction::AccountMeta::new_readonly(output_token_program, false),
-            solana_sdk::instruction::AccountMeta::new_readonly(input_mint, false),
-            solana_sdk::instruction::AccountMeta::new_readonly(output_mint, false),
-            solana_sdk::instruction::AccountMeta::new(self.observation_key, false),
-        ];
-
-        Ok(solana_sdk::instruction::Instruction {
-            program_id: solana_sdk::pubkey!("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C"),
-            accounts,
-            data: instruction_data,
-        })
     }
 }
 
@@ -233,6 +187,51 @@ impl PoolOperations for DecodedCpmmPool {
     }
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
         self.get_quote(token_in_mint, amount_in, 0)
+    }
+    fn create_swap_instruction(
+        &self,
+        token_in_mint: &Pubkey,
+        amount_in: u64,
+        min_amount_out: u64,
+        user_accounts: &UserSwapAccounts,
+    ) -> Result<Instruction> {
+        let instruction_discriminator: [u8; 8] = [143, 190, 90, 218, 196, 30, 51, 222];
+
+        let mut instruction_data = Vec::new();
+        instruction_data.extend_from_slice(&instruction_discriminator);
+        instruction_data.extend_from_slice(&amount_in.to_le_bytes());
+        instruction_data.extend_from_slice(&min_amount_out.to_le_bytes());
+
+        let input_is_token_0 = *token_in_mint == self.token_0_mint;
+        let (input_vault, output_vault, input_mint, output_mint, input_token_program, output_token_program) = if input_is_token_0 {
+            (self.token_0_vault, self.token_1_vault, self.token_0_mint, self.token_1_mint, self.token_0_program, self.token_1_program)
+        } else {
+            (self.token_1_vault, self.token_0_vault, self.token_1_mint, self.token_0_mint, self.token_1_program, self.token_0_program)
+        };
+
+        let (authority, _) = Pubkey::find_program_address(&[b"vault_and_lp_mint_auth_seed"], &solana_sdk::pubkey!("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C"));
+
+        let accounts = vec![
+            AccountMeta::new_readonly(user_accounts.owner, true),
+            AccountMeta::new_readonly(authority, false),
+            AccountMeta::new_readonly(self.amm_config, false),
+            AccountMeta::new(self.address, false),
+            AccountMeta::new(user_accounts.source, false),
+            AccountMeta::new(user_accounts.destination, false),
+            AccountMeta::new(input_vault, false),
+            AccountMeta::new(output_vault, false),
+            AccountMeta::new_readonly(input_token_program, false),
+            AccountMeta::new_readonly(output_token_program, false),
+            AccountMeta::new_readonly(input_mint, false),
+            AccountMeta::new_readonly(output_mint, false),
+            AccountMeta::new(self.observation_key, false),
+        ];
+
+        Ok(Instruction {
+            program_id: solana_sdk::pubkey!("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C"),
+            accounts,
+            data: instruction_data,
+        })
     }
 }
 pub async fn hydrate(pool: &mut DecodedCpmmPool, rpc_client: &RpcClient) -> Result<()> {

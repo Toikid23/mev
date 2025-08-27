@@ -22,6 +22,7 @@ use solana_transaction_status::UiTransactionEncoding;
 use solana_account_decoder::UiAccountData;
 use spl_token::state::Account as SplTokenAccount;
 use solana_program_pack::Pack;
+use crate::decoders::pool_operations::UserSwapAccounts;
 
 
 pub async fn test_cpmm_with_simulation(rpc_client: &RpcClient, payer_keypair: &Keypair, current_timestamp: i64) -> Result<()> {
@@ -63,9 +64,18 @@ pub async fn test_cpmm_with_simulation(rpc_client: &RpcClient, payer_keypair: &K
         );
     }
 
+    let user_accounts = UserSwapAccounts {
+        owner: payer_pubkey,
+        source: user_source_ata,
+        destination: user_destination_ata,
+    };
+
+    // Étape 2: Appeler la nouvelle fonction avec la bonne signature
     let swap_ix = pool.create_swap_instruction(
-        &user_source_ata, &user_destination_ata, &payer_pubkey,
-        input_is_token_0, amount_in_base_units, 0,
+        &input_mint_pubkey,      // Arg 1: token_in_mint
+        amount_in_base_units,    // Arg 2: amount_in
+        0,                       // Arg 3: min_amount_out
+        &user_accounts,          // Arg 4: user_accounts
     )?;
     instructions.push(swap_ix);
 
