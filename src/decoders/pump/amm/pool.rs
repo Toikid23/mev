@@ -363,6 +363,8 @@ impl PoolOperations for DecodedPumpAmmPool {
         (self.vault_a, self.vault_b)
     }
 
+    fn address(&self) -> Pubkey { self.address }
+
     /// Calcule le montant de sortie pour un montant d'entrée donné.
     /// C'est la fonction la plus importante, elle doit être parfaite.
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {

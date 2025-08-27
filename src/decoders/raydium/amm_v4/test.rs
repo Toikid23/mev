@@ -20,6 +20,7 @@ use crate::decoders::raydium::amm_v4::{
     openbook_market,
 };
 use crate::decoders::PoolOperations;
+use crate::decoders::pool_operations::UserSwapAccounts;
 
 
 pub async fn test_ammv4_with_simulation(rpc_client: &RpcClient, payer_keypair: &Keypair, current_timestamp: i64) -> anyhow::Result<()> {
@@ -62,9 +63,23 @@ pub async fn test_ammv4_with_simulation(rpc_client: &RpcClient, payer_keypair: &
             ),
         );
     }
+
+    // Étape 1: Regrouper les comptes utilisateur dans la struct
+    let user_accounts = UserSwapAccounts {
+        owner: payer_pubkey,
+        source: user_source_ata,
+        destination: user_destination_ata,
+    };
+
+    // Étape 2: Appeler la nouvelle fonction avec la bonne signature
     let swap_ix = pool.create_swap_instruction(
-        &user_source_ata, &user_destination_ata, &payer_pubkey, amount_in_base_units, 0,
+        &input_mint_pubkey,      // Arg 1: token_in_mint
+        amount_in_base_units,    // Arg 2: amount_in
+        0,                       // Arg 3: min_amount_out
+        &user_accounts,          // Arg 4: user_accounts
     )?;
+
+
     instructions.push(swap_ix);
 
     let recent_blockhash = rpc_client.get_latest_blockhash().await?;

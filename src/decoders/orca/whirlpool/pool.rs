@@ -343,6 +343,8 @@ impl PoolOperations for DecodedWhirlpoolPool {
         (self.vault_a, self.vault_b)
     }
 
+    fn address(&self) -> Pubkey { self.address }
+
     /// La version synchrone pour Whirlpool retourne une erreur car elle est intrinsèquement
     /// imprécise sans appels RPC.
     fn get_quote(&self, _token_in_mint: &Pubkey, _amount_in: u64, _current_timestamp: i64) -> Result<u64> {

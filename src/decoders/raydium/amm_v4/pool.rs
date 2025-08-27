@@ -1,7 +1,7 @@
 // DANS: src/decoders/raydium_decoders/pool
 // VERSION AVEC create_swap_instruction DANS L'IMPL
 
-use crate::decoders::pool_operations::PoolOperations;
+
 use bytemuck::{from_bytes, Pod, Zeroable, cast};
 use solana_sdk::pubkey::Pubkey;
 use anyhow::{bail, Result, anyhow};
@@ -13,6 +13,8 @@ use openbook_dex::state::MarketState;
 use std::mem::size_of;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
+
+use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 
 
 // La structure de données reste la même
@@ -45,53 +47,7 @@ impl DecodedAmmPool {
         (self.trade_fee_numerator as f64 / self.trade_fee_denominator as f64) * 100.0
     }
 
-    // La fonction est maintenant une méthode de la struct.
-    // Elle prend `&self` au lieu de `pool: &DecodedAmmPool`.
-    pub fn create_swap_instruction(
-        &self,
-        user_source_token_account: &Pubkey,
-        user_destination_token_account: &Pubkey,
-        user_owner: &Pubkey,
-        amount_in: u64,
-        minimum_amount_out: u64,
-    ) -> Result<Instruction> {
-        let mut instruction_data = vec![9]; // Discriminateur pour SwapBaseIn
-        instruction_data.extend_from_slice(&amount_in.to_le_bytes());
-        instruction_data.extend_from_slice(&minimum_amount_out.to_le_bytes());
 
-        let (amm_authority, _) = Pubkey::find_program_address(
-            &[b"amm authority"],
-            &RAYDIUM_AMM_V4_PROGRAM_ID,
-        );
-
-        // On remplace toutes les instances de `pool.` par `self.`
-        let keys = vec![
-            AccountMeta::new_readonly(spl_token::id(), false),
-            AccountMeta::new(self.address, false),
-            AccountMeta::new_readonly(amm_authority, false),
-            AccountMeta::new(self.open_orders, false),
-            AccountMeta::new(self.target_orders, false),
-            AccountMeta::new(self.vault_a, false),
-            AccountMeta::new(self.vault_b, false),
-            AccountMeta::new_readonly(self.market_program_id, false),
-            AccountMeta::new(self.market, false),
-            AccountMeta::new(self.market_bids, false),
-            AccountMeta::new(self.market_asks, false),
-            AccountMeta::new(self.market_event_queue, false),
-            AccountMeta::new(self.market_coin_vault, false),
-            AccountMeta::new(self.market_pc_vault, false),
-            AccountMeta::new_readonly(self.market_vault_signer, false),
-            AccountMeta::new(*user_source_token_account, false),
-            AccountMeta::new(*user_destination_token_account, false),
-            AccountMeta::new_readonly(*user_owner, true),
-        ];
-
-        Ok(Instruction {
-            program_id: RAYDIUM_AMM_V4_PROGRAM_ID,
-            accounts: keys,
-            data: instruction_data,
-        })
-    }
 }
 // --- FIN DE LA MODIFICATION ---
 
@@ -160,6 +116,7 @@ pub async fn hydrate(pool: &mut DecodedAmmPool, rpc_client: &RpcClient) -> Resul
 impl PoolOperations for DecodedAmmPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
+    fn address(&self) -> Pubkey { self.address }
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
         let (in_mint_fee_bps, out_mint_fee_bps, in_reserve, out_reserve) = if *token_in_mint == self.mint_a {
             (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps, self.reserve_a, self.reserve_b)
@@ -181,5 +138,49 @@ impl PoolOperations for DecodedAmmPool {
     }
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
         self.get_quote(token_in_mint, amount_in, 0)
+    }
+
+    fn create_swap_instruction(
+        &self,
+        _token_in_mint: &Pubkey, // Non utilisé par AMMv4, mais requis par le trait
+        amount_in: u64,
+        minimum_amount_out: u64,
+        user_accounts: &UserSwapAccounts,
+    ) -> Result<Instruction> {
+        let mut instruction_data = vec![9]; // Discriminateur pour SwapBaseIn
+        instruction_data.extend_from_slice(&amount_in.to_le_bytes());
+        instruction_data.extend_from_slice(&minimum_amount_out.to_le_bytes());
+
+        let (amm_authority, _) = Pubkey::find_program_address(
+            &[b"amm authority"],
+            &RAYDIUM_AMM_V4_PROGRAM_ID,
+        );
+
+        let keys = vec![
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new(self.address, false),
+            AccountMeta::new_readonly(amm_authority, false),
+            AccountMeta::new(self.open_orders, false),
+            AccountMeta::new(self.target_orders, false),
+            AccountMeta::new(self.vault_a, false),
+            AccountMeta::new(self.vault_b, false),
+            AccountMeta::new_readonly(self.market_program_id, false),
+            AccountMeta::new(self.market, false),
+            AccountMeta::new(self.market_bids, false),
+            AccountMeta::new(self.market_asks, false),
+            AccountMeta::new(self.market_event_queue, false),
+            AccountMeta::new(self.market_coin_vault, false),
+            AccountMeta::new(self.market_pc_vault, false),
+            AccountMeta::new_readonly(self.market_vault_signer, false),
+            AccountMeta::new(user_accounts.source, false),
+            AccountMeta::new(user_accounts.destination, false),
+            AccountMeta::new_readonly(user_accounts.owner, true),
+        ];
+
+        Ok(Instruction {
+            program_id: RAYDIUM_AMM_V4_PROGRAM_ID,
+            accounts: keys,
+            data: instruction_data,
+        })
     }
 }

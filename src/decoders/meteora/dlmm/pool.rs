@@ -67,6 +67,22 @@ impl DecodedDlmmPool {
 
     pub async fn get_quote_with_rpc(
         &mut self,
+        token_in_mint: &Pubkey,
+        amount_in: u64,
+        rpc_client: &RpcClient,
+    ) -> Result<u64> {
+        // Logique de préparation
+        let swap_for_y = *token_in_mint == self.mint_a;
+        let clock_account = rpc_client.get_account(&solana_sdk::sysvar::clock::ID).await?;
+        let clock: solana_sdk::sysvar::clock::Clock = bincode::deserialize(&clock_account.data)?;
+        let current_timestamp = clock.unix_timestamp;
+
+        // Appel à votre fonction de calcul renommée
+        self.calculate_swap_quote_async(amount_in, swap_for_y, current_timestamp, rpc_client).await
+    }
+
+    pub async fn calculate_swap_quote_async(
+        &mut self,
         amount_in: u64,
         swap_for_y: bool,
         current_timestamp: i64,
@@ -287,6 +303,7 @@ impl DecodedDlmmPool {
 impl PoolOperations for DecodedDlmmPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
+    fn address(&self) -> Pubkey { self.address }
 
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<u64> {
         // La version synchrone est maintenant une estimation qui n'utilise que les données en cache
@@ -299,6 +316,7 @@ impl PoolOperations for DecodedDlmmPool {
         let fee_on_input = calculate_transfer_fee(amount_in, in_mint_fee_bps, in_mint_max_fee)?;
         let amount_in_after_transfer_fee = amount_in.saturating_sub(fee_on_input);
 
+        // On appelle l'ancienne logique de calcul qui ne fait pas d'appels RPC
         let gross_amount_out = self.calculate_swap_quote(amount_in_after_transfer_fee, swap_for_y, current_timestamp)?;
 
         let fee_on_output = calculate_transfer_fee(gross_amount_out, out_mint_fee_bps, out_mint_max_fee)?;
@@ -307,29 +325,8 @@ impl PoolOperations for DecodedDlmmPool {
     }
 
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, rpc_client: &RpcClient) -> Result<u64> {
-        // C'est maintenant LA méthode à utiliser pour un calcul précis
-
-        // On récupère le timestamp on-chain pour être 100% précis
-        let clock_account = rpc_client.get_account(&solana_sdk::sysvar::clock::ID).await?;
-        let clock: solana_sdk::sysvar::clock::Clock = bincode::deserialize(&clock_account.data)?;
-        let current_timestamp = clock.unix_timestamp;
-
-        let swap_for_y = *token_in_mint == self.mint_a;
-        let (in_mint_fee_bps, in_mint_max_fee, out_mint_fee_bps, out_mint_max_fee) = if swap_for_y {
-            (self.mint_a_transfer_fee_bps, self.mint_a_transfer_fee_max, self.mint_b_transfer_fee_bps, self.mint_b_transfer_fee_max)
-        } else {
-            (self.mint_b_transfer_fee_bps, self.mint_b_transfer_fee_max, self.mint_a_transfer_fee_bps, self.mint_a_transfer_fee_max)
-        };
-
-        let fee_on_input = calculate_transfer_fee(amount_in, in_mint_fee_bps, in_mint_max_fee)?;
-        let amount_in_after_transfer_fee = amount_in.saturating_sub(fee_on_input);
-
-        // On appelle notre NOUVELLE fonction asynchrone avec le BON timestamp
-        let gross_amount_out = self.get_quote_with_rpc(amount_in_after_transfer_fee, swap_for_y, current_timestamp, rpc_client).await?;
-
-        let fee_on_output = calculate_transfer_fee(gross_amount_out, out_mint_fee_bps, out_mint_max_fee)?;
-        let final_amount_out = gross_amount_out.saturating_sub(fee_on_output);
-        Ok(final_amount_out)
+        // Cet appel est maintenant correct car la signature correspond
+        self.get_quote_with_rpc(token_in_mint, amount_in, rpc_client).await
     }
 }
 // ... le reste du fichier pool (decode_lb_pair, hydrate, etc.) est correct.

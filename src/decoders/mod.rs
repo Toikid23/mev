@@ -71,6 +71,24 @@ impl PoolOperations for Pool {
         }
     }
 
+    fn address(&self) -> Pubkey {
+        match self {
+            Pool::RaydiumAmmV4(p) => p.address,
+            Pool::RaydiumCpmm(p) => p.address,
+            Pool::RaydiumClmm(p) => p.address,
+            Pool::RaydiumStableSwap(p) => p.address,
+            Pool::RaydiumLaunchpad(p) => p.address,
+            Pool::MeteoraDammV1(p) => p.address,
+            Pool::MeteoraDammV2(p) => p.address,
+            Pool::MeteoraDlmm(p) => p.address,
+            Pool::OrcaWhirlpool(p) => p.address,
+            Pool::OrcaAmmV2(p) => p.address,
+            Pool::OrcaAmmV1(p) => p.address,
+            Pool::PumpAmm(p) => p.address,
+        }
+    }
+
+
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<u64> {
         match self {
             Pool::RaydiumAmmV4(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
@@ -82,9 +100,9 @@ impl PoolOperations for Pool {
             Pool::OrcaAmmV2(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
             Pool::OrcaAmmV1(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
             Pool::PumpAmm(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
+            Pool::RaydiumClmm(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
 
-            // --- Pools Complexes (Synchrone NON FIABLE) ---
-            Pool::RaydiumClmm(_) => Err(anyhow::anyhow!("Utiliser get_quote_async pour Raydium CLMM")),
+            //pool complexe
             Pool::MeteoraDlmm(_) => Err(anyhow::anyhow!("Utiliser get_quote_async pour Meteora DLMM")),
             Pool::OrcaWhirlpool(_) => Err(anyhow::anyhow!("Utiliser get_quote_async pour Orca Whirlpool")),
         }
@@ -95,11 +113,8 @@ impl PoolOperations for Pool {
             // On gère déjà le cas Whirlpool
             Pool::OrcaWhirlpool(p) => p.get_quote_with_rpc(token_in_mint, amount_in, rpc_client).await,
 
-            // TODO: Implémenter la logique async pour CLMM et DLMM
-            // Pour l'instant, ils vont utiliser leur `get_quote` synchrone qui est une estimation.
-            // Le jour où on les intègrera, on créera leur propre `get_quote_with_rpc`.
-            Pool::RaydiumClmm(p) => p.get_quote(token_in_mint, amount_in, 0),
-            Pool::MeteoraDlmm(p) => p.get_quote(token_in_mint, amount_in, 0),
+            // TODO: Implémenter la logique async pour CLMM
+            Pool::MeteoraDlmm(p) => p.get_quote_with_rpc(token_in_mint, amount_in, rpc_client).await,
 
             // Pour les pools simples, on appelle simplement leur version synchrone
             _ => self.get_quote(token_in_mint, amount_in, 0),

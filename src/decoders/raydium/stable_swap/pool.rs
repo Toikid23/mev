@@ -111,6 +111,7 @@ impl PoolOperations for DecodedStableSwapPool {
     fn get_vaults(&self) -> (Pubkey, Pubkey) {
         (self.vault_a, self.vault_b)
     }
+    fn address(&self) -> Pubkey { self.address }
 
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
         // Vérifier que le pool est hydraté (a des réserves et un amp)

@@ -187,6 +187,7 @@ impl PoolOperations for DecodedCpmmPool {
     fn get_vaults(&self) -> (Pubkey, Pubkey) {
         (self.token_0_vault, self.token_1_vault)
     }
+    fn address(&self) -> Pubkey { self.address }
 
     // --- VERSION AMÉLIORÉE DE GET_QUOTE ---
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {

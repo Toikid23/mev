@@ -1,4 +1,4 @@
-use crate::decoders::pool_operations::PoolOperations;
+
 use crate::decoders::spl_token_decoders;
 use anyhow::{anyhow, bail, Result};
 use bytemuck::{from_bytes, Pod, Zeroable};
@@ -15,6 +15,7 @@ use super::tickarray_bitmap_extension;
 use super::config;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
+use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 
 
 
@@ -41,6 +42,7 @@ pub struct DecodedClmmPool {
     pub min_tick: i32,
     pub max_tick: i32,
     pub tick_arrays: Option<BTreeMap<i32, TickArrayState>>,
+    pub last_swap_timestamp: i64,
 }
 
 impl DecodedClmmPool {
@@ -295,6 +297,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Result
         mint_a_transfer_fee_bps: 0, mint_b_transfer_fee_bps: 0,
         trade_fee_rate: 0, min_tick: -443636, max_tick: 443636,
         tick_arrays: None,
+        last_swap_timestamp: 0,
     })
 }
 
@@ -439,6 +442,8 @@ impl PoolOperations for DecodedClmmPool {
     fn get_vaults(&self) -> (Pubkey, Pubkey) {
         (self.vault_a, self.vault_b)
     }
+
+    fn address(&self) -> Pubkey { self.address }
 
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<u64> {
         // --- LA LOGIQUE FINALE ET COMPLÈTE ---

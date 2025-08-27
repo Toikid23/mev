@@ -323,6 +323,7 @@ fn get_tokens_for_lp(lp_amount: u64, vault_total_tokens: u64, vault_lp_supply: u
 impl PoolOperations for DecodedMeteoraSbpPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
+    fn address(&self) -> Pubkey { self.address }
 
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
         if !self.enabled || amount_in == 0 { return Ok(0); }
