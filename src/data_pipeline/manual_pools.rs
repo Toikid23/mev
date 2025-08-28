@@ -2,7 +2,7 @@
 
 /// Retourne une liste statique et manuellement définie d'adresses de pools
 /// à utiliser pour le développement et les tests.
-pub fn get_manual_pool_list() -> Vec<&'static str> {
+/*pub fn get_manual_pool_list() -> Vec<&'static str> {
     vec![
         // --- Exemples ---
         // Raydium AMM V4 wsol/usdc
@@ -51,5 +51,13 @@ pub fn get_manual_pool_list() -> Vec<&'static str> {
         // pool morte cpmm wsol/nyanmas
         "6xGFvyMx2sdUNfcYJKRKAhjfinWxQNtzFrZvFY6RFg3",
 
+    ]
+}
+*/
+
+pub fn get_manual_pool_list() -> Vec<&'static str> {
+    vec![
+        "655rHu11G1F1LbxRbgh9ayopy5dbANRXJL58JQRWFyz1", // Pool 1 (votre adresse)
+        "4W8aLSv6cspSWmDmTaSEZviNGCXNmwfWnb4Sqv25bj9f",              // Pool 2 (la nouvelle adresse)
     ]
 }
