@@ -44,15 +44,29 @@ async fn main() -> Result<()> {
         if let Some(account) = account_opt {
             let decoded_pool_result = match account.owner {
                 // Raydium
-                id if id == Pubkey::from_str("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8").unwrap() => raydium::amm_v4::decode_pool(&address, &account.data).map(Pool::RaydiumAmmV4),
-                id if id == Pubkey::from_str("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C").unwrap() => raydium::cpmm::decode_pool(&address, &account.data).map(Pool::RaydiumCpmm),
-                id if id == Pubkey::from_str("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK").unwrap() => raydium::clmm::decode_pool(&address, &account.data, &id).map(Pool::RaydiumClmm),
+                // Raydium AMM V4 (Mainnet OU Devnet)
+                id if id == Pubkey::from_str("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8").unwrap() ||
+                    id == Pubkey::from_str("DRaya7Kj3aMWQSy19kSjvmuwq9docCHofyP9kanQGaav").unwrap() =>
+                    raydium::amm_v4::decode_pool(&address, &account.data).map(Pool::RaydiumAmmV4),
+
+                // Raydium CPMM (Mainnet OU Devnet)
+                id if id == Pubkey::from_str("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C").unwrap() ||
+                    id == Pubkey::from_str("DRaycpLY18LhpbydsBWbVJtxpNv9oXPgjRSfpF2bWpYb").unwrap() =>
+                    raydium::cpmm::decode_pool(&address, &account.data).map(Pool::RaydiumCpmm),
+
+                // Raydium CLMM (Mainnet OU Devnet)
+                id if id == Pubkey::from_str("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK").unwrap() ||
+                    id == Pubkey::from_str("DRayAUgENGQBKVaX8owNhgzkEDyoHTGVEGHVJT1E9pfH").unwrap() =>
+                    raydium::clmm::decode_pool(&address, &account.data, &id).map(Pool::RaydiumClmm),
+
                 // Meteora
                 id if id == Pubkey::from_str("Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB").unwrap() => meteora::damm_v1::decode_pool(&address, &account.data).map(Pool::MeteoraDammV1),
                 id if id == Pubkey::from_str("cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG").unwrap() => meteora::damm_v2::decode_pool(&address, &account.data).map(Pool::MeteoraDammV2),
                 id if id == Pubkey::from_str("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo").unwrap() => meteora::dlmm::decode_lb_pair(&address, &account.data, &account.owner).map(Pool::MeteoraDlmm),
+
                 // Orca
                 id if id == Pubkey::from_str("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc").unwrap() => orca::whirlpool::decode_pool(&address, &account.data).map(Pool::OrcaWhirlpool),
+
                 // Pump.fun
                 id if id == Pubkey::from_str("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA").unwrap() => pump::amm::decode_pool(&address, &account.data).map(Pool::PumpAmm),
 
