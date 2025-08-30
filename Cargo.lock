@@ -2513,6 +2513,7 @@ dependencies = [
  "serde_arrays",
  "serde_json",
  "solana-account-decoder",
+ "solana-address-lookup-table-program",
  "solana-client",
  "solana-program 2.3.0",
  "solana-program-pack",
@@ -3990,6 +3991,34 @@ dependencies = [
  "solana-pubkey",
  "solana-sdk-ids",
  "solana-slot-hashes",
+]
+
+[[package]]
+name = "solana-address-lookup-table-program"
+version = "3.0.0"
+source = "git+https://github.com/solana-program/address-lookup-table#37938545d10f84142b857ff4dd3786fb766ab04a"
+dependencies = [
+ "bincode",
+ "bytemuck",
+ "num-derive 0.4.2",
+ "num-traits",
+ "num_enum 0.7.4",
+ "serde",
+ "solana-account-info",
+ "solana-bincode",
+ "solana-clock",
+ "solana-cpi",
+ "solana-instruction",
+ "solana-msg",
+ "solana-program-entrypoint",
+ "solana-program-error",
+ "solana-pubkey",
+ "solana-rent",
+ "solana-sdk-ids",
+ "solana-slot-hashes",
+ "solana-system-interface",
+ "solana-sysvar",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

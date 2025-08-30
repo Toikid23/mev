@@ -6,7 +6,7 @@ edition = "2021" # Je suggère de mettre 2021, car 2024 est très récent.
 [dependencies]
 # --- Interaction Principale avec Solana ---
 solana-client = "2.3.7" # Vous avez mentionné utiliser 2.3.7, gardons-la
-solana-sdk = "2.3.0" # Gardons une version compatible
+solana-sdk = "2.3.1" # Gardons une version compatible
 
 # --- LA CORRECTION EST ICI ---
 # On désactive les features par défaut et on active uniquement "client" ou "default" sans "program"
@@ -53,6 +53,7 @@ async-trait = "0.1.89"
 serde_arrays = "0.2.0"
 futures-util = "0.3.31"
 chrono = "0.4.41"
+solana-address-lookup-table-program = { git = "https://github.com/solana-program/address-lookup-table", package = "solana-address-lookup-table-program" }
 
 
 [[bin]]

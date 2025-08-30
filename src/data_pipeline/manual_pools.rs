@@ -57,7 +57,7 @@
 
 pub fn get_manual_pool_list() -> Vec<&'static str> {
     vec![
-        "9sBmcZeHok5kwBuhP2iDQ3X4i5ooJLqgWe64vfVuCnrH", // Pool 1 (votre adresse)
-        "4Wu1tJFPfsYmnBRETUypzth2yvH9HuFA3wJ9W8zuR2Dh",              // Pool 2 (la nouvelle adresse)
+        "2669SjVyYp7d4oBxMmvyVELPHDdADznDJFLoDdcEXPn3", // Pool 1 (votre adresse)
+        "8Rc8AXsKxrXH4C7MtWCwq9jot6NHTqRgWmpYTn9N8kaw",              // Pool 2 (la nouvelle adresse)
     ]
 }

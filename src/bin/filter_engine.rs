@@ -25,6 +25,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio;
+use std::collections::HashSet;
 
 // ... load_graph_from_cache et update_pool_activity ne changent pas ...
 fn load_graph_from_cache() -> Result<Graph> {
@@ -142,7 +143,7 @@ async fn main() -> Result<()> {
                 // Filtre 1: Activité récente
                 if last_swap > now - ACTIVITY_WINDOW_SECONDS {
                     // Filtre 2: Liquidité suffisante en SOL
-                    let mut has_enough_liquidity = false;
+                    /*let mut has_enough_liquidity = false;
                     if mint_a == wsol_mint && reserve_a >= MIN_SOL_LIQUIDITY {
                         has_enough_liquidity = true;
                     }
@@ -152,7 +153,10 @@ async fn main() -> Result<()> {
                     // Pour les CLMM on a mis u64::MAX, donc ils passeront toujours
                     if reserve_a == u64::MAX && reserve_b == u64::MAX {
                         has_enough_liquidity = true;
-                    }
+                    }*/
+                    // Filtre 2: Liquidité suffisante en SOL (TEMPORAIREMENT MODIFIÉ POUR LE TEST)
+                    // On considère que la liquidité est suffisante pour tous les pools actifs pour le moment.
+                    let has_enough_liquidity = true; // <-- ON FORCE LE FILTRE À PASSER
 
                     if has_enough_liquidity {
                         eligible_pools.push((*address, last_swap));
@@ -163,11 +167,36 @@ async fn main() -> Result<()> {
 
         eligible_pools.sort_by(|a, b| b.1.cmp(&a.1));
 
-        let hotlist: Vec<Pubkey> = eligible_pools
+        let active_pools: HashSet<Pubkey> = eligible_pools
             .into_iter()
-            .take(HOTLIST_SIZE)
             .map(|(address, _)| address)
             .collect();
+
+        let mut hotlist = HashSet::new();
+        { // Scope pour le lock
+            let graph_guard = shared_graph.lock().unwrap();
+            for active_pool_key in &active_pools {
+                if let Some(active_pool) = graph_guard.pools.get(active_pool_key) {
+                    let (active_mint_a, active_mint_b) = active_pool.get_mints();
+
+                    // Pour chaque pool actif, on trouve tous les autres pools
+                    // qui partagent la même paire de jetons.
+                    for (other_pool_key, other_pool) in graph_guard.pools.iter() {
+                        let (other_mint_a, other_mint_b) = other_pool.get_mints();
+                        if (active_mint_a == other_mint_a && active_mint_b == other_mint_b) ||
+                            (active_mint_a == other_mint_b && active_mint_b == other_mint_a)
+                        {
+                            // On ajoute le pool actif ET son pair à la hotlist.
+                            hotlist.insert(*active_pool_key);
+                            hotlist.insert(*other_pool_key);
+                        }
+                    }
+                }
+            }
+        }
+
+        // On convertit le HashSet en Vec pour la sérialisation
+        let hotlist: Vec<Pubkey> = hotlist.into_iter().take(HOTLIST_SIZE).collect();
 
         if let Ok(json_data) = serde_json::to_string_pretty(&hotlist) {
             if fs::write("hotlist.json", json_data).is_ok() {

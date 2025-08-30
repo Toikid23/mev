@@ -38,7 +38,8 @@ pub struct DecodedAmmPool {
 #[repr(C, packed)] #[derive(Clone, Copy, Pod, Zeroable, Debug)] struct OutPutData { pub need_take_pnl_coin: u64, pub need_take_pnl_pc: u64, pub total_pnl_pc: u64, pub total_pnl_coin: u64, pub pool_open_time: u64, pub punish_pc_amount: u64, pub punish_coin_amount: u64, pub orderbook_to_init_time: u64, pub swap_coin_in_amount: u128, pub swap_pc_out_amount: u128, pub swap_take_pc_fee: u64, pub swap_pc_in_amount: u128, pub swap_coin_out_amount: u128, pub swap_take_coin_fee: u64, }
 #[repr(C, packed)] #[derive(Clone, Copy, Pod, Zeroable, Debug)] struct AmmInfoData { pub status: u64, pub nonce: u64, pub order_num: u64, pub depth: u64, pub coin_decimals: u64, pub pc_decimals: u64, pub state: u64, pub reset_flag: u64, pub min_size: u64, pub vol_max_cut_ratio: u64, pub amount_wave: u64, pub coin_lot_size: u64, pub pc_lot_size: u64, pub min_price_multiplier: u64, pub max_price_multiplier: u64, pub sys_decimal_value: u64, pub fees: Fees, pub out_put: OutPutData, pub token_coin: Pubkey, pub token_pc: Pubkey, pub coin_mint: Pubkey, pub pc_mint: Pubkey, pub lp_mint: Pubkey, pub open_orders: Pubkey, pub market: Pubkey, pub serum_dex: Pubkey, pub target_orders: Pubkey, pub withdraw_queue: Pubkey, pub token_temp_lp: Pubkey, pub amm_owner: Pubkey, pub lp_amount: u64, pub client_order_id: u64, pub padding: [u64; 2], }
 
-pub const RAYDIUM_AMM_V4_PROGRAM_ID: Pubkey = pubkey!("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8");
+//ADDRESS DEVNET !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+pub const RAYDIUM_AMM_V4_PROGRAM_ID: Pubkey = pubkey!("DRaya7Kj3aMWQSy19kSjvmuwq9docCHofyP9kanQGaav");
 
 // --- DÉBUT DE LA MODIFICATION ---
 impl DecodedAmmPool {
@@ -157,6 +158,13 @@ impl PoolOperations for DecodedAmmPool {
         );
 
         let keys = vec![
+
+
+            // La ligne que nous avons ajoutée précédemment, mais maintenant elle a une valeur correcte.
+            // Le programme on-chain a besoin de cette adresse pour effectuer la CPI.
+            AccountMeta::new_readonly(RAYDIUM_AMM_V4_PROGRAM_ID, false),
+
+
             AccountMeta::new_readonly(spl_token::id(), false),
             AccountMeta::new(self.address, false),
             AccountMeta::new_readonly(amm_authority, false),

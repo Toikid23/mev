@@ -32,6 +32,10 @@ use mev::decoders::pool_operations::UserSwapAccounts; // La struct pour les comp
 use spl_associated_token_account::get_associated_token_address;
 use anchor_lang::prelude::*;
 use anchor_lang::InstructionData;
+use solana_sdk::transaction::VersionedTransaction;
+use solana_sdk::message::{v0, VersionedMessage};
+use solana_address_lookup_table_program::state::AddressLookupTable;
+use std::env::args;
 
 fn load_main_graph_from_cache() -> Result<Graph> {
     println!("[Graph] Chargement du cache de pools de référence depuis 'graph_cache.bin'...");
@@ -94,41 +98,26 @@ fn update_hot_graph_reserve(graph: &Arc<Mutex<Graph>>, vault_address: &Pubkey, n
 }
 
 
-/// Construit la transaction d'arbitrage "brute" (sans protection de slippage optimisée)
-/// pour l'envoyer en simulation.
-async fn build_brute_force_transaction(
+async fn build_arbitrage_transaction(
     opportunity: &ArbitrageOpportunity,
     graph: Arc<Mutex<Graph>>,
     rpc_client: &RpcClient,
     payer: &Keypair,
-) -> Result<Transaction> {
-    println!("\n--- [Phase 1] Construction de la Transaction Brute pour Simulation ---");
+    lookup_table_account: &AddressLookupTable<'_>,
+) -> Result<VersionedTransaction> {
+    println!("\n--- [Phase 1] Construction de la Transaction V0 (avec LUT) ---");
 
-    // On lock le graphe
+    // --- A. Préparation des instructions de swap (inchangé) ---
     let graph_guard = graph.lock().await;
-
-    // 1. On utilise .get() pour un emprunt partagé (lecture seule) et on clone les pools.
-    // C'est sûr et ça résout l'erreur de "borrowing".
-    let mut pool_buy_from = graph_guard.pools.get(&opportunity.pool_buy_from_key)
-        .ok_or_else(|| anyhow!("Pool d'achat introuvable dans le graphe"))?
-        .clone();
-    let mut pool_sell_to = graph_guard.pools.get(&opportunity.pool_sell_to_key)
-        .ok_or_else(|| anyhow!("Pool de vente introuvable dans le graphe"))?
-        .clone();
-
-    // On peut maintenant libérer le verrou du graphe, car nous avons nos propres copies.
+    let mut pool_buy_from = graph_guard.pools.get(&opportunity.pool_buy_from_key).unwrap().clone();
+    let mut pool_sell_to = graph_guard.pools.get(&opportunity.pool_sell_to_key).unwrap().clone();
     drop(graph_guard);
-
-    let clock_account = rpc_client.get_account(&solana_sdk::sysvar::clock::ID).await?;
-    let clock: solana_sdk::sysvar::clock::Clock = bincode::deserialize(&clock_account.data)?;
 
     let predicted_intermediate_out = pool_buy_from.get_quote_async(
         &opportunity.token_in_mint,
         opportunity.amount_in,
-        rpc_client, // On passe le rpc_client
-    ).await?; // On utilise .await? car la fonction est maintenant asynchrone
-
-    println!("  -> Sortie intermédiaire théorique : {} lamports", predicted_intermediate_out);
+        rpc_client,
+    ).await?;
 
     let user_accounts_buy = UserSwapAccounts {
         owner: payer.pubkey(),
@@ -141,76 +130,86 @@ async fn build_brute_force_transaction(
         destination: get_associated_token_address(&payer.pubkey(), &opportunity.token_in_mint),
     };
 
-    let ix_buy_brute = pool_buy_from.create_swap_instruction(
-        &opportunity.token_in_mint, opportunity.amount_in, 1, &user_accounts_buy,
-    )?;
-    let ix_sell_brute = pool_sell_to.create_swap_instruction(
-        &opportunity.token_intermediate_mint, predicted_intermediate_out, 1, &user_accounts_sell,
-    )?;
+    let ix_buy = pool_buy_from.create_swap_instruction(&opportunity.token_in_mint, opportunity.amount_in, 1, &user_accounts_buy)?;
+    let ix_sell = pool_sell_to.create_swap_instruction(&opportunity.token_intermediate_mint, predicted_intermediate_out, 1, &user_accounts_sell)?;
 
+    // --- B. Préparation des données pour notre programme (inchangé) ---
     let step1 = ProgramSwapStep {
-        dex_program_id: ix_buy_brute.program_id,
-        num_accounts_for_step: ix_buy_brute.accounts.len() as u8,
-        instruction_data: ix_buy_brute.data,
+        dex_program_id: ix_buy.program_id,
+        num_accounts_for_step: ix_buy.accounts.len() as u8,
+        instruction_data: ix_buy.data,
     };
     let step2 = ProgramSwapStep {
-        dex_program_id: ix_sell_brute.program_id,
-        num_accounts_for_step: ix_sell_brute.accounts.len() as u8,
-        instruction_data: ix_sell_brute.data,
+        dex_program_id: ix_sell.program_id,
+        num_accounts_for_step: ix_sell.accounts.len() as u8,
+        instruction_data: ix_sell.data,
     };
-
-    // --- CONSTRUCTION MANUELLE DE L'INSTRUCTION (LA BONNE FAÇON) ---
-
-    // 1. Définir les arguments
-    let args = ExecuteRouteIxArgs {
-        route: vec![step1, step2],
-        minimum_expected_profit: 0,
-    };
-
-    // 2. Sérialiser les arguments avec Borsh (fourni par AnchorSerialize)
+    let mut args = ExecuteRouteIxArgs { route: vec![step1, step2], minimum_expected_profit: 0 }; // <--- AJOUTEZ 'mut'
     let mut instruction_data = Vec::new();
-    // Discriminateur pour `execute_route`: sha256("global:execute_route")[..8]
-    // Vous pouvez le calculer une seule fois et le mettre en dur.
-    // En Python : `import hashlib; print(hashlib.sha256(b"global:execute_route").digest()[:8])`
-    let execute_route_discriminator: [u8; 8] = [22, 45, 126, 19, 132, 118, 15, 218];
-    instruction_data.extend_from_slice(&execute_route_discriminator);
-    instruction_data.extend_from_slice(&args.try_to_vec()?); // .try_to_vec() vient de AnchorSerialize
+    // Le discriminateur correct pour "global::execute_route"
+    instruction_data.extend_from_slice(&[246, 14, 81, 121, 140, 237, 86, 23]);
+    instruction_data.extend_from_slice(&args.try_to_vec()?);
 
-    // 3. Définir les comptes
+
+    // --- C. Construction de l'instruction COMPLÈTE (Logique corrigée) ---
     let (config_pda, _) = Pubkey::find_program_address(&[b"config"], &ATOMIC_ARB_EXECUTOR_PROGRAM_ID);
 
-    let mut accounts = vec![
-        AccountMeta::new(config_pda, false), // `config` est en lecture seule, mais le programme attend `new`
-        AccountMeta::new(payer.pubkey(), true), // `signer`
+    // D'abord, les comptes attendus par la structure `ExecuteRoute`
+    let mut final_accounts_list = vec![
+        AccountMeta::new_readonly(config_pda, false), // `config`
+        AccountMeta::new(payer.pubkey(), true),      // `signer`
     ];
 
-    // Ajouter les `remaining_accounts`
-    accounts.push(AccountMeta { pubkey: user_accounts_sell.destination, is_signer: false, is_writable: true });
-    accounts.extend(ix_buy_brute.accounts.into_iter().map(|mut acc| { acc.is_signer = false; acc }));
-    accounts.extend(ix_sell_brute.accounts.into_iter().map(|mut acc| { acc.is_signer = false; acc }));
+    // Ensuite, on ajoute les `remaining_accounts`
+    // 1. Le compte de profit
+    final_accounts_list.push(AccountMeta { pubkey: user_accounts_sell.destination, is_signer: false, is_writable: true });
 
-    // 4. Créer l'instruction finale
+    // 2. Les comptes du premier swap
+    //    *** LA CORRECTION EST ICI : On ne retire PLUS le statut de signataire ***
+    final_accounts_list.extend(ix_buy.accounts);
+
+    // 3. Les comptes du deuxième swap
+    //    *** LA CORRECTION EST ICI : On ne retire PLUS le statut de signataire ***
+    final_accounts_list.extend(ix_sell.accounts);
+
     let execute_route_ix = Instruction {
         program_id: ATOMIC_ARB_EXECUTOR_PROGRAM_ID,
-        accounts,
+        accounts: final_accounts_list.clone(), // On utilise notre liste corrigée
         data: instruction_data,
     };
-    // --- FIN DE LA CONSTRUCTION MANUELLE ---
 
+    println!("\n--- COMPTES REQUIS PAR LE BOT RUST ---");
+    for (i, acc) in final_accounts_list.iter().enumerate() {
+        println!("{:2}: {} (Signer: {})", i, acc.pubkey, acc.is_signer);
+    }
+    println!("-------------------------------------\n");
+
+    // --- D. Construction de la VersionedTransaction (inchangé) ---
     let recent_blockhash = rpc_client.get_latest_blockhash().await?;
-    let mut transaction = Transaction::new_with_payer(
-        &[execute_route_ix],
-        Some(&payer.pubkey()),
-    );
-    transaction.sign(&[payer], recent_blockhash);
 
-    println!("  -> Transaction brute construite avec succès.");
+    let sdk_lookup_table = solana_sdk::message::AddressLookupTableAccount {
+        key: ADDRESS_LOOKUP_TABLE_ADDRESS,
+        addresses: lookup_table_account.addresses.to_vec(),
+    };
+
+    let message = v0::Message::try_compile(
+        &payer.pubkey(),
+        &[execute_route_ix],
+        &[sdk_lookup_table],
+        recent_blockhash,
+    )?;
+
+    let transaction = VersionedTransaction::try_new(VersionedMessage::V0(message), &[payer])?;
+
+    println!("  -> Transaction V0 construite avec succès.");
     Ok(transaction)
 }
 
 
 // ID de votre programme on-chain, récupéré depuis Anchor.toml
 const ATOMIC_ARB_EXECUTOR_PROGRAM_ID: Pubkey = pubkey!("3gHUHkQD8TjeQntEsygDnm4TRo3xKQRTbDTaFxgQdXe1");
+
+const ADDRESS_LOOKUP_TABLE_ADDRESS: Pubkey = solana_sdk::pubkey!("E5h798UBdK8V1L7MvRfi1ppr2vitPUUUUCVqvTyDgKXN");
 
 // Une réplique exacte de la struct `SwapStep` de votre programme on-chain.
 #[derive(AnchorSerialize, Clone, Debug)]
@@ -245,68 +244,57 @@ async fn process_opportunity(
     rpc_client: Arc<RpcClient>,
     payer: Keypair,
 ) -> Result<()> {
-    // --- Phase 1 : Construction de la transaction brute ---
-    let brute_transaction = match build_brute_force_transaction(
+    // --- Phase 0 : Charger la LUT ---
+    let lookup_table_account_data = rpc_client.get_account_data(&ADDRESS_LOOKUP_TABLE_ADDRESS).await?;
+    let lookup_table_account = AddressLookupTable::deserialize(&lookup_table_account_data)?;
+
+    // --- Phase 1 : Construction de la transaction V0 ---
+    let arbitrage_tx = match build_arbitrage_transaction(
         &opportunity,
         graph.clone(),
-        &rpc_client, // <--- AJOUTEZ CET ARGUMENT
-        &payer
+        &rpc_client,
+        &payer,
+        &lookup_table_account, // On passe la LUT chargée
     ).await {
         Ok(tx) => tx,
         Err(e) => {
-            println!("[Phase 1 ERREUR] Échec de la construction de la transaction : {}", e);
+            println!("[Phase 1 ERREUR] Échec de la construction de la transaction V0 : {}", e);
             return Ok(());
         }
     };
 
-    // --- Phase 2 : Simulations Parallèles & Récupération des Frais ---
+    // --- Le reste de la fonction (simulations, etc.) reste identique ---
+    // Elle fonctionnera maintenant car `arbitrage_tx` est une VersionedTransaction,
+    // que `simulate_transaction_with_config` sait gérer.
+
     println!("\n--- [Phase 2] Lancement des simulations et de la récupération des frais ---");
     let sim_config = RpcSimulateTransactionConfig {
         sig_verify: false,
         replace_recent_blockhash: true,
         commitment: Some(rpc_client.commitment()),
         encoding: Some(solana_transaction_status::UiTransactionEncoding::Base64),
-        ..Default::default() // Remplit tous les autres champs (comme accounts, min_context_slot, etc.) avec leur valeur par défaut
+        ..Default::default()
     };
-
-    // On crée une variable qui vivra aussi longtemps que nécessaire
     let accounts_for_fees: Vec<Pubkey> = vec![
         opportunity.pool_buy_from_key,
         opportunity.pool_sell_to_key
     ];
-
-    // On lance maintenant 3 tâches en parallèle !
     let (sim_result, jito_sim_result, priority_fees_result) = tokio::join!(
-    rpc_client.simulate_transaction_with_config(&brute_transaction, sim_config.clone()),
-        // TODO: Remplacer par un vrai appel au simulateur Jito
-    rpc_client.simulate_transaction_with_config(&brute_transaction, sim_config),
-    // On passe maintenant une référence à notre variable qui a une durée de vie plus longue
-    rpc_client.get_recent_prioritization_fees(&accounts_for_fees)
+        rpc_client.simulate_transaction_with_config(&arbitrage_tx, sim_config.clone()),
+        rpc_client.simulate_transaction_with_config(&arbitrage_tx, sim_config),
+        rpc_client.get_recent_prioritization_fees(&accounts_for_fees)
     );
 
+    // ... (le reste de votre logique de Phase 3, 4, 5, 6 est correct et n'a pas besoin de changer)
 
-    // --- Phase 3 : Analyse des Résultats de Simulation ---
     println!("\n--- [Phase 3] Analyse des résultats ---");
-
-    // On utilise le résultat de la simulation Jito en priorité car il est souvent plus précis.
-    let sim_response = match jito_sim_result.or(sim_result) {
-        Ok(response) => response,
-        Err(e) => {
-            println!("  -> Les deux simulations ont échoué. Erreur RPC : {}", e);
-            return Ok(());
-        }
-    };
-
+    let sim_response = match jito_sim_result.or(sim_result) { Ok(response) => response, Err(e) => { println!("  -> Les deux simulations ont échoué. Erreur RPC : {}", e); return Ok(()); } };
     let sim_value = sim_response.value;
     if let Some(err) = sim_value.err {
         println!("  -> Simulation ÉCHOUÉE : {:?}", err);
-                if let Some(logs) = sim_value.logs {
-                    println!("     Logs:");
-                    logs.iter().for_each(|log| println!("       {}", log));
-                }
-                return Ok(());
-            }
-
+        if let Some(logs) = sim_value.logs { logs.iter().for_each(|log| println!("       {}", log)); }
+        return Ok(());
+    }
     println!("  -> Simulation RÉUSSIE !");
     let compute_units = sim_value.units_consumed.unwrap_or(0);
     let logs = sim_value.logs.unwrap_or_default();
@@ -402,6 +390,7 @@ async fn main() -> Result<()> {
     let main_graph_clone_for_task1 = Arc::clone(&main_graph);
     let pubsub_client_clone_for_task1 = Arc::clone(&pubsub_client);
     let update_sender_clone_for_task1 = update_sender.clone();
+    let currently_processing = Arc::new(Mutex::new(HashSet::<String>::new()));
     tokio::spawn(async move {
         let mut subscription_handles: HashMap<Pubkey, JoinHandle<()>> = HashMap::new();
         let mut current_subscribed_vaults = HashSet::new();
@@ -442,39 +431,53 @@ async fn main() -> Result<()> {
     // On prépare un clone du payeur qui pourra être déplacé dans les tâches
     let payer_cloneable = Keypair::try_from(payer.to_bytes().as_slice())?;
 
+    println!("[Bot] Prêt. En attente d'opportunités d'arbitrage...");
     loop {
-        // La boucle attend un message indiquant qu'un vault a été mis à jour
         if let Some((vault_address, new_balance)) = update_receiver.recv().await {
             update_hot_graph_reserve(&hot_graph, &vault_address, new_balance);
 
-            // On clone les Arcs et le Keypair pour les passer à la tâche de recherche
-            let graph_for_search = Arc::clone(&hot_graph);
-            let client_for_search = Arc::clone(&rpc_client);
-            let payer_for_search = Keypair::try_from(payer_cloneable.to_bytes().as_slice())?;
+            let graph_clone = Arc::clone(&hot_graph);
+            let client_clone = Arc::clone(&rpc_client);
+            let payer_clone = Keypair::from_bytes(&payer.to_bytes())?;
+            let processing_clone = Arc::clone(&currently_processing); // On clone le verrou
 
-            // On lance la recherche d'opportunités dans une nouvelle tâche pour ne pas bloquer la boucle
             tokio::spawn(async move {
-                let opportunities = find_spatial_arbitrage(graph_for_search.clone(), client_for_search.clone()).await;
+                let opportunities = find_spatial_arbitrage(graph_clone.clone(), client_clone.clone()).await;
 
-                if !opportunities.is_empty() {
-                    println!("\n>>> {} opportunité(s) détectée(s) ! Lancement du traitement...", opportunities.len());
-                }
+                // On ne traite que la première opportunité trouvée pour éviter de spammer
+                // les logs et les simulations pour un seul événement.
+                if let Some(opp) = opportunities.into_iter().next() {
 
-                for opp in opportunities {
-                    // Pour chaque opportunité, on clone à nouveau les ressources pour sa propre tâche dédiée
-                    let graph_for_task = Arc::clone(&graph_for_search);
-                    let client_for_task = Arc::clone(&client_for_search);
-                    let payer_for_task = Keypair::try_from(payer_for_search.to_bytes().as_slice()).unwrap();
+                    // 1. Créer l'ID unique
+                    let mut pools = [opp.pool_buy_from_key.to_string(), opp.pool_sell_to_key.to_string()];
+                    pools.sort();
+                    let opportunity_id = format!("{}-{}", pools[0], pools[1]);
 
-                    // On lance le pipeline de traitement complet pour cette opportunité
-                    tokio::spawn(process_opportunity(
-                        opp,
-                        graph_for_task,
-                        client_for_task,
-                        payer_for_task,
-                    ));
+                    // 2. Vérifier et acquérir le verrou
+                    let is_already_processing = {
+                        let mut processing_guard = processing_clone.lock().await;
+                        if processing_guard.contains(&opportunity_id) {
+                            true
+                        } else {
+                            processing_guard.insert(opportunity_id.clone());
+                            false
+                        }
+                    };
+
+                    if !is_already_processing {
+                        println!("\n>>> 1 opportunité(s) détectée(s) ! Lancement du traitement...");
+
+                        // 3. On appelle VOTRE fonction de traitement
+                        if let Err(e) = process_opportunity(opp, graph_clone, client_clone, payer_clone).await {
+                            println!("[Erreur Traitement] {}", e);
+                        }
+
+                        // 4. Libérer le verrou
+                        let mut processing_guard = processing_clone.lock().await;
+                        processing_guard.remove(&opportunity_id);
+                    }
                 }
             });
         }
     }
-} // La fonction main se termine ici
+}
