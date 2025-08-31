@@ -33,32 +33,58 @@ pub async fn test_whirlpool_with_simulation(rpc_client: &RpcClient, payer: &Keyp
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
     let input_mint_pubkey = Pubkey::from_str(INPUT_MINT_STR)?;
 
-    // --- 1. PRÉDICTION LOCALE (inchangé) ---
+    // --- 1. PRÉDICTION LOCALE ---
     println!("[1/3] Hydratation et prédiction locale...");
     let pool_account_data = rpc_client.get_account_data(&pool_pubkey).await?;
     let mut pool = decode_pool(&pool_pubkey, &pool_account_data)?;
     hydrate(&mut pool, rpc_client).await?;
-    let (input_decimals, output_decimals, _) = if input_mint_pubkey == pool.mint_a {
+
+    let (input_decimals, output_decimals, output_mint_pubkey) = if input_mint_pubkey == pool.mint_a {
         (pool.mint_a_decimals, pool.mint_b_decimals, pool.mint_b)
     } else {
         (pool.mint_b_decimals, pool.mint_a_decimals, pool.mint_a)
     };
     let amount_in_base_units = (INPUT_AMOUNT_UI * 10f64.powi(input_decimals as i32)) as u64;
-    let predicted_amount_out = pool.get_quote_with_rpc(&input_mint_pubkey, amount_in_base_units, rpc_client).await?;
+
+    // On utilise la version asynchrone pour Whirlpool
+    let predicted_amount_out = pool.get_quote_async(&input_mint_pubkey, amount_in_base_units, rpc_client).await?;
     let ui_predicted_amount_out = predicted_amount_out as f64 / 10f64.powi(output_decimals as i32);
     println!("-> PRÉDICTION LOCALE: {} UI", ui_predicted_amount_out);
 
-    // --- 2. PRÉPARATION DE LA SIMULATION (maintenant simplifié) ---
+    // --- NOUVEAU BLOC DE VALIDATION ---
+    println!("\n[VALIDATION] Lancement du test d'inversion mathématique...");
+    if predicted_amount_out > 0 {
+        let required_input_from_quote = pool.get_required_input(&output_mint_pubkey, predicted_amount_out, 0)?; // timestamp non utilisé
+
+        println!("  -> Input original     : {}", amount_in_base_units);
+        println!("  -> Output prédit      : {}", predicted_amount_out);
+        println!("  -> Input Re-calculé   : {}", required_input_from_quote);
+
+        if required_input_from_quote >= amount_in_base_units {
+            let difference = required_input_from_quote.saturating_sub(amount_in_base_units);
+            // Tolérance plus élevée pour les CLMMs
+            if difference <= 100 {
+                println!("  -> ✅ SUCCÈS: Le calcul inverse est cohérent (différence: {} lamports).", difference);
+            } else {
+                bail!("  -> ⚠️ ÉCHEC: La différence du calcul inverse est trop grande ({} lamports).", difference);
+            }
+        } else {
+            bail!("  -> ⚠️ ÉCHEC: Le calcul inverse a produit un montant inférieur à l'original !");
+        }
+    } else {
+        println!("  -> AVERTISSEMENT: Le quote est de 0, test d'inversion sauté.");
+    }
+    // --- FIN DU BLOC DE VALIDATION ---
+
+    // --- 2. PRÉPARATION DE LA SIMULATION ---
     println!("\n[2/3] Préparation de la simulation...");
 
-    // On a juste besoin de définir la struct UserSwapAccounts
     let user_accounts = UserSwapAccounts {
         owner: payer.pubkey(),
         source: get_associated_token_address(&payer.pubkey(), &input_mint_pubkey),
-        destination: get_associated_token_address(&payer.pubkey(), if input_mint_pubkey == pool.mint_a { &pool.mint_b } else { &pool.mint_a }),
+        destination: get_associated_token_address(&payer.pubkey(), &output_mint_pubkey),
     };
 
-    // L'appel unifié gère toute la complexité
     let swap_ix = pool.create_swap_instruction(
         &input_mint_pubkey,
         amount_in_base_units,
@@ -70,11 +96,10 @@ pub async fn test_whirlpool_with_simulation(rpc_client: &RpcClient, payer: &Keyp
         &[swap_ix], Some(&payer.pubkey()), &[payer], rpc_client.get_latest_blockhash().await?,
     );
 
-    // --- 3. EXÉCUTION & ANALYSE (votre code original, inchangé) ---
+    // --- 3. EXÉCUTION & ANALYSE ---
     println!("\n[3/3] Exécution de la simulation standard...");
-    let user_destination_ata = user_accounts.destination; // On récupère l'ATA de destination
-    // ... (le reste de votre logique de simulation et de comparaison est parfait et reste ici)
-    // ...
+    let user_destination_ata = user_accounts.destination;
+
     let sim_config = RpcSimulateTransactionConfig {
         sig_verify: false,
         replace_recent_blockhash: true,

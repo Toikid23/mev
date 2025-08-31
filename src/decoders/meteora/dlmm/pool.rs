@@ -14,6 +14,7 @@ use solana_sdk::pubkey;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
+use num_integer::Integer;
 
 // --- CONSTANTES ---
 pub const PROGRAM_ID: pubkey::Pubkey = pubkey!("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo");
@@ -252,6 +253,86 @@ impl PoolOperations for DecodedDlmmPool {
         let final_amount_out = gross_amount_out.saturating_sub(fee_on_output);
         Ok(final_amount_out)
     }
+
+    fn get_required_input(
+        &self,
+        token_out_mint: &Pubkey,
+        amount_out: u64,
+        current_timestamp: i64,
+    ) -> Result<u64> {
+        if amount_out == 0 { return Ok(0); }
+        let bin_arrays = self.hydrated_bin_arrays.as_ref().ok_or_else(|| anyhow!("Pool not hydrated"))?;
+
+        // --- 1. Configuration initiale ---
+        let is_base_output = *token_out_mint == self.mint_a; // Veut du token A (base)
+        let is_base_input = !is_base_output;                 // Donc fournit du token B (quote)
+
+        let (in_mint_fee_bps, in_mint_max_fee, out_mint_fee_bps, out_mint_max_fee) = if is_base_input {
+            (self.mint_a_transfer_fee_bps, self.mint_a_transfer_fee_max, self.mint_b_transfer_fee_bps, self.mint_b_transfer_fee_max)
+        } else {
+            (self.mint_b_transfer_fee_bps, self.mint_b_transfer_fee_max, self.mint_a_transfer_fee_bps, self.mint_a_transfer_fee_max)
+        };
+
+        // --- 2. Inverser les frais de transfert de SORTIE ---
+        let gross_amount_out_target = calculate_gross_amount_before_transfer_fee(amount_out, out_mint_fee_bps, out_mint_max_fee)? as u128;
+
+        // --- 3. Itérer sur les bins à l'envers ---
+        let mut total_amount_in_net: u128 = 0;
+        let mut amount_out_remaining = gross_amount_out_target;
+        let mut current_bin_id = self.active_bin_id;
+
+        // Simulation des frais dynamiques
+        let mut temp_v_params = self.v_parameters;
+        update_references(&mut temp_v_params, &self.parameters, self.active_bin_id, current_timestamp)?;
+
+        while amount_out_remaining > 0 {
+            if current_bin_id < self.parameters.min_bin_id || current_bin_id > self.parameters.max_bin_id {
+                return Err(anyhow!("Not enough liquidity to fulfill the order."));
+            }
+
+            let bin_array_idx = get_bin_array_index_from_bin_id(current_bin_id);
+            let bin_array = match bin_arrays.get(&bin_array_idx) {
+                Some(array) => array,
+                None => return Err(anyhow!("Required bin array #{} is not loaded.", bin_array_idx)),
+            };
+
+            let bin_index_in_array = (current_bin_id % (MAX_BIN_PER_ARRAY as i32) + (MAX_BIN_PER_ARRAY as i32)) % (MAX_BIN_PER_ARRAY as i32);
+            let current_bin = &bin_array.bins[bin_index_in_array as usize];
+
+            let out_reserve_in_bin = if is_base_output { current_bin.amount_a } else { current_bin.amount_b };
+            if out_reserve_in_bin == 0 {
+                current_bin_id = if is_base_input { current_bin_id.saturating_sub(1) } else { current_bin_id.saturating_add(1) };
+                continue;
+            }
+
+            let amount_out_from_this_bin = amount_out_remaining.min(out_reserve_in_bin as u128);
+
+            let required_net_in_for_chunk = math::get_amount_in(amount_out_from_this_bin as u64, current_bin.price, is_base_input)? as u128;
+
+            total_amount_in_net += required_net_in_for_chunk;
+            amount_out_remaining -= amount_out_from_this_bin;
+
+            current_bin_id = if is_base_input { current_bin_id.saturating_sub(1) } else { current_bin_id.saturating_add(1) };
+        }
+
+        // --- 4. Inverser les frais de POOL ---
+        update_volatility_accumulator(&mut temp_v_params, &self.parameters, self.active_bin_id, current_bin_id)?;
+        let total_fee_rate = get_total_fee(self.bin_step, &self.parameters, &temp_v_params)?;
+
+        let amount_in_after_transfer_fee = if total_fee_rate > 0 {
+            let num = total_amount_in_net.saturating_mul(FEE_PRECISION);
+            let den = FEE_PRECISION.saturating_sub(total_fee_rate);
+            num.div_ceil(den)
+        } else {
+            total_amount_in_net
+        };
+
+        // --- 5. Inverser les frais de transfert d'ENTRÉE ---
+        let final_amount_in = calculate_gross_amount_before_transfer_fee(amount_in_after_transfer_fee as u64, in_mint_fee_bps, in_mint_max_fee)?;
+
+        Ok(final_amount_in)
+    }
+
 
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, rpc_client: &RpcClient) -> Result<u64> {
         // Cet appel est maintenant correct car la signature correspond

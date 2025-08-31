@@ -1,20 +1,19 @@
-// Fichier : src/math/math (VERSION CORRIGÉE ET COMPLÈTE)
+// Fichier : src/decoders/raydium/clmm/math.rs (Version finale utilisant full_math)
 
-use uint::{construct_uint};
 use anyhow::{Result, anyhow};
-use super::full_math::MulDiv;
+use super::full_math::{self, MulDiv, U256, DivCeil}; // On importe notre nouveau trait
 
-construct_uint! { pub struct U256(4); }
 const BITS: u32 = 64;
 const U128_MAX: u128 = 340282366920938463463374607431768211455;
 
-mod tick_math {
+pub mod tick_math {
     pub const MIN_TICK: i32 = -443636;
     pub const MAX_TICK: i32 = 443636;
+    pub const MIN_SQRT_PRICE_X64: u128 = 4295048016;
+    pub const MAX_SQRT_PRICE_X64: u128 = 79226673521066979257578248091;
 }
 pub use tick_math::{MIN_TICK, MAX_TICK};
 
-// --- Fonctions de conversion Tick <-> SqrtPrice (Inchangées et correctes) ---
 pub fn tick_to_sqrt_price_x64(tick: i32) -> u128 {
     let abs_tick = tick.unsigned_abs();
     let mut ratio = if (abs_tick & 0x1) != 0 { 0xfffb023273ab_u128 } else { 0x1000000000000_u128 };
@@ -38,45 +37,100 @@ pub fn tick_to_sqrt_price_x64(tick: i32) -> u128 {
     if (abs_tick & 0x40000) != 0 { ratio = (ratio * 0x0000000936e0_u128) >> 48; }
 
     if tick < 0 {
-        ratio = U128_MAX / ratio;
+        U128_MAX / ratio
+    } else {
+        ratio << 32
     }
-    ratio << 32
 }
 
-// --- Fonctions de calcul de montant (Traduites de `liquidity_math.rs`) ---
-pub fn get_amount_y(sqrt_price_a: u128, sqrt_price_b: u128, liquidity: u128) -> u128 {
+fn div_rounding_up(x: U256, y: U256) -> U256 {
+    (x + y - U256::one()) / y
+}
+
+pub fn get_amount_x(sqrt_price_a: u128, sqrt_price_b: u128, liquidity: u128, round_up: bool) -> Result<u64> {
     let (sqrt_price_a, sqrt_price_b) = if sqrt_price_a > sqrt_price_b { (sqrt_price_b, sqrt_price_a) } else { (sqrt_price_a, sqrt_price_b) };
-    (U256::from(liquidity) * U256::from(sqrt_price_b - sqrt_price_a) >> BITS).as_u128()
+
+    let numerator_1 = U256::from(liquidity) << BITS;
+    let numerator_2 = U256::from(sqrt_price_b - sqrt_price_a);
+
+    if sqrt_price_a == 0 { return Err(anyhow!("sqrt_price_a is zero")); }
+
+    let result = if round_up {
+        div_rounding_up(
+            numerator_1.mul_div_ceil(numerator_2, U256::from(sqrt_price_b)).ok_or_else(|| anyhow!("muldiv error"))?,
+            U256::from(sqrt_price_a)
+        )
+    } else {
+        numerator_1.mul_div_floor(numerator_2, U256::from(sqrt_price_b)).ok_or_else(|| anyhow!("muldiv error"))?
+            / U256::from(sqrt_price_a)
+    };
+
+    Ok(u64::try_from(result).map_err(|e| anyhow!(e))?)
 }
 
-pub fn get_amount_x(sqrt_price_a: u128, sqrt_price_b: u128, liquidity: u128) -> u128 {
+pub fn get_amount_y(sqrt_price_a: u128, sqrt_price_b: u128, liquidity: u128, round_up: bool) -> Result<u64> {
     let (sqrt_price_a, sqrt_price_b) = if sqrt_price_a > sqrt_price_b { (sqrt_price_b, sqrt_price_a) } else { (sqrt_price_a, sqrt_price_b) };
-    if sqrt_price_a == 0 { return 0; }
-    let numerator = U256::from(liquidity) << (BITS * 2);
-    let denominator = U256::from(sqrt_price_b) * U256::from(sqrt_price_a) >> BITS;
-    if denominator.is_zero() { return 0; }
-    let ratio = numerator / denominator;
-    (ratio * U256::from(sqrt_price_b - sqrt_price_a) >> (BITS * 2)).as_u128()
+
+    let result = if round_up {
+        U256::from(liquidity).mul_div_ceil(
+            U256::from(sqrt_price_b - sqrt_price_a),
+            U256::from(1u128 << BITS),
+        ).ok_or_else(|| anyhow!("muldiv error"))?
+    } else {
+        U256::from(liquidity).mul_div_floor(
+            U256::from(sqrt_price_b - sqrt_price_a),
+            U256::from(1u128 << BITS),
+        ).ok_or_else(|| anyhow!("muldiv error"))?
+    };
+
+    Ok(u64::try_from(result).map_err(|e| anyhow!(e))?)
 }
 
-// --- Fonctions de calcul de prix (Traduites de `sqrt_price_math.rs`) ---
-pub fn get_next_sqrt_price_from_amount_x_in(sqrt_price: u128, liquidity: u128, amount_in: u128) -> u128 {
+pub fn get_next_sqrt_price_from_amount_x_in(sqrt_price: u128, liquidity: u128, amount_in: u128, add: bool) -> u128 {
     if amount_in == 0 { return sqrt_price; }
     let numerator = U256::from(liquidity) << BITS;
-    let product = U256::from(amount_in) * U256::from(sqrt_price);
-    let denominator = numerator + product;
-    if denominator.is_zero() { return sqrt_price; }
-    (numerator * U256::from(sqrt_price) / denominator).as_u128()
+
+    if add {
+        let product = U256::from(amount_in) * U256::from(sqrt_price);
+        if product / U256::from(amount_in) == U256::from(sqrt_price) {
+            let denominator = numerator + product;
+            if denominator >= numerator {
+                return (numerator.mul_div_ceil(U256::from(sqrt_price), denominator).unwrap()).as_u128();
+            }
+        }
+        (numerator / (numerator / U256::from(sqrt_price) + U256::from(amount_in))).as_u128()
+    } else {
+        let product = U256::from(amount_in) * U256::from(sqrt_price);
+        let denominator = numerator.checked_sub(product).unwrap();
+        (numerator.mul_div_ceil(U256::from(sqrt_price), denominator).unwrap()).as_u128()
+    }
 }
 
-pub fn get_next_sqrt_price_from_amount_y_in(sqrt_price: u128, liquidity: u128, amount_in: u128) -> u128 {
-    if liquidity == 0 { return sqrt_price; }
-    sqrt_price + ((U256::from(amount_in) << BITS) / U256::from(liquidity)).as_u128()
+pub fn get_next_sqrt_price_from_amount_y_in(sqrt_price: u128, liquidity: u128, amount_in: u128, add: bool) -> u128 {
+    if amount_in == 0 { return sqrt_price; }
+    if add {
+        let quotient = (U256::from(amount_in) << BITS) / U256::from(liquidity);
+        (U256::from(sqrt_price) + quotient).as_u128()
+    } else {
+        let quotient = (U256::from(amount_in) << BITS).div_ceil(U256::from(liquidity));
+        (U256::from(sqrt_price).checked_sub(quotient).unwrap()).as_u128()
+    }
 }
 
-// --- NOUVELLE FONCTION `compute_swap_step` (Traduite de `swap_math.rs`) ---
-// Calcule l'étape d'un swap en prenant en compte les frais.
-// Retourne: (prochain_sqrt_price, montant_in_consommé, montant_out_produit, frais_payés)
+pub fn get_sqrt_price_from_amount_y_out(sqrt_price_current: u128, liquidity: u128, amount_out: u128) -> u128 {
+    if liquidity == 0 { return sqrt_price_current; }
+    let numerator = U256::from(amount_out) << BITS;
+    let denominator = U256::from(liquidity);
+    (U256::from(sqrt_price_current) - (numerator.div_ceil(denominator))).as_u128()
+}
+
+pub fn get_sqrt_price_from_amount_x_out(sqrt_price_current: u128, liquidity: u128, amount_out: u128) -> u128 {
+    if liquidity == 0 || amount_out == 0 { return sqrt_price_current; }
+    let numerator = U256::from(liquidity) << BITS;
+    let denominator = (numerator / U256::from(sqrt_price_current)).checked_add(U256::from(amount_out)).unwrap();
+    (numerator.div_ceil(denominator)).as_u128()
+}
+
 pub fn compute_swap_step(
     sqrt_price_current_x64: u128,
     sqrt_price_target_x64: u128,
@@ -85,50 +139,95 @@ pub fn compute_swap_step(
     fee_rate: u32,
     is_base_input: bool,
 ) -> Result<(u128, u128, u128, u128)> {
-
     let mut sqrt_price_next_x64: u128;
-    let mut amount_in: u128 = 0;
-    let mut amount_out: u128 = 0;
+    let mut amount_in: u128;
+    let mut amount_out: u128;
     let fee_rate_u64 = fee_rate as u64;
     const FEE_RATE_DENOMINATOR_VALUE: u64 = 1_000_000;
 
-    // On calcule le montant net disponible pour le swap après déduction des frais.
     let amount_remaining_less_fee = (amount_remaining as u64).mul_div_floor(
         FEE_RATE_DENOMINATOR_VALUE - fee_rate_u64,
         FEE_RATE_DENOMINATOR_VALUE
     ).ok_or_else(|| anyhow!("Math overflow"))? as u128;
 
-    if is_base_input { // Vente de token 0 (base) pour du token 1 (quote)
-        let amount_in_to_reach_target = get_amount_x(sqrt_price_target_x64, sqrt_price_current_x64, liquidity);
+    if is_base_input {
+        // On fournit du token de base (X), on veut du token de quote (Y)
+        let amount_in_to_reach_target = get_amount_x(sqrt_price_target_x64, sqrt_price_current_x64, liquidity, true)? as u128;
         if amount_remaining_less_fee >= amount_in_to_reach_target {
-            // Le montant restant est suffisant pour atteindre le prochain tick.
             sqrt_price_next_x64 = sqrt_price_target_x64;
             amount_in = amount_in_to_reach_target;
         } else {
-            // Le montant restant est insuffisant, on s'arrête avant le tick.
-            sqrt_price_next_x64 = get_next_sqrt_price_from_amount_x_in(sqrt_price_current_x64, liquidity, amount_remaining_less_fee);
+            sqrt_price_next_x64 = get_next_sqrt_price_from_amount_x_in(sqrt_price_current_x64, liquidity, amount_remaining_less_fee, true);
             amount_in = amount_remaining_less_fee;
         }
-        amount_out = get_amount_y(sqrt_price_next_x64, sqrt_price_current_x64, liquidity);
-    } else { // Vente de token 1 (quote) pour du token 0 (base)
-        let amount_in_to_reach_target = get_amount_y(sqrt_price_current_x64, sqrt_price_target_x64, liquidity);
+        // Pour un output, on arrondit toujours AU PLANCHER (round_up = false)
+        amount_out = get_amount_y(sqrt_price_next_x64, sqrt_price_current_x64, liquidity, false)? as u128;
+    } else {
+        // On fournit du token de quote (Y), on veut du token de base (X)
+        let amount_in_to_reach_target = get_amount_y(sqrt_price_current_x64, sqrt_price_target_x64, liquidity, true)? as u128;
         if amount_remaining_less_fee >= amount_in_to_reach_target {
-            // Le montant restant est suffisant pour atteindre le prochain tick.
             sqrt_price_next_x64 = sqrt_price_target_x64;
             amount_in = amount_in_to_reach_target;
         } else {
-            // Le montant restant est insuffisant, on s'arrête avant le tick.
-            sqrt_price_next_x64 = get_next_sqrt_price_from_amount_y_in(sqrt_price_current_x64, liquidity, amount_remaining_less_fee);
+            sqrt_price_next_x64 = get_next_sqrt_price_from_amount_y_in(sqrt_price_current_x64, liquidity, amount_remaining_less_fee, true);
             amount_in = amount_remaining_less_fee;
         }
-        amount_out = get_amount_x(sqrt_price_current_x64, sqrt_price_next_x64, liquidity);
+        // Pour un output, on arrondit toujours AU PLANCHER (round_up = false)
+        amount_out = get_amount_x(sqrt_price_current_x64, sqrt_price_next_x64, liquidity, false)? as u128;
     }
 
-    // Calcul précis des frais.
+    // Les frais sont calculés sur l'input NET, avec arrondi au PLAFOND
     let fee_amount = (amount_in as u64).mul_div_ceil(
         fee_rate_u64,
         FEE_RATE_DENOMINATOR_VALUE - fee_rate_u64
     ).ok_or_else(|| anyhow!("Math overflow"))? as u128;
 
     Ok((sqrt_price_next_x64, amount_in, amount_out, fee_amount))
+}
+
+pub fn get_tick_at_sqrt_price(sqrt_price_x64: u128) -> Result<i32> {
+    if !(sqrt_price_x64 >= tick_math::MIN_SQRT_PRICE_X64 && sqrt_price_x64 < tick_math::MAX_SQRT_PRICE_X64) {
+        return Err(anyhow!("SqrtPrice out of range"));
+    }
+
+    let msb = 128 - sqrt_price_x64.leading_zeros() - 1;
+    let log2p_integer_x32 = (msb as i128 - 64) << 32;
+
+    let mut bit: i128 = 0x8000_0000_0000_0000i128;
+    let mut precision = 0;
+    let mut log2p_fraction_x64 = 0;
+
+    let mut r = if msb >= 64 {
+        sqrt_price_x64 >> (msb - 63)
+    } else {
+        sqrt_price_x64 << (63 - msb)
+    };
+
+    while bit > 0 && precision < 16 { // BIT_PRECISION = 16
+        r *= r;
+        let is_r_more_than_two = r >> 127_u32;
+        r >>= 63 + is_r_more_than_two;
+        log2p_fraction_x64 += bit * is_r_more_than_two as i128;
+        bit >>= 1;
+        precision += 1;
+    }
+
+    let log2p_fraction_x32 = log2p_fraction_x64 >> 32;
+    let log2p_x32 = log2p_integer_x32 + log2p_fraction_x32;
+
+    let log_sqrt_10001_x64 = log2p_x32 * 59543866431248i128; // LOG_B_2_X32
+
+    // tick - 0.01
+    let tick_low: i32 = ((log_sqrt_10001_x64 - 184467440737095516i128) >> 64) as i32;
+
+    // tick + (2^-14 / log2(√1.0001)) + 0.01
+    let tick_high: i32 = ((log_sqrt_10001_x64 + 15793534762490258745i128) >> 64) as i32;
+
+    Ok(if tick_low == tick_high {
+        tick_low
+    } else if tick_to_sqrt_price_x64(tick_high) <= sqrt_price_x64 {
+        tick_high
+    } else {
+        tick_low
+    })
 }

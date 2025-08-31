@@ -25,6 +25,33 @@ pub fn get_amount_out(
     Ok(amount_out_u256.as_u64())
 }
 
+
+/// Calcule le montant d'entrée requis pour obtenir un montant de sortie spécifié dans un seul bin.
+/// C'est la fonction mathématique inverse de `get_amount_out`.
+pub fn get_amount_in(
+    amount_out: u64,
+    price: u128,
+    is_base_input: bool, // Note: c'est toujours du point de vue de l'INPUT
+) -> Result<u64> {
+    let amount_out_u256 = U256::from(amount_out);
+    let price_u256 = U256::from(price);
+
+    // Si on fournit de la base (is_base_input = true), on reçoit de la quote (Y).
+    // Donc si on VEUT de la quote (Y), on doit fournir de la base (X).
+    // La logique est inversée.
+    let amount_in_u256 = if is_base_input { // On fournit X pour obtenir Y
+        // amount_in (X) = amount_out (Y) / price
+        if price_u256.is_zero() { return Ok(u64::MAX); } // Indique un montant infini
+        (amount_out_u256 << 64) / price_u256
+    } else { // On fournit Y pour obtenir X
+        // amount_in (Y) = amount_out (X) * price
+        (amount_out_u256 * price_u256) >> 64
+    };
+
+    Ok(amount_in_u256.as_u64())
+}
+
+
 /// Calcule le montant de sortie pour un swap dans un seul bin DLMM.
 pub fn get_amount_y(sqrt_price_a: u128, sqrt_price_b: u128, liquidity: u128) -> u128 {
     let (sqrt_price_a, sqrt_price_b) = if sqrt_price_a > sqrt_price_b { (sqrt_price_b, sqrt_price_a) } else { (sqrt_price_a, sqrt_price_b) };

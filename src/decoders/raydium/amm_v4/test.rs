@@ -4,6 +4,7 @@ use solana_sdk::{
     pubkey::Pubkey,
     signature::Keypair,
     signer::Signer,
+    instruction::AccountMeta,
     transaction::Transaction,
 };
 use std::str::FromStr;
@@ -18,6 +19,7 @@ use crate::decoders::raydium::amm_v4::{
     hydrate,
     events::parse_ammv4_output_amount_from_logs,
     openbook_market,
+    RAYDIUM_AMM_V4_PROGRAM_ID,
 };
 use crate::decoders::PoolOperations;
 use crate::decoders::pool_operations::UserSwapAccounts;
@@ -49,11 +51,83 @@ pub async fn test_ammv4_with_simulation(rpc_client: &RpcClient, payer_keypair: &
     let ui_predicted_amount_out = predicted_amount_out as f64 / 10f64.powi(output_decimals as i32);
     println!("-> PRÉDICTION LOCALE: {}", ui_predicted_amount_out);
 
+
+    println!("\n[VALIDATION] Lancement du test d'inversion mathématique...");
+    if predicted_amount_out > 0 {
+        let required_input_from_quote = pool.get_required_input(&output_mint_pubkey, predicted_amount_out, current_timestamp)?;
+        println!("  -> Input original     : {}", amount_in_base_units);
+        println!("  -> Output prédit      : {}", predicted_amount_out);
+        println!("  -> Input Re-calculé   : {}", required_input_from_quote);
+
+        // On vérifie que le résultat est égal ou légèrement supérieur.
+        if required_input_from_quote >= amount_in_base_units {
+            let difference = required_input_from_quote.saturating_sub(amount_in_base_units);
+            // On tolère une petite différence due aux arrondis successifs.
+            if difference <= 10 { // 10 lamports est une tolérance très acceptable
+                println!("  -> ✅ SUCCÈS: Le calcul inverse est cohérent (différence: {} lamports).", difference);
+            } else {
+                bail!("  -> ⚠️ ÉCHEC: La différence du calcul inverse est trop grande ({} lamports).", difference);
+            }
+        } else {
+            bail!("  -> ⚠️ ÉCHEC: Le calcul inverse a produit un montant inférieur à l'original !");
+        }
+    } else {
+        println!("  -> AVERTISSEMENT: Le quote est de 0, test d'inversion sauté.");
+    }
+
+
     // --- 2. Préparation de la Transaction (inchangée) ---
     println!("\n[2/3] Préparation de la transaction de swap...");
     let payer_pubkey = payer_keypair.pubkey();
     let user_source_ata = get_associated_token_address(&payer_pubkey, &input_mint_pubkey);
     let user_destination_ata = get_associated_token_address(&payer_pubkey, &output_mint_pubkey);
+
+
+    // --- NOUVEAU: Pré-vérification de tous les comptes ---
+    println!("\n[DIAGNOSTIC] Vérification de l'existence de tous les comptes requis...");
+    let (amm_authority, _) = Pubkey::find_program_address(&[b"amm authority"], &RAYDIUM_AMM_V4_PROGRAM_ID);
+
+    // On recrée la liste EXACTE des clés qui seront utilisées dans l'instruction
+    let account_keys_to_check = vec![
+        spl_token::id(),
+        pool.address,
+        amm_authority,
+        pool.open_orders,
+        pool.target_orders,
+        pool.vault_a,
+        pool.vault_b,
+        pool.market_program_id,
+        pool.market,
+        pool.market_bids,
+        pool.market_asks,
+        pool.market_event_queue,
+        pool.market_coin_vault,
+        pool.market_pc_vault,
+        pool.market_vault_signer,
+        user_source_ata,
+        user_destination_ata,
+        payer_pubkey,
+    ];
+
+    let account_results = rpc_client.get_multiple_accounts(&account_keys_to_check).await?;
+
+    let mut all_found = true;
+    for (i, result) in account_results.iter().enumerate() {
+        let pubkey = account_keys_to_check[i];
+        if result.is_some() {
+            println!("  -> Compte {}: {} ... Trouvé ✅", i, pubkey);
+        } else {
+            println!("  -> Compte {}: {} ... MANQUANT ❌", i, pubkey);
+            all_found = false;
+        }
+    }
+
+    if !all_found {
+        bail!("Vérification échouée : Un ou plusieurs comptes requis pour la transaction n'existent pas sur le RPC interrogé.");
+    }
+    println!("[DIAGNOSTIC] Tous les comptes ont été trouvés. Le problème est ailleurs.");
+    // --- FIN DU BLOC DE DIAGNOSTIC ---
+
 
     let mut instructions = Vec::new();
     if rpc_client.get_account(&user_destination_ata).await.is_err() {

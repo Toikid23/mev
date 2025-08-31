@@ -153,3 +153,88 @@ pub fn sqrt_price_to_tick_index(sqrt_price_x64: u128) -> i32 {
         }
     }
 }
+
+/// Calcule le montant de token Y (quote) nécessaire, arrondi au PLAFOND.
+pub fn get_delta_y_ceil(sqrt_price_a: u128, sqrt_price_b: u128, liquidity: u128) -> u128 {
+    let (p_a, p_b) = if sqrt_price_a > sqrt_price_b { (sqrt_price_b, sqrt_price_a) } else { (sqrt_price_a, sqrt_price_b) };
+    let delta_p = U256::from(p_b - p_a);
+    let l = U256::from(liquidity);
+    let q64 = U256::one() << 64;
+
+    // ceil(l * delta_p / 2^64) = (l * delta_p + 2^64 - 1) / 2^64
+    ((l * delta_p + q64 - U256::one()) / q64).as_u128()
+}
+
+/// Calcule le montant de token X (base) nécessaire, arrondi au PLAFOND.
+pub fn get_delta_x_ceil(sqrt_price_a: u128, sqrt_price_b: u128, liquidity: u128) -> u128 {
+    let (p_a, p_b) = if sqrt_price_a > sqrt_price_b { (sqrt_price_b, sqrt_price_a) } else { (sqrt_price_a, sqrt_price_b) };
+    let delta_p = U256::from(p_b - p_a);
+    let l = U256::from(liquidity);
+    let one = U256::one();
+
+    let numerator = (l << 64) * delta_p;
+    let denominator = U256::from(p_a) * U256::from(p_b);
+
+    // ceil(num / den) = (num + den - 1) / den
+    if denominator.is_zero() { return u128::MAX; }
+    ((numerator + denominator - one) / denominator).as_u128()
+}
+
+/// Calcule le sqrt_price de départ en SOUSTRAYANT du token Y (le prix baisse).
+/// C'est l'inverse de get_next_sqrt_price_y_up.
+pub fn get_next_sqrt_price_from_output_y_down(sqrt_price: u128, liquidity: u128, amount_out: u128) -> u128 {
+    let l = U256::from(liquidity);
+    let p = U256::from(sqrt_price);
+    let a_out = U256::from(amount_out);
+
+    // On utilise div_ceil pour l'arrondi correct dans le sens inverse
+    (p - ((a_out << 64) + l - U256::one()) / l).as_u128()
+}
+
+/// Calcule le sqrt_price de départ en SOUSTRAYANT du token X (le prix monte).
+/// C'est l'inverse de get_next_sqrt_price_x_down.
+pub fn get_next_sqrt_price_from_output_x_up(sqrt_price: u128, liquidity: u128, amount_out: u128) -> u128 {
+    let l = U256::from(liquidity);
+    let p = U256::from(sqrt_price);
+    let a_out = U256::from(amount_out);
+
+    let numerator = (l << 64) * p;
+    // Dénominateur : (l << 64) - (a_out * p), avec arrondi au plafond pour la division finale
+    let denominator = (l << 64) - a_out * p;
+
+    if denominator.is_zero() {
+        return u128::MAX;
+    }
+
+    ( (numerator + denominator - U256::one()) / denominator ).as_u128()
+}
+
+/// Calcule le prochain sqrt_price en SOUSTRAYANT du token X (le prix MONTE).
+/// C'est l'inverse de `get_next_sqrt_price_x_down`.
+pub fn get_next_sqrt_price_x_up(sqrt_price: u128, liquidity: u128, amount_out: u128) -> u128 {
+    let l = U256::from(liquidity) << 64;
+    let p = U256::from(sqrt_price);
+    let a_out = U256::from(amount_out);
+
+    // La formule exacte est P_next = (L * P) / (L - a_out * P)
+    let product = a_out * p;
+    let denominator = l.saturating_sub(product);
+    if denominator.is_zero() { return u128::MAX; }
+
+    // On utilise div_ceil pour garantir un résultat >= à la réalité
+    ((l * p + denominator - U256::one()) / denominator).as_u128()
+}
+
+/// Calcule le prochain sqrt_price en SOUSTRAYANT du token Y (le prix BAISSE).
+/// C'est l'inverse de `get_next_sqrt_price_y_up`.
+pub fn get_next_sqrt_price_y_down(sqrt_price: u128, liquidity: u128, amount_out: u128) -> u128 {
+    let l = U256::from(liquidity);
+    let p = U256::from(sqrt_price);
+    let a_out = U256::from(amount_out);
+
+    // La formule est P_next = P - a_out / L
+    // On utilise div_ceil pour l'arrondi correct.
+    let quotient = ((a_out << 64) + l - U256::one()) / l;
+
+    p.saturating_sub(quotient).as_u128()
+}

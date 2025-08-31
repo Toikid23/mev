@@ -10,6 +10,7 @@ use solana_sdk::instruction::{Instruction, AccountMeta};
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
+use uint::construct_uint;
 
 
 
@@ -378,6 +379,70 @@ impl PoolOperations for DecodedMeteoraSbpPool {
 
         Ok(amount_out)
     }
+
+    fn get_required_input(
+        &self,
+        token_out_mint: &Pubkey,
+        amount_out: u64,
+        _current_timestamp: i64,
+    ) -> Result<u64> {
+        if !self.enabled || amount_out == 0 { return Ok(0); }
+
+        let (in_reserve, out_reserve) = if *token_out_mint == self.mint_b {
+            (self.reserve_a, self.reserve_b)
+        } else {
+            (self.reserve_b, self.reserve_a)
+        };
+
+        if out_reserve == 0 || in_reserve == 0 || amount_out >= out_reserve {
+            return Err(anyhow!("Invalid reserves or amount_out too high for DAMM v1."));
+        }
+
+        // --- 1. Calculer le montant d'input NET nécessaire ---
+        let amount_in_after_fee = match &self.curve_type {
+            MeteoraCurveType::ConstantProduct => {
+                let numerator = (amount_out as u128).saturating_mul(in_reserve as u128);
+                let denominator = (out_reserve as u128).saturating_sub(amount_out as u128);
+                // Arrondi au plafond
+                numerator.checked_add(denominator.saturating_sub(1)).ok_or_else(||anyhow!("Math overflow"))?
+                    .checked_div(denominator).ok_or_else(||anyhow!("Math overflow"))? as u64
+            },
+            MeteoraCurveType::Stable { amp, token_multiplier } => {
+                let multiplier = *token_multiplier;
+                let (norm_in_reserve, norm_out_reserve, in_mult, out_mult) = if *token_out_mint == self.mint_b {
+                    ((in_reserve as u128 * multiplier.token_a_multiplier as u128), (out_reserve as u128 * multiplier.token_b_multiplier as u128), multiplier.token_a_multiplier, multiplier.token_b_multiplier)
+                } else {
+                    ((in_reserve as u128 * multiplier.token_b_multiplier as u128), (out_reserve as u128 * multiplier.token_a_multiplier as u128), multiplier.token_b_multiplier, multiplier.token_a_multiplier)
+                };
+
+                let norm_out = (amount_out as u128).saturating_mul(out_mult as u128);
+                let norm_in = math::get_required_input(norm_out as u64, norm_in_reserve as u64, norm_out_reserve as u64, *amp)? as u128;
+
+                // Arrondi au plafond
+                norm_in.checked_add((in_mult as u128).saturating_sub(1)).ok_or_else(||anyhow!("Math overflow"))?
+                    .checked_div(in_mult as u128).ok_or_else(||anyhow!("Math overflow"))? as u64
+            }
+        };
+
+        // --- 2. Inverser les frais de pool ---
+        let fees = &self.fees;
+        let total_fee_numerator = fees.trade_fee_numerator.saturating_add(fees.protocol_trade_fee_numerator);
+        let fee_denominator = fees.trade_fee_denominator;
+
+        if total_fee_numerator == 0 {
+            return Ok(amount_in_after_fee);
+        }
+
+        let numerator = (amount_in_after_fee as u128).saturating_mul(fee_denominator as u128);
+        let denominator = (fee_denominator as u128).saturating_sub(total_fee_numerator as u128);
+
+        // Arrondi au plafond
+        let required_amount_in = numerator.checked_add(denominator.saturating_sub(1)).ok_or_else(||anyhow!("Math overflow"))?
+            .checked_div(denominator).ok_or_else(||anyhow!("Math overflow"))?;
+
+        Ok(required_amount_in as u64)
+    }
+
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
         self.get_quote(token_in_mint, amount_in, 0)
     }

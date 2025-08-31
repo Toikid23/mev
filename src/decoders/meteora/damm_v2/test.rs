@@ -1,6 +1,3 @@
-// src/decoders/meteora/damm_v2/tests.rs
-
-// --- Imports nécessaires pour le test ---
 use anyhow::{anyhow, bail, Result};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
@@ -15,7 +12,7 @@ use solana_transaction_status::UiTransactionEncoding;
 use solana_account_decoder::UiAccountData;
 use spl_token::state::Account as SplTokenAccount;
 use solana_program_pack::Pack;
-use crate::decoders::pool_operations::UserSwapAccounts; // <-- Ajouter cet import
+use crate::decoders::pool_operations::UserSwapAccounts;
 use spl_associated_token_account::get_associated_token_address_with_program_id;
 
 // --- Imports depuis notre propre crate ---
@@ -42,7 +39,7 @@ pub async fn test_damm_v2_with_simulation(rpc_client: &RpcClient, payer_keypair:
     let mut pool = decode_pool(&pool_pubkey, &pool_account_data)?;
     hydrate(&mut pool, rpc_client).await?;
 
-    let (input_decimals, output_decimals, output_mint_pubkey, output_token_program) = if input_mint_pubkey == pool.mint_a {
+    let (input_decimals, output_decimals, output_mint_pubkey, _output_token_program) = if input_mint_pubkey == pool.mint_a {
         (pool.mint_a_decimals, pool.mint_b_decimals, pool.mint_b, pool.mint_b_program)
     } else {
         (pool.mint_b_decimals, pool.mint_a_decimals, pool.mint_a, pool.mint_a_program)
@@ -53,16 +50,39 @@ pub async fn test_damm_v2_with_simulation(rpc_client: &RpcClient, payer_keypair:
     let ui_predicted_amount_out = predicted_amount_out as f64 / 10f64.powi(output_decimals as i32);
     println!("-> PRÉDICTION LOCALE: {} UI", ui_predicted_amount_out);
 
+    // --- NOUVEAU BLOC DE VALIDATION ---
+    println!("\n[VALIDATION] Lancement du test d'inversion mathématique...");
+    if predicted_amount_out > 0 {
+        let required_input_from_quote = pool.get_required_input(&output_mint_pubkey, predicted_amount_out, current_timestamp)?;
+
+        println!("  -> Input original     : {}", amount_in_base_units);
+        println!("  -> Output prédit      : {}", predicted_amount_out);
+        println!("  -> Input Re-calculé   : {}", required_input_from_quote);
+
+        if required_input_from_quote >= amount_in_base_units {
+            let difference = required_input_from_quote.saturating_sub(amount_in_base_units);
+            // Tolérance plus élevée car la logique de frais est complexe
+            if difference <= 100 {
+                println!("  -> ✅ SUCCÈS: Le calcul inverse est cohérent (différence: {} lamports).", difference);
+            } else {
+                bail!("  -> ⚠️ ÉCHEC: La différence du calcul inverse est trop grande ({} lamports).", difference);
+            }
+        } else {
+            bail!("  -> ⚠️ ÉCHEC: Le calcul inverse a produit un montant inférieur à l'original !");
+        }
+    } else {
+        println!("  -> AVERTISSEMENT: Le quote est de 0, test d'inversion sauté.");
+    }
+    // --- FIN DU BLOC DE VALIDATION ---
+
     // --- 2. Préparation de la Transaction ---
     println!("\n[2/3] Préparation de la transaction de swap...");
     let payer_pubkey = payer_keypair.pubkey();
 
-    // On regroupe les comptes dans la struct
     let user_accounts = UserSwapAccounts {
         owner: payer_pubkey,
-        // On dérive les ATAs directement ici
         source: get_associated_token_address_with_program_id(&payer_pubkey, &input_mint_pubkey, &pool.mint_b_program), // Correction: WSOL est mint_b pour ce pool
-        destination: get_associated_token_address_with_program_id(&payer_pubkey, &output_mint_pubkey, &output_token_program),
+        destination: get_associated_token_address_with_program_id(&payer_pubkey, &output_mint_pubkey, &pool.mint_a_program),
     };
 
     let swap_ix = pool.create_swap_instruction(
@@ -75,7 +95,7 @@ pub async fn test_damm_v2_with_simulation(rpc_client: &RpcClient, payer_keypair:
     let recent_blockhash = rpc_client.get_latest_blockhash().await?;
     let transaction = Transaction::new_signed_with_payer(
         &[swap_ix],
-        Some(&payer_pubkey), // <-- Correction 1
+        Some(&payer_pubkey),
         &[payer_keypair],
         recent_blockhash,
     );
@@ -83,7 +103,6 @@ pub async fn test_damm_v2_with_simulation(rpc_client: &RpcClient, payer_keypair:
     // --- 3. Simulation et Analyse par Lecture de Compte ---
     println!("\n[3/3] Exécution de la simulation avec lecture de compte...");
 
-    // --- CORRECTION 2 : On récupère la variable depuis la struct, comme pour DAMM V1 ---
     let user_destination_ata = user_accounts.destination;
 
     let initial_destination_balance = match rpc_client.get_token_account(&user_destination_ata).await {

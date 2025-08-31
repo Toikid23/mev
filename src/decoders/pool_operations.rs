@@ -2,30 +2,36 @@
 
 use anyhow::Result;
 use solana_sdk::{instruction::Instruction, pubkey::Pubkey};
-use solana_client::nonblocking::rpc_client::RpcClient; // <-- AJOUTER
-use async_trait::async_trait; // <-- AJOUTER
+use solana_client::nonblocking::rpc_client::RpcClient;
+use async_trait::async_trait;
 
-#[async_trait] // <-- AJOUTER
+#[async_trait]
 pub trait PoolOperations {
     fn get_mints(&self) -> (Pubkey, Pubkey);
     fn get_vaults(&self) -> (Pubkey, Pubkey);
-
     fn address(&self) -> Pubkey;
+
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<u64>;
 
-    // --- NOUVELLE FONCTION ---
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, rpc_client: &RpcClient) -> Result<u64>;
+
+    fn get_required_input(
+        &self,
+        token_out_mint: &Pubkey, // Le mint du token que l'on veut recevoir
+        amount_out: u64,         // La quantité que l'on veut recevoir
+        current_timestamp: i64
+    ) -> Result<u64>;
 
     fn create_swap_instruction(
         &self,
-        token_in_mint: &Pubkey,          // Le mint du token qu'on donne
-        amount_in: u64,                  // La quantité qu'on donne
-        min_amount_out: u64,             // Le minimum qu'on accepte de recevoir
-        user_accounts: &UserSwapAccounts, // Les comptes de l'utilisateur
+        token_in_mint: &Pubkey,
+        amount_in: u64,
+        min_amount_out: u64,
+        user_accounts: &UserSwapAccounts,
     ) -> Result<Instruction>;
 }
 
-// Nouvelle struct pour passer les comptes de l'utilisateur de manière propre
+// La struct reste inchangée
 pub struct UserSwapAccounts {
     pub owner: Pubkey,
     pub source: Pubkey,

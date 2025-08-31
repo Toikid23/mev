@@ -140,6 +140,16 @@ impl PoolOperations for DecodedStableSwapPool {
 
         Ok(amount_out as u64)
     }
+
+    fn get_required_input(
+        &self,
+        _token_out_mint: &Pubkey,
+        _amount_out: u64,
+        _current_timestamp: i64,
+    ) -> Result<u64> {
+        Err(anyhow!("get_required_input is not yet implemented for Raydium Stable Swap."))
+    }
+
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
         self.get_quote(token_in_mint, amount_in, 0)
     }

@@ -1,4 +1,4 @@
-// DANS : src/math/math
+// DANS : src/decoders/meteora/damm_v1/math.rs
 
 use anyhow::{anyhow, Result};
 use uint::construct_uint;
@@ -73,4 +73,23 @@ pub fn get_quote(amount_in: u64, in_reserve: u64, out_reserve: u64, amp: u64) ->
     let amount_out = (out_reserve as u128).checked_sub(new_out_reserve).ok_or_else(|| anyhow!("Amount out underflow"))?;
 
     Ok(amount_out as u64)
+}
+
+// --- NOUVELLE FONCTION ---
+/// Calcule le montant d'entrée requis pour obtenir un montant de sortie spécifié.
+pub fn get_required_input(amount_out: u64, in_reserve: u64, out_reserve: u64, amp: u64) -> Result<u64> {
+    if out_reserve == 0 || in_reserve == 0 || amount_out >= out_reserve {
+        return Err(anyhow!("Invalid reserves or amount_out too high."));
+    }
+
+    let d = get_d(in_reserve as u128, out_reserve as u128, amp)?;
+    let new_out_reserve = out_reserve.checked_sub(amount_out).ok_or_else(|| anyhow!("Amount out underflow"))?;
+
+    // La fonction `get_y` est symétrique. On peut l'utiliser pour trouver `x` à partir de `y`.
+    // C'est comme si on inversait le pool.
+    let new_in_reserve = get_y(new_out_reserve as u128, d, amp)?;
+
+    let amount_in = (new_in_reserve as u128).checked_sub(in_reserve as u128).ok_or_else(|| anyhow!("Amount in underflow"))?;
+
+    Ok(amount_in as u64)
 }

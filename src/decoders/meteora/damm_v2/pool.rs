@@ -1,4 +1,3 @@
-
 use crate::decoders::spl_token_decoders;
 use anyhow::{anyhow, bail, Result};
 use bytemuck::{Pod, Zeroable};
@@ -12,7 +11,8 @@ use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 use spl_associated_token_account::get_associated_token_address_with_program_id;
-
+use num_integer::Integer;
+use super::math;
 
 
 construct_uint! { pub struct U256(4); }
@@ -147,9 +147,9 @@ impl PoolOperations for DecodedMeteoraDammPool {
         let fee_on_input = (amount_in as u128 * in_mint_fee_bps as u128) / 10000;
         let amount_in_after_transfer_fee = amount_in.saturating_sub(fee_on_input as u64);
         let fees = &self.pool_fees;
-        let base_fee_num = get_base_fee(&fees.base_fee, current_timestamp, self.activation_point)? as u128;
+        let base_fee_num = math::get_base_fee(&fees.base_fee, current_timestamp, self.activation_point)? as u128;
         let dynamic_fee_num = if fees.dynamic_fee.initialized != 0 {
-            get_variable_fee(&fees.dynamic_fee)?
+            math::get_variable_fee(&fees.dynamic_fee)?
         } else { 0 };
         let total_fee_numerator = base_fee_num.saturating_add(dynamic_fee_num);
         const FEE_DENOMINATOR: u128 = 1_000_000_000;
@@ -162,12 +162,12 @@ impl PoolOperations for DecodedMeteoraDammPool {
         let (pre_fee_amount_out, total_fee_amount) = if fees_on_input {
             let total_fee = (amount_in_after_transfer_fee as u128 * total_fee_numerator) / FEE_DENOMINATOR;
             let net_in = amount_in_after_transfer_fee.saturating_sub(total_fee as u64);
-            let next_sqrt_price = get_next_sqrt_price_from_input(self.sqrt_price, self.liquidity, net_in, a_to_b)?;
-            let out = get_amount_out(self.sqrt_price, next_sqrt_price, self.liquidity, a_to_b)?;
+            let next_sqrt_price = math::get_next_sqrt_price_from_input(self.sqrt_price, self.liquidity, net_in, a_to_b)?;
+            let out = math::get_amount_out(self.sqrt_price, next_sqrt_price, self.liquidity, a_to_b)?;
             (out, total_fee)
         } else {
-            let next_sqrt_price = get_next_sqrt_price_from_input(self.sqrt_price, self.liquidity, amount_in_after_transfer_fee, a_to_b)?;
-            let out = get_amount_out(self.sqrt_price, next_sqrt_price, self.liquidity, a_to_b)?;
+            let next_sqrt_price = math::get_next_sqrt_price_from_input(self.sqrt_price, self.liquidity, amount_in_after_transfer_fee, a_to_b)?;
+            let out = math::get_amount_out(self.sqrt_price, next_sqrt_price, self.liquidity, a_to_b)?;
             let total_fee = (out as u128 * total_fee_numerator) / FEE_DENOMINATOR;
             (out, total_fee)
         };
@@ -186,6 +186,74 @@ impl PoolOperations for DecodedMeteoraDammPool {
         let final_amount_out = amount_out_after_pool_fee.saturating_sub(fee_on_output as u64);
         Ok(final_amount_out)
     }
+
+    fn get_required_input(
+        &self,
+        token_out_mint: &Pubkey,
+        amount_out: u64,
+        current_timestamp: i64,
+    ) -> Result<u64> {
+        if self.liquidity == 0 { return Ok(u64::MAX); }
+
+        let a_to_b = *token_out_mint == self.mint_b; // Si on veut B, on fournit A
+        let (in_mint_fee_bps, out_mint_fee_bps) = if a_to_b {
+            (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps)
+        } else {
+            (self.mint_b_transfer_fee_bps, self.mint_a_transfer_fee_bps)
+        };
+
+        // --- 1. Inverser les frais de transfert de SORTIE ---
+        const BPS_DENOMINATOR: u128 = 10000;
+        let amount_out_after_pool_fee = if out_mint_fee_bps > 0 {
+            let numerator = (amount_out as u128).saturating_mul(BPS_DENOMINATOR);
+            let denominator = BPS_DENOMINATOR.saturating_sub(out_mint_fee_bps as u128);
+            numerator.div_ceil(denominator)
+        } else {
+            amount_out as u128
+        };
+
+        // --- 2. Inverser les frais de POOL et le SWAP ---
+        let fees = &self.pool_fees;
+        let base_fee_num = math::get_base_fee(&fees.base_fee, current_timestamp, self.activation_point)? as u128;
+        let dynamic_fee_num = if fees.dynamic_fee.initialized != 0 { math::get_variable_fee(&fees.dynamic_fee)? } else { 0 };
+        let total_fee_numerator = base_fee_num.saturating_add(dynamic_fee_num);
+        const FEE_DENOMINATOR: u128 = 1_000_000_000;
+
+        let fees_on_input = match (self.collect_fee_mode, a_to_b) {
+            (0, _) => false, (1, true) => false, (1, false) => true,
+            _ => bail!("Unsupported collect_fee_mode"),
+        };
+
+        let amount_in_after_transfer_fee = if fees_on_input {
+            // Frais sur l'input: on doit d'abord trouver l'input net, puis inverser les frais
+            let next_sqrt_price = math::get_next_sqrt_price_from_output(self.sqrt_price, self.liquidity, amount_out_after_pool_fee, a_to_b)?;
+            let net_in = math::get_amount_in(self.sqrt_price, next_sqrt_price, self.liquidity, a_to_b)? as u128;
+
+            let numerator = net_in.saturating_mul(FEE_DENOMINATOR);
+            let denominator = FEE_DENOMINATOR.saturating_sub(total_fee_numerator);
+            numerator.div_ceil(denominator)
+        } else {
+            // Frais sur l'output: on doit d'abord trouver le pre_fee_amount_out, puis inverser le swap
+            let numerator = amount_out_after_pool_fee.saturating_mul(FEE_DENOMINATOR);
+            let denominator = FEE_DENOMINATOR.saturating_sub(total_fee_numerator);
+            let pre_fee_amount_out = numerator.div_ceil(denominator);
+
+            let next_sqrt_price = math::get_next_sqrt_price_from_output(self.sqrt_price, self.liquidity, pre_fee_amount_out, a_to_b)?;
+            math::get_amount_in(self.sqrt_price, next_sqrt_price, self.liquidity, a_to_b)? as u128
+        };
+
+        // --- 3. Inverser les frais de transfert d'ENTRÉE ---
+        let final_amount_in = if in_mint_fee_bps > 0 {
+            let numerator = amount_in_after_transfer_fee.saturating_mul(BPS_DENOMINATOR);
+            let denominator = BPS_DENOMINATOR.saturating_sub(in_mint_fee_bps as u128);
+            numerator.div_ceil(denominator)
+        } else {
+            amount_in_after_transfer_fee
+        };
+
+        Ok(final_amount_in as u64)
+    }
+
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
         self.get_quote(token_in_mint, amount_in, 0)
     }
@@ -234,86 +302,5 @@ impl PoolOperations for DecodedMeteoraDammPool {
             accounts,
             data: instruction_data,
         })
-    }
-}
-
-
-fn get_base_fee(base_fee: &onchain_layouts::BaseFeeStruct, current_timestamp: i64, activation_point: u64) -> Result<u64> {
-    if base_fee.period_frequency == 0 { return Ok(base_fee.cliff_fee_numerator); }
-    let current_timestamp_u64 = u64::try_from(current_timestamp).unwrap_or(0);
-    let period = if current_timestamp_u64 < activation_point {
-        base_fee.number_of_period as u64
-    } else {
-        let elapsed = current_timestamp_u64.saturating_sub(activation_point);
-        (elapsed / base_fee.period_frequency).min(base_fee.number_of_period as u64)
-    };
-    match base_fee.fee_scheduler_mode {
-        0 => { let reduction = period.saturating_mul(base_fee.reduction_factor); Ok(base_fee.cliff_fee_numerator.saturating_sub(reduction)) }
-        1 => { if base_fee.reduction_factor == 0 { return Ok(base_fee.cliff_fee_numerator); } let mut fee = base_fee.cliff_fee_numerator as u128; let reduction_factor = 10000 - base_fee.reduction_factor as u128; for _ in 0..period { fee = (fee * reduction_factor) / 10000; } Ok(fee as u64) }
-        _ => bail!("Unsupported fee scheduler mode"),
-    }
-}
-fn get_variable_fee(dynamic_fee: &onchain_layouts::DynamicFeeStruct) -> Result<u128> {
-    let square_vfa_bin = dynamic_fee.volatility_accumulator.checked_mul(dynamic_fee.bin_step as u128).ok_or(anyhow!("MathOverflow"))?.checked_pow(2).ok_or(anyhow!("MathOverflow"))?;
-    let v_fee = square_vfa_bin.checked_mul(dynamic_fee.variable_fee_control as u128).ok_or(anyhow!("MathOverflow"))?;
-    let scaled_v_fee = v_fee.checked_add(99_999_999_999).ok_or(anyhow!("MathOverflow"))?.checked_div(100_000_000_000).ok_or(anyhow!("MathOverflow"))?;
-    Ok(scaled_v_fee)
-}
-fn get_next_sqrt_price_from_input(sqrt_price: u128, liquidity: u128, amount_in: u64, a_for_b: bool) -> Result<u128> {
-    if amount_in == 0 { return Ok(sqrt_price); }
-    let sqrt_price_u256 = U256::from(sqrt_price);
-    let liquidity_u256 = U256::from(liquidity);
-    let amount_in_u256 = U256::from(amount_in);
-    if a_for_b {
-        let product = amount_in_u256.checked_mul(sqrt_price_u256).ok_or(anyhow!("MathOverflow"))?;
-        let denominator = liquidity_u256.checked_add(product).ok_or(anyhow!("MathOverflow"))?;
-        if denominator.is_zero() { return Err(anyhow!("Denominator is zero")); }
-        let numerator = liquidity_u256.checked_mul(sqrt_price_u256).ok_or(anyhow!("MathOverflow"))?;
-        let result = (numerator + denominator - U256::from(1)) / denominator;
-        Ok(result.try_into().map_err(|_| anyhow!("TypeCastFailed"))?)
-    } else {
-        if liquidity_u256.is_zero() { return Err(anyhow!("Liquidity is zero")); }
-        let quotient = (amount_in_u256 << 128) / liquidity_u256;
-        let result = sqrt_price_u256.checked_add(quotient).ok_or(anyhow!("MathOverflow"))?;
-        Ok(result.try_into().map_err(|_| anyhow!("TypeCastFailed"))?)
-    }
-}
-fn get_amount_out(sqrt_price_start: u128, sqrt_price_end: u128, liquidity: u128, a_to_b: bool) -> Result<u64> {
-    if a_to_b { get_delta_amount_b_unsigned(sqrt_price_end, sqrt_price_start, liquidity, Rounding::Down) } else { get_delta_amount_a_unsigned(sqrt_price_start, sqrt_price_end, liquidity, Rounding::Down) }
-}
-#[derive(PartialEq, Clone, Copy)] enum Rounding { Up, Down }
-fn get_delta_amount_a_unsigned(lower_sqrt_price: u128, upper_sqrt_price: u128, liquidity: u128, round: Rounding) -> Result<u64> {
-    let result = get_delta_amount_a_unsigned_unchecked(lower_sqrt_price, upper_sqrt_price, liquidity, round)?;
-    if result > U256::from(u64::MAX) { bail!("MathOverflow"); }
-    Ok(result.try_into().map_err(|_| anyhow!("TypeCastFailed"))?)
-}
-fn get_delta_amount_a_unsigned_unchecked(lower_sqrt_price: u128, upper_sqrt_price: u128, liquidity: u128, round: Rounding) -> Result<U256> {
-    const RESOLUTION: u8 = 128;
-    let num_1 = U256::from(liquidity) << RESOLUTION;
-    let den_1 = U256::from(lower_sqrt_price);
-    let den_2 = U256::from(upper_sqrt_price);
-    if den_1.is_zero() || den_2.is_zero() { bail!("Sqrt price is zero"); }
-    let term_1 = num_1 / den_1;
-    let term_2 = num_1 / den_2;
-    let diff = term_1 - term_2;
-    let result = match round {
-        Rounding::Up => (diff + (U256::from(1) << RESOLUTION) - U256::from(1)) >> RESOLUTION,
-        Rounding::Down => diff >> RESOLUTION,
-    };
-    Ok(result)
-}
-fn get_delta_amount_b_unsigned(lower_sqrt_price: u128, upper_sqrt_price: u128, liquidity: u128, round: Rounding) -> Result<u64> {
-    let result = get_delta_amount_b_unsigned_unchecked(lower_sqrt_price, upper_sqrt_price, liquidity, round)?;
-    if result > U256::from(u64::MAX) { bail!("MathOverflow"); }
-    Ok(result.try_into().map_err(|_| anyhow!("TypeCastFailed"))?)
-}
-fn get_delta_amount_b_unsigned_unchecked(lower_sqrt_price: u128, upper_sqrt_price: u128, liquidity: u128, round: Rounding) -> Result<U256> {
-    const RESOLUTION: u8 = 64;
-    let liquidity_u256 = U256::from(liquidity);
-    let delta_sqrt_price = U256::from(upper_sqrt_price - lower_sqrt_price);
-    let prod = liquidity_u256.checked_mul(delta_sqrt_price).ok_or(anyhow!("MathOverflow"))?;
-    match round {
-        Rounding::Up => { let denominator = U256::from(1) << (RESOLUTION as usize) * 2; Ok((prod + denominator - U256::from(1)) / denominator) }
-        Rounding::Down => Ok(prod >> (RESOLUTION as usize) * 2),
     }
 }

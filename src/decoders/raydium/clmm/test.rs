@@ -32,14 +32,44 @@ pub async fn test_clmm(rpc_client: &RpcClient, payer: &Keypair, current_timestam
     let mut pool = decode_pool(&pool_pubkey, &pool_account_data, &program_pubkey)?;
     hydrate(&mut pool, rpc_client).await?;
     let input_mint_pubkey = Pubkey::from_str(INPUT_MINT_STR)?;
-    let (input_decimals, output_decimals, output_mint_pubkey) = if input_mint_pubkey == pool.mint_a {
-        (pool.mint_a_decimals, pool.mint_b_decimals, pool.mint_b)
-    } else { (pool.mint_b_decimals, pool.mint_a_decimals, pool.mint_a) };
-    let amount_in_base_units = (INPUT_AMOUNT_UI * 10f64.powi(input_decimals as i32)) as u64;
 
+    // La détermination des décimales est maintenant gérée par la fonction de quote elle-même.
+    let amount_in_base_units = (INPUT_AMOUNT_UI * 10f64.powi(pool.mint_a_decimals as i32)) as u64;
+
+    // --- LA CORRECTION EST ICI ---
+    // On capture les 4 valeurs retournées par la fonction.
     let (predicted_amount_out, _) = pool.get_quote_with_tick_arrays(&input_mint_pubkey, amount_in_base_units, current_timestamp)?;
+
+    // On a besoin de `output_decimals` pour l'affichage, donc on le redéfinit ici
+    let output_decimals = if input_mint_pubkey == pool.mint_a { pool.mint_b_decimals } else { pool.mint_a_decimals };
+    // --- FIN DE LA CORRECTION ---
     let ui_predicted_amount_out = predicted_amount_out as f64 / 10f64.powi(output_decimals as i32);
     println!("-> PRÉDICTION LOCALE (potentiellement fausse): {}", ui_predicted_amount_out);
+
+    let output_mint_pubkey = if input_mint_pubkey == pool.mint_a { pool.mint_b } else { pool.mint_a };
+
+    /*println!("\n[VALIDATION] Lancement du test d'inversion mathématique...");
+    if predicted_amount_out > 0 {
+        let required_input_from_quote = pool.get_required_input(&output_mint_pubkey, predicted_amount_out, current_timestamp)?;
+        println!("  -> Input original     : {}", amount_in_base_units);
+        println!("  -> Output prédit      : {}", predicted_amount_out);
+        println!("  -> Input Re-calculé   : {}", required_input_from_quote);
+
+        if required_input_from_quote >= amount_in_base_units {
+            let difference = required_input_from_quote.saturating_sub(amount_in_base_units);
+            // Pour le CLMM, la complexité des calculs (multiples ticks) peut induire une différence un peu plus grande.
+            // Une tolérance de 100 lamports est très sûre.
+            if difference <= 100 {
+                println!("  -> ✅ SUCCÈS: Le calcul inverse est cohérent (différence: {} lamports).", difference);
+            } else {
+                bail!("  -> ⚠️ ÉCHEC: La différence du calcul inverse est trop grande ({} lamports).", difference);
+            }
+        } else {
+            bail!("  -> ⚠️ ÉCHEC: Le calcul inverse a produit un montant inférieur à l'original !");
+        }
+    } else {
+        println!("  -> AVERTISSEMENT: Le quote est de 0, test d'inversion sauté.");
+    }*/
 
     println!("\n[2/3] Préparation de la simulation...");
 
@@ -51,18 +81,16 @@ pub async fn test_clmm(rpc_client: &RpcClient, payer: &Keypair, current_timestam
         &spl_token_2022::id()
     );
 
-    // On regroupe les comptes utilisateur dans la struct unifiée
     let user_accounts = UserSwapAccounts {
         owner: payer.pubkey(),
         source: user_source_ata,
         destination: user_destination_ata,
     };
 
-    // L'appel devient simple et cohérent avec les autres décodeurs
     let swap_ix = pool.create_swap_instruction(
         &input_mint_pubkey,
         amount_in_base_units,
-        0, // min_amount_out
+        0,
         &user_accounts,
     )?;
 

@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 use solana_sdk::instruction::{AccountMeta, Instruction};
 use std::str::FromStr;
+use num_integer::Integer;
 
 // NOTE: Cette structure est intentionnellement quasi-identique à celle de la V2,
 // car les layouts on-chain sont compatibles.
@@ -151,9 +152,66 @@ impl PoolOperations for DecodedOrcaAmmV1Pool {
             _ => Err(anyhow!("Curve type {} is not supported for Orca AMM.", self.curve_type)),
         }
     }
+
+    fn get_required_input(
+        &self,
+        token_out_mint: &Pubkey,
+        amount_out: u64,
+        _current_timestamp: i64,
+    ) -> Result<u64> {
+        if amount_out == 0 { return Ok(0); }
+        if self.curve_type != 0 {
+            return Err(anyhow!("Unsupported curve type for get_required_input in Orca AMM V1."));
+        }
+
+        let (in_reserve, out_reserve, in_mint_fee_bps, out_mint_fee_bps) = if *token_out_mint == self.mint_b {
+            (self.reserve_a, self.reserve_b, self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps)
+        } else {
+            (self.reserve_b, self.reserve_a, self.mint_b_transfer_fee_bps, self.mint_a_transfer_fee_bps)
+        };
+
+        if out_reserve == 0 || in_reserve == 0 { return Err(anyhow!("Pool has no liquidity.")); }
+
+        const BPS_DENOMINATOR: u128 = 10000;
+        let gross_amount_out = if out_mint_fee_bps > 0 {
+            let num = (amount_out as u128).saturating_mul(BPS_DENOMINATOR);
+            let den = BPS_DENOMINATOR.saturating_sub(out_mint_fee_bps as u128);
+            num.div_ceil(den)
+        } else {
+            amount_out as u128
+        };
+
+        if gross_amount_out >= out_reserve as u128 {
+            return Err(anyhow!("Cannot get required input, amount_out is too high."));
+        }
+
+        let numerator = gross_amount_out.saturating_mul(in_reserve as u128);
+        let denominator = (out_reserve as u128).saturating_sub(gross_amount_out);
+        let amount_in_with_fees = numerator.div_ceil(denominator);
+
+        let amount_in_net = if self.trade_fee_numerator > 0 {
+            let num = amount_in_with_fees.saturating_mul(self.trade_fee_denominator as u128);
+            let den = (self.trade_fee_denominator as u128).saturating_sub(self.trade_fee_numerator as u128);
+            num.div_ceil(den)
+        } else {
+            amount_in_with_fees
+        };
+
+        let required_amount_in = if in_mint_fee_bps > 0 {
+            let num = amount_in_net.saturating_mul(BPS_DENOMINATOR);
+            let den = BPS_DENOMINATOR.saturating_sub(in_mint_fee_bps as u128);
+            num.div_ceil(den)
+        } else {
+            amount_in_net
+        };
+
+        Ok(required_amount_in as u64)
+    }
+
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
         self.get_quote(token_in_mint, amount_in, 0)
     }
+
     fn create_swap_instruction(
         &self,
         _token_in_mint: &Pubkey, // Le programme Orca ne se base pas sur le mint mais sur les comptes

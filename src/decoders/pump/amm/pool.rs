@@ -13,6 +13,7 @@ use spl_associated_token_account::get_associated_token_address_with_program_id;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
+use num_integer::Integer;
 
 // --- CONSTANTES DU PROTOCOLE ---
 // Trouvées dans l'IDL
@@ -322,6 +323,84 @@ impl PoolOperations for DecodedPumpAmmPool {
 
         Ok(final_amount_out as u64)
     }
+
+    fn get_required_input(
+        &self,
+        token_out_mint: &Pubkey,
+        amount_out: u64,
+        _current_timestamp: i64,
+    ) -> Result<u64> {
+        if amount_out == 0 { return Ok(0); }
+        if self.total_fee_basis_points == 0 && self.lp_fee_basis_points == 0 {
+            return Err(anyhow!("Pool is not hydrated, fees are unknown."));
+        }
+
+        // --- 1. Configuration initiale ---
+        // Si on veut le token de base (A), on achète. L'input sera le token de quote (B).
+        let is_buy = *token_out_mint == self.mint_a;
+
+        let (in_reserve, out_reserve, in_mint_fee_bps, out_mint_fee_bps) = if is_buy {
+            // Veut du token A (base), donc on fournit B (quote)
+            (self.reserve_b, self.reserve_a, self.mint_b_transfer_fee_bps, self.mint_a_transfer_fee_bps)
+        } else {
+            // Veut du token B (quote), donc on fournit A (base)
+            (self.reserve_a, self.reserve_b, self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps)
+        };
+
+        if out_reserve == 0 || in_reserve == 0 { return Err(anyhow!("Pool has no liquidity")); }
+
+        const BPS_DENOMINATOR: u128 = 10_000;
+
+        // --- 2. Inverser les frais de transfert Token-2022 sur la SORTIE ---
+        let gross_amount_out = if out_mint_fee_bps > 0 {
+            let numerator = (amount_out as u128).saturating_mul(BPS_DENOMINATOR);
+            let denominator = BPS_DENOMINATOR.saturating_sub(out_mint_fee_bps as u128);
+            numerator.div_ceil(denominator)
+        } else {
+            amount_out as u128
+        };
+
+        if gross_amount_out >= out_reserve as u128 {
+            return Err(anyhow!("Cannot get required input, amount_out is too high."));
+        }
+
+        // --- 3. Inverser les frais de pool et la formule de swap ---
+        let amount_in_after_transfer_fee = if is_buy {
+            // CAS ACHAT: Les frais sont sur l'INPUT.
+            // On inverse d'abord le swap pour trouver l'input NET.
+            let numerator = gross_amount_out.saturating_mul(in_reserve as u128);
+            let denominator = (out_reserve as u128).saturating_sub(gross_amount_out);
+            let net_amount_in = numerator.div_ceil(denominator);
+
+            // Ensuite, on inverse les frais de pool pour trouver l'input BRUT.
+            let num = net_amount_in.saturating_mul(BPS_DENOMINATOR);
+            let den = BPS_DENOMINATOR.saturating_sub(self.total_fee_basis_points as u128);
+            num.div_ceil(den)
+        } else {
+            // CAS VENTE: Les frais sont sur l'OUTPUT.
+            // On inverse d'abord les frais de pool pour trouver le `gross_gross_out`.
+            let num = gross_amount_out.saturating_mul(BPS_DENOMINATOR);
+            let den = BPS_DENOMINATOR.saturating_sub(self.total_fee_basis_points as u128);
+            let gross_gross_amount_out = num.div_ceil(den);
+
+            // Ensuite, on inverse le swap avec `gross_gross_out` pour trouver l'input BRUT.
+            let numerator = gross_gross_amount_out.saturating_mul(in_reserve as u128);
+            let denominator = (out_reserve as u128).saturating_sub(gross_gross_amount_out);
+            numerator.div_ceil(denominator)
+        };
+
+        // --- 4. Inverser les frais de transfert Token-2022 sur l'ENTRÉE ---
+        let required_amount_in = if in_mint_fee_bps > 0 {
+            let num = amount_in_after_transfer_fee.saturating_mul(BPS_DENOMINATOR);
+            let den = BPS_DENOMINATOR.saturating_sub(in_mint_fee_bps as u128);
+            num.div_ceil(den)
+        } else {
+            amount_in_after_transfer_fee
+        };
+
+        Ok(required_amount_in as u64)
+    }
+
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
         self.get_quote(token_in_mint, amount_in, 0)
     }

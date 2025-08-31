@@ -1,6 +1,3 @@
-// src/decoders/meteora/amm/tests.rs
-
-// --- Imports nécessaires pour le test ---
 use anyhow::{anyhow, bail, Result};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
@@ -51,17 +48,39 @@ pub async fn test_damm_v1_with_simulation(rpc_client: &RpcClient, payer_keypair:
     let ui_predicted_amount_out = predicted_amount_out as f64 / 10f64.powi(output_decimals as i32);
     println!("-> PRÉDICTION LOCALE: {} UI", ui_predicted_amount_out);
 
+    // --- NOUVEAU BLOC DE VALIDATION ---
+    println!("\n[VALIDATION] Lancement du test d'inversion mathématique...");
+    if predicted_amount_out > 0 {
+        let required_input_from_quote = pool.get_required_input(&output_mint_pubkey, predicted_amount_out, current_timestamp)?;
+
+        println!("  -> Input original     : {}", amount_in_base_units);
+        println!("  -> Output prédit      : {}", predicted_amount_out);
+        println!("  -> Input Re-calculé   : {}", required_input_from_quote);
+
+        if required_input_from_quote >= amount_in_base_units {
+            let difference = required_input_from_quote.saturating_sub(amount_in_base_units);
+            if difference <= 10 {
+                println!("  -> ✅ SUCCÈS: Le calcul inverse est cohérent (différence: {} lamports).", difference);
+            } else {
+                bail!("  -> ⚠️ ÉCHEC: La différence du calcul inverse est trop grande ({} lamports).", difference);
+            }
+        } else {
+            bail!("  -> ⚠️ ÉCHEC: Le calcul inverse a produit un montant inférieur à l'original !");
+        }
+    } else {
+        println!("  -> AVERTISSEMENT: Le quote est de 0, test d'inversion sauté.");
+    }
+    // --- FIN DU BLOC DE VALIDATION ---
+
     // --- 2. Préparation de la Transaction ---
     println!("\n[2/3] Préparation de la transaction de swap...");
 
-    // On regroupe les comptes utilisateur dans la struct unifiée
     let user_accounts = UserSwapAccounts {
         owner: payer_keypair.pubkey(),
         source: get_associated_token_address(&payer_keypair.pubkey(), &input_mint_pubkey),
         destination: get_associated_token_address(&payer_keypair.pubkey(), &output_mint_pubkey),
     };
 
-    // On appelle la nouvelle fonction unifiée
     let swap_ix = pool.create_swap_instruction(
         &input_mint_pubkey,
         amount_in_base_units,
@@ -80,7 +99,7 @@ pub async fn test_damm_v1_with_simulation(rpc_client: &RpcClient, payer_keypair:
     // --- 3. Simulation et Analyse par Lecture de Compte ---
     let user_destination_ata = user_accounts.destination;
 
-    let initial_destination_balance = match rpc_client.get_token_account(&user_destination_ata).await { // <-- Maintenant, ça compile
+    let initial_destination_balance = match rpc_client.get_token_account(&user_destination_ata).await {
         Ok(Some(acc)) => acc.token_amount.amount.parse::<u64>().unwrap_or(0),
         _ => 0,
     };
@@ -93,7 +112,7 @@ pub async fn test_damm_v1_with_simulation(rpc_client: &RpcClient, payer_keypair:
         encoding: Some(UiTransactionEncoding::Base64),
         accounts: Some(solana_client::rpc_config::RpcSimulateTransactionAccountsConfig {
             encoding: Some(solana_account_decoder::UiAccountEncoding::Base64),
-            addresses: vec![ user_destination_ata.to_string() ], // <-- Et ça aussi
+            addresses: vec![ user_destination_ata.to_string() ],
         }),
         ..Default::default()
     };

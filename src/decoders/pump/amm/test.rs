@@ -45,6 +45,35 @@ pub async fn test_amm_with_simulation(rpc_client: &RpcClient, payer_keypair: &Ke
     let ui_predicted_amount_out = predicted_amount_out as f64 / 10f64.powi(output_decimals as i32);
     println!("-> PRÉDICTION LOCALE (achat avec {} SOL): {} TADC", INPUT_AMOUNT_UI, ui_predicted_amount_out);
 
+
+    println!("\n[VALIDATION] Lancement du test d'inversion mathématique...");
+    if predicted_amount_out > 0 {
+        // Le token de sortie est le token de base (mint_a), car on achète avec le token de quote (mint_b)
+        let output_mint_pubkey = pool.mint_a;
+        let required_input_from_quote = pool.get_required_input(&output_mint_pubkey, predicted_amount_out, current_timestamp)?;
+
+        println!("  -> Input original     : {}", amount_in_base_units);
+        println!("  -> Output prédit      : {}", predicted_amount_out);
+        println!("  -> Input Re-calculé   : {}", required_input_from_quote);
+
+        // Le résultat re-calculé doit être >= à l'original (à cause des arrondis au plafond)
+        if required_input_from_quote >= amount_in_base_units {
+            let difference = required_input_from_quote.saturating_sub(amount_in_base_units);
+            // On tolère une petite différence due aux arrondis successifs.
+            if difference <= 10 { // 10 lamports est une tolérance très acceptable
+                println!("  -> ✅ SUCCÈS: Le calcul inverse est cohérent (différence: {} lamports).", difference);
+            } else {
+                bail!("  -> ⚠️ ÉCHEC: La différence du calcul inverse est trop grande ({} lamports).", difference);
+            }
+        } else {
+            bail!("  -> ⚠️ ÉCHEC: Le calcul inverse a produit un montant inférieur à l'original !");
+        }
+    } else {
+        println!("  -> AVERTISSEMENT: Le quote est de 0, test d'inversion sauté.");
+    }
+
+
+
     // --- 2. Préparation de la Transaction Simple ---
     println!("\n[2/3] Préparation de la transaction d'ACHAT simple...");
 

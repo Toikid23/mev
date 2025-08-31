@@ -18,6 +18,8 @@ use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 use solana_sdk::instruction::{Instruction, AccountMeta};
 use spl_associated_token_account::get_associated_token_address;
+use num_integer::Integer;
+use crate::decoders::orca::whirlpool::math::U256;
 
 // --- STRUCTURE DE TRAVAIL "PROPRE" (MODIFIÉE) ---
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -214,16 +216,15 @@ impl DecodedWhirlpoolPool {
     pub fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
     pub fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
 
-    // C'est notre fonction de devis spéciale et asynchrone pour Whirlpool.
-    // Elle a un nom unique pour ne pas créer de conflit.
     pub async fn get_quote_with_rpc(
         &mut self,
         token_in_mint: &Pubkey,
         amount_in: u64,
         rpc_client: &RpcClient,
     ) -> Result<u64> {
-        // Le corps de cette fonction est la version que nous avons validée,
-        // qui compile et gère le chargement dynamique.
+        println!("\n--- get_quote_async (Whirlpool) DEBUG ---");
+        println!("  - Initial amount_in: {}", amount_in);
+
         let tick_arrays = self.tick_arrays.as_mut().ok_or_else(|| anyhow!("Pool is not hydrated."))?;
         let a_to_b = *token_in_mint == self.mint_a;
         let (in_mint_fee_bps, out_mint_fee_bps) = if a_to_b {
@@ -231,18 +232,32 @@ impl DecodedWhirlpoolPool {
         } else {
             (self.mint_b_transfer_fee_bps, self.mint_a_transfer_fee_bps)
         };
+
         let fee_on_input = (amount_in as u128 * in_mint_fee_bps as u128) / 10000;
         let amount_in_after_fee = amount_in.saturating_sub(fee_on_input as u64);
+        println!("  - amount_in after input transfer fee: {}", amount_in_after_fee);
+
         let pool_fee = (amount_in_after_fee as u128 * self.fee_rate as u128) / 1_000_000;
         let mut amount_remaining = amount_in_after_fee.saturating_sub(pool_fee as u64) as u128;
+        println!("  - Pool fee: {}. Net amount_remaining to swap: {}", pool_fee, amount_remaining);
+
         let mut total_amount_out: u128 = 0;
         let mut current_liquidity = self.liquidity;
         let mut current_sqrt_price = self.sqrt_price;
         let mut current_tick_index = self.tick_current_index;
+        let mut step = 0;
+
         let mut fetched_array_indices = std::collections::HashSet::new();
         let current_start_index = tick_array::get_start_tick_index(current_tick_index, self.tick_spacing);
         fetched_array_indices.insert(current_start_index);
+
         while amount_remaining > 0 && current_liquidity > 0 {
+            step += 1;
+            println!("\n  [Step {}]", step);
+            println!("    - current_sqrt_price: {}", current_sqrt_price);
+            println!("    - current_tick_index: {}", current_tick_index);
+            println!("    - current_liquidity: {}", current_liquidity);
+
             let (target_sqrt_price, next_liquidity_net) = {
                 let find_result = {
                     let tick_arrays_ref = self.tick_arrays.as_ref().unwrap();
@@ -250,35 +265,26 @@ impl DecodedWhirlpoolPool {
                 };
                 match find_result {
                     Some((tick_index, tick_data)) => {
+                        println!("    - Found next initialized tick at index: {}", tick_index);
                         (orca_whirlpool_math::tick_to_sqrt_price_x64(tick_index), Some(tick_data.liquidity_net))
                     },
                     None => {
-                        let last_known_array_index = {
-                            let tick_arrays_ref = self.tick_arrays.as_ref().unwrap();
-                            if a_to_b { *tick_arrays_ref.keys().next().unwrap_or(&current_start_index) } else { *tick_arrays_ref.keys().next_back().unwrap_or(&current_start_index) }
-                        };
-                        let ticks_per_array = (tick_array::TICK_ARRAY_SIZE as i32) * (self.tick_spacing as i32);
-                        let next_array_index_to_fetch = if a_to_b { last_known_array_index - ticks_per_array } else { last_known_array_index + ticks_per_array };
-                        if !fetched_array_indices.contains(&next_array_index_to_fetch) {
-                            let next_array_address = tick_array::get_tick_array_address(&self.address, next_array_index_to_fetch, &self.program_id);
-                            if let Ok(account) = rpc_client.get_account(&next_array_address).await {
-                                if let Ok(decoded_array) = tick_array::decode_tick_array(&account.data) {
-                                    self.tick_arrays.as_mut().unwrap().insert(decoded_array.start_tick_index, decoded_array);
-                                    fetched_array_indices.insert(next_array_index_to_fetch);
-                                    continue;
-                                }
-                            }
-                        }
                         (if a_to_b { 0 } else { u128::MAX }, None)
                     }
                 }
             };
+
             let (amount_in_step, amount_out_step, next_sqrt_price) = orca_whirlpool_math::compute_swap_step(
                 amount_remaining, current_sqrt_price, target_sqrt_price, current_liquidity, a_to_b,
             );
+            println!("    - target_sqrt_price: {}", target_sqrt_price);
+            println!("    - Consumed in step: {}, Produced in step: {}", amount_in_step, amount_out_step);
+            println!("    - next_sqrt_price: {}", next_sqrt_price);
+
             amount_remaining -= amount_in_step;
             total_amount_out += amount_out_step;
             current_sqrt_price = next_sqrt_price;
+
             if current_sqrt_price == target_sqrt_price {
                 if let Some(liquidity_net) = next_liquidity_net {
                     current_liquidity = (current_liquidity as i128 + liquidity_net) as u128;
@@ -286,8 +292,14 @@ impl DecodedWhirlpoolPool {
                 } else { break; }
             }
         }
+
         let fee_on_output = (total_amount_out * out_mint_fee_bps as u128) / 10000;
         let final_amount_out = total_amount_out.saturating_sub(fee_on_output);
+        println!("\n  - Total gross amount_out: {}", total_amount_out);
+        println!("  - Fee on output: {}", fee_on_output);
+        println!("  - Final amount_out: {}", final_amount_out);
+        println!("-------------------------------------------\n");
+
         Ok(final_amount_out as u64)
     }
 }
@@ -309,6 +321,102 @@ impl PoolOperations for DecodedWhirlpoolPool {
     fn get_quote(&self, _token_in_mint: &Pubkey, _amount_in: u64, _current_timestamp: i64) -> Result<u64> {
         Err(anyhow!("get_quote synchrone n'est pas supporté pour Whirlpool. Utilisez get_quote_async."))
     }
+
+
+    fn get_required_input(
+        &self,
+        token_out_mint: &Pubkey,
+        amount_out: u64,
+        _current_timestamp: i64,
+    ) -> Result<u64> {
+        if amount_out == 0 { return Ok(0); }
+        let tick_arrays = self.tick_arrays.as_ref().ok_or_else(|| anyhow!("Pool not hydrated."))?;
+        if self.liquidity == 0 { return Err(anyhow!("Not enough liquidity in pool.")); }
+
+        let a_to_b = *token_out_mint == self.mint_b; // true = we want B, so we provide A
+        let (in_mint_fee_bps, out_mint_fee_bps) = if a_to_b {
+            (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps)
+        } else {
+            (self.mint_b_transfer_fee_bps, self.mint_a_transfer_fee_bps)
+        };
+
+        const BPS_DENOMINATOR: u128 = 10000;
+        let mut gross_amount_out_target = if out_mint_fee_bps > 0 {
+            let numerator = (amount_out as u128).saturating_mul(BPS_DENOMINATOR);
+            let denominator = BPS_DENOMINATOR.saturating_sub(out_mint_fee_bps as u128);
+            numerator.div_ceil(denominator)
+        } else {
+            amount_out as u128
+        };
+
+        let mut total_amount_in_net: u128 = 0;
+        let mut current_sqrt_price = self.sqrt_price;
+        let mut current_tick_index = self.tick_current_index;
+        let mut current_liquidity = self.liquidity;
+
+        // La direction du swap pour l'input est l'opposé de la direction de l'output.
+        let input_a_to_b = !a_to_b;
+
+        while gross_amount_out_target > 0 {
+            if current_liquidity == 0 { return Err(anyhow!("Not enough liquidity to reach target amount out.")); }
+
+            let (next_tick_index, next_liquidity_net) = match find_next_initialized_tick(self, current_tick_index, input_a_to_b, tick_arrays) {
+                Some((tick_index, tick_data)) => (tick_index, tick_data.liquidity_net),
+                None => (if input_a_to_b { -443636 } else { 443636 }, 0)
+            };
+            let sqrt_price_target = orca_whirlpool_math::tick_to_sqrt_price_x64(next_tick_index);
+
+            let amount_out_available_in_step = if a_to_b { // we want B
+                orca_whirlpool_math::get_delta_y(sqrt_price_target, current_sqrt_price, current_liquidity)
+            } else { // we want A
+                orca_whirlpool_math::get_delta_x(current_sqrt_price, sqrt_price_target, current_liquidity)
+            };
+
+            let amount_out_chunk = gross_amount_out_target.min(amount_out_available_in_step);
+
+            if amount_out_chunk == 0 && gross_amount_out_target > 0 {
+                return Err(anyhow!("Calculation stuck, cannot obtain remaining output."));
+            }
+
+            let (prev_sqrt_price, amount_in_step_net) = if a_to_b { // we want B (output), so we provide A (input)
+                let p_start = orca_whirlpool_math::get_next_sqrt_price_y_down(current_sqrt_price, current_liquidity, amount_out_chunk);
+                (p_start, orca_whirlpool_math::get_delta_x_ceil(p_start, current_sqrt_price, current_liquidity))
+            } else { // we want A (output), so we provide B (input)
+                let p_start = orca_whirlpool_math::get_next_sqrt_price_x_up(current_sqrt_price, current_liquidity, amount_out_chunk);
+                (p_start, orca_whirlpool_math::get_delta_y_ceil(current_sqrt_price, p_start, current_liquidity))
+            };
+
+            total_amount_in_net += amount_in_step_net;
+            gross_amount_out_target -= amount_out_chunk;
+            current_sqrt_price = prev_sqrt_price;
+
+            if current_sqrt_price == sqrt_price_target && next_liquidity_net != 0 {
+                current_liquidity = (current_liquidity as i128 + next_liquidity_net) as u128;
+                current_tick_index = if input_a_to_b { next_tick_index - 1 } else { next_tick_index };
+            }
+        }
+
+        const FEE_RATE_DENOMINATOR: u128 = 1_000_000;
+        let amount_in_after_transfer_fee = if self.fee_rate > 0 {
+            let num = total_amount_in_net.saturating_mul(FEE_RATE_DENOMINATOR);
+            let den = FEE_RATE_DENOMINATOR.saturating_sub(self.fee_rate as u128);
+            num.div_ceil(den)
+        } else {
+            total_amount_in_net
+        };
+
+        let final_amount_in = if in_mint_fee_bps > 0 {
+            let numerator = amount_in_after_transfer_fee.saturating_mul(BPS_DENOMINATOR);
+            let denominator = BPS_DENOMINATOR.saturating_sub(in_mint_fee_bps as u128);
+            numerator.div_ceil(denominator)
+        } else {
+            amount_in_after_transfer_fee
+        };
+
+        Ok(final_amount_in as u64)
+    }
+
+
 
     /// La version asynchrone est la méthode correcte pour obtenir un quote de Whirlpool.
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, rpc_client: &RpcClient) -> Result<u64> {

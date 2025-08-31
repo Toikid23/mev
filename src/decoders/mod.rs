@@ -110,6 +110,23 @@ impl PoolOperations for Pool {
         }
     }
 
+    fn get_required_input(&self, token_out_mint: &Pubkey, amount_out: u64, current_timestamp: i64) -> Result<u64> {
+        match self {
+            Pool::RaydiumAmmV4(p) => p.get_required_input(token_out_mint, amount_out, current_timestamp),
+            Pool::RaydiumCpmm(p) => p.get_required_input(token_out_mint, amount_out, current_timestamp),
+            Pool::RaydiumClmm(p) => p.get_required_input(token_out_mint, amount_out, current_timestamp),
+            Pool::RaydiumStableSwap(p) => p.get_required_input(token_out_mint, amount_out, current_timestamp),
+            Pool::RaydiumLaunchpad(p) => p.get_required_input(token_out_mint, amount_out, current_timestamp),
+            Pool::MeteoraDammV1(p) => p.get_required_input(token_out_mint, amount_out, current_timestamp),
+            Pool::MeteoraDammV2(p) => p.get_required_input(token_out_mint, amount_out, current_timestamp),
+            Pool::MeteoraDlmm(p) => p.get_required_input(token_out_mint, amount_out, current_timestamp),
+            Pool::OrcaWhirlpool(p) => p.get_required_input(token_out_mint, amount_out, current_timestamp),
+            Pool::OrcaAmmV2(p) => p.get_required_input(token_out_mint, amount_out, current_timestamp),
+            Pool::OrcaAmmV1(p) => p.get_required_input(token_out_mint, amount_out, current_timestamp),
+            Pool::PumpAmm(p) => p.get_required_input(token_out_mint, amount_out, current_timestamp),
+        }
+    }
+
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, rpc_client: &RpcClient) -> Result<u64> {
         match self {
             // On gère déjà le cas Whirlpool

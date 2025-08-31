@@ -185,6 +185,67 @@ impl PoolOperations for DecodedCpmmPool {
 
         Ok(final_amount_out)
     }
+
+    fn get_required_input(
+        &self,
+        token_out_mint: &Pubkey,
+        amount_out: u64,
+        _current_timestamp: i64,
+    ) -> Result<u64> {
+        if amount_out == 0 { return Ok(0); }
+
+        // --- 1. Configuration initiale (inverse de get_quote) ---
+        let (in_mint_fee_bps, out_mint_fee_bps, in_reserve, out_reserve) = if *token_out_mint == self.token_1_mint {
+            (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps, self.reserve_a, self.reserve_b)
+        } else {
+            (self.mint_b_transfer_fee_bps, self.mint_a_transfer_fee_bps, self.reserve_b, self.reserve_a)
+        };
+
+        if out_reserve == 0 || in_reserve == 0 { return Err(anyhow!("Pool has no liquidity")); }
+
+        const BPS_DENOMINATOR: u128 = 10000;
+
+        // --- 2. Inverser les frais de transfert Token-2022 sur la SORTIE ---
+        let gross_amount_out = if out_mint_fee_bps > 0 {
+            let numerator = (amount_out as u128).saturating_mul(BPS_DENOMINATOR);
+            let denominator = BPS_DENOMINATOR.saturating_sub(out_mint_fee_bps as u128);
+            numerator.div_ceil(denominator)
+        } else {
+            amount_out as u128
+        };
+
+        if gross_amount_out >= out_reserve as u128 {
+            return Err(anyhow!("Cannot get required input, amount_out is too high."));
+        }
+
+        // --- 3. Inverser la formule du produit constant ---
+        let numerator = gross_amount_out.saturating_mul(in_reserve as u128);
+        let denominator = (out_reserve as u128).saturating_sub(gross_amount_out);
+        let amount_in_less_fees = numerator.div_ceil(denominator);
+
+        // --- 4. Inverser les frais de trading du pool ---
+        const FEE_DENOMINATOR: u128 = 1_000_000;
+        let amount_in_after_transfer_fee = if self.trade_fee_rate > 0 {
+            let num = amount_in_less_fees.saturating_mul(FEE_DENOMINATOR);
+            let den = FEE_DENOMINATOR.saturating_sub(self.trade_fee_rate as u128);
+            num.div_ceil(den)
+        } else {
+            amount_in_less_fees
+        };
+
+        // --- 5. Inverser les frais de transfert Token-2022 sur l'ENTRÉE ---
+        let required_amount_in = if in_mint_fee_bps > 0 {
+            let num = amount_in_after_transfer_fee.saturating_mul(BPS_DENOMINATOR);
+            let den = BPS_DENOMINATOR.saturating_sub(in_mint_fee_bps as u128);
+            num.div_ceil(den)
+        } else {
+            amount_in_after_transfer_fee
+        };
+
+        Ok(required_amount_in as u64)
+    }
+
+
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
         self.get_quote(token_in_mint, amount_in, 0)
     }
