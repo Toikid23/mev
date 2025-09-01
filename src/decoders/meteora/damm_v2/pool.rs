@@ -1,12 +1,13 @@
+// DANS: src/decoders/meteora/damm_v2/pool.rs
+
 use crate::decoders::spl_token_decoders;
 use anyhow::{anyhow, bail, Result};
 use bytemuck::{Pod, Zeroable};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use uint::construct_uint;
-// --- IMPORT MANQUANT AJOUTÉ ---
 use solana_sdk::instruction::{Instruction, AccountMeta};
-use spl_token; // Pour la valeur par défaut
+use spl_token;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
@@ -14,10 +15,7 @@ use spl_associated_token_account::get_associated_token_address_with_program_id;
 use num_integer::Integer;
 use super::math;
 
-
 construct_uint! { pub struct U256(4); }
-
-// --- CONSTANTES ET STRUCTURES PUBLIQUES ---
 
 pub const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG");
 pub const POOL_STATE_DISCRIMINATOR: [u8; 8] = [241, 154, 109, 4, 17, 177, 109, 188];
@@ -38,10 +36,8 @@ pub struct DecodedMeteoraDammPool {
     pub mint_b_decimals: u8,
     pub mint_a_transfer_fee_bps: u16,
     pub mint_b_transfer_fee_bps: u16,
-    // --- CHAMPS AJOUTÉS POUR LA ROBUSTESSE ---
     pub mint_a_program: Pubkey,
     pub mint_b_program: Pubkey,
-    // --- FIN DES AJOUTS ---
     pub pool_fees: onchain_layouts::PoolFeesStruct,
     pub activation_point: u64,
     pub last_swap_timestamp: i64,
@@ -55,7 +51,6 @@ impl DecodedMeteoraDammPool {
     }
 }
 
-// ... (le module onchain_layouts reste identique) ...
 pub mod onchain_layouts {
     #![allow(dead_code)]
     use super::*;
@@ -73,7 +68,6 @@ pub mod onchain_layouts {
     pub struct RewardInfo { pub initialized: u8, pub reward_token_flag: u8, pub _padding_0: [u8; 6], pub _padding_1: [u8; 8], pub mint: Pubkey, pub vault: Pubkey, pub funder: Pubkey, pub reward_duration: u64, pub reward_duration_end: u64, pub reward_rate: u128, pub reward_per_token_stored: [u8; 32], pub last_update_time: u64, pub cumulative_seconds_with_empty_liquidity_reward: u64, }
 }
 
-// --- decode_pool MISE À JOUR ---
 pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraDammPool> {
     if data.get(..8) != Some(&POOL_STATE_DISCRIMINATOR) {
         bail!("Invalid discriminator. Not a Meteora DAMM v2 Pool account.");
@@ -100,16 +94,13 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraDammPo
         activation_point: pool_struct.activation_point,
         mint_a_decimals: 0, mint_b_decimals: 0,
         mint_a_transfer_fee_bps: 0, mint_b_transfer_fee_bps: 0,
-        // --- INITIALISATION DES NOUVEAUX CHAMPS ---
         mint_a_program: spl_token::id(),
         mint_b_program: spl_token::id(),
         last_swap_timestamp: 0,
     })
 }
 
-// --- hydrate MISE À JOUR ---
 pub async fn hydrate(pool: &mut DecodedMeteoraDammPool, rpc_client: &RpcClient) -> Result<()> {
-    // On doit récupérer le compte complet, pas seulement les `data`
     let (mint_a_res, mint_b_res) = tokio::join!(
         rpc_client.get_account(&pool.mint_a),
         rpc_client.get_account(&pool.mint_b)
@@ -119,23 +110,23 @@ pub async fn hydrate(pool: &mut DecodedMeteoraDammPool, rpc_client: &RpcClient) 
     let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_account.data)?;
     pool.mint_a_decimals = decoded_mint_a.decimals;
     pool.mint_a_transfer_fee_bps = decoded_mint_a.transfer_fee_basis_points;
-    pool.mint_a_program = mint_a_account.owner; // On sauvegarde le programme propriétaire
+    pool.mint_a_program = mint_a_account.owner;
 
     let mint_b_account = mint_b_res?;
     let decoded_mint_b = spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_account.data)?;
     pool.mint_b_decimals = decoded_mint_b.decimals;
     pool.mint_b_transfer_fee_bps = decoded_mint_b.transfer_fee_basis_points;
-    pool.mint_b_program = mint_b_account.owner; // On sauvegarde le programme propriétaire
+    pool.mint_b_program = mint_b_account.owner;
 
     Ok(())
 }
 
-// ... (Le bloc `impl PoolOperations` et les fonctions mathématiques que nous avons ajoutées précédemment restent ici, inchangés) ...
 #[async_trait]
 impl PoolOperations for DecodedMeteoraDammPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
     fn address(&self) -> Pubkey { self.address }
+
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<u64> {
         if self.liquidity == 0 { return Ok(0); }
         let a_to_b = *token_in_mint == self.mint_a;
@@ -187,72 +178,92 @@ impl PoolOperations for DecodedMeteoraDammPool {
         Ok(final_amount_out)
     }
 
+    /// Calcule le montant d'entrée requis pour obtenir un montant de sortie spécifié.
+    ///
+    /// # Stratégie d'Implémentation : Recherche Binaire (Dichotomie)
+    ///
+    /// L'inversion mathématique directe (analytique) de la fonction `get_quote` pour ce pool
+    /// est extrêmement instable. La combinaison de la liquidité concentrée (CLMM), des frais de transfert
+    /// Token-2022, et surtout des frais de pool conditionnels (parfois sur l'input, parfois sur l'output)
+    /// rend une formule d'inversion directe très sensible aux erreurs d'arrondi, menant à des résultats incorrects.
+    /// Le SDK de Meteora n'expose d'ailleurs pas cette fonction, ce qui confirme sa complexité.
+    ///
+    /// Pour garantir la robustesse et la précision, nous utilisons une méthode numérique : la recherche binaire.
+    /// L'algorithme cherche le plus petit `amount_in` qui produit un `quote_output >= amount_out`.
+    ///
+    /// # Choix de la Boucle : Dynamique vs. Fixe (Déterministe)
+    ///
+    /// Il existe deux approches pour la boucle de recherche :
+    ///
+    /// 1.  **Approche Fixe (Déterministe) :** `for _ in 0..32`.
+    ///     - **Avantages :** Temps d'exécution prévisible. Le calcul prend toujours le même temps,
+    ///       permettant au bot de faire des "méta-décisions" (ex: "Mon temps de calcul est de 12ms,
+    ///       la fenêtre d'opportunité est de 50ms, je sais à l'avance si j'ai le temps"). C'est crucial
+    ///       pour les systèmes à très faible latence afin de rejeter instantanément les opportunités non viables.
+    ///     - **Inconvénients :** Peut effectuer des itérations "inutiles" si la solution est trouvée rapidement.
+    ///
+    /// 2.  **Approche Dynamique (Opportuniste) - CELLE CHOISIE ICI :** `while lower <= upper`.
+    ///     - **Avantages :** Potentiellement plus rapide en moyenne, car la boucle s'arrête dès que la
+    ///       meilleure solution est trouvée. Vise la vitesse maximale pour chaque calcul individuel.
+    ///     - **Inconvénients :** Temps d'exécution non déterministe ("jitter"). Le bot ne peut connaître
+    ///       le temps de calcul qu'après l'avoir terminé, ce qui l'empêche de rejeter une opportunité
+    ///       à l'avance sur la base du temps. Il peut gaspiller des ressources CPU sur des courses déjà perdues.
+    ///
+    /// Cette implémentation utilise l'approche dynamique pour privilégier la vitesse moyenne,
+    /// tout en incluant une limite maximale d'itérations comme filet de sécurité contre les boucles infinies.
     fn get_required_input(
         &self,
         token_out_mint: &Pubkey,
         amount_out: u64,
         current_timestamp: i64,
     ) -> Result<u64> {
-        if self.liquidity == 0 { return Ok(u64::MAX); }
+        if amount_out == 0 { return Ok(0); }
+        if self.liquidity == 0 { return Err(anyhow!("Pool has no liquidity")); }
 
-        let a_to_b = *token_out_mint == self.mint_b; // Si on veut B, on fournit A
-        let (in_mint_fee_bps, out_mint_fee_bps) = if a_to_b {
-            (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps)
-        } else {
-            (self.mint_b_transfer_fee_bps, self.mint_a_transfer_fee_bps)
-        };
+        let token_in_mint = if *token_out_mint == self.mint_a { self.mint_b } else { self.mint_a };
 
-        // --- 1. Inverser les frais de transfert de SORTIE ---
-        const BPS_DENOMINATOR: u128 = 10000;
-        let amount_out_after_pool_fee = if out_mint_fee_bps > 0 {
-            let numerator = (amount_out as u128).saturating_mul(BPS_DENOMINATOR);
-            let denominator = BPS_DENOMINATOR.saturating_sub(out_mint_fee_bps as u128);
-            numerator.div_ceil(denominator)
-        } else {
-            amount_out as u128
-        };
+        // 1. Définir une plage de recherche intelligente
+        let mut lower_bound: u64 = 0;
+        let mut upper_bound: u64 = amount_out.saturating_mul(4); // Estimation de départ large et sûre
 
-        // --- 2. Inverser les frais de POOL et le SWAP ---
-        let fees = &self.pool_fees;
-        let base_fee_num = math::get_base_fee(&fees.base_fee, current_timestamp, self.activation_point)? as u128;
-        let dynamic_fee_num = if fees.dynamic_fee.initialized != 0 { math::get_variable_fee(&fees.dynamic_fee)? } else { 0 };
-        let total_fee_numerator = base_fee_num.saturating_add(dynamic_fee_num);
-        const FEE_DENOMINATOR: u128 = 1_000_000_000;
+        if self.sqrt_price > 0 {
+            let price_ratio = (self.sqrt_price as f64 / (1u128 << 64) as f64).powi(2);
+            let estimated_price = if token_in_mint == self.mint_a { 1.0 / price_ratio } else { price_ratio };
+            let initial_guess = (amount_out as f64 * estimated_price * 1.2) as u64;
+            if initial_guess > 0 {
+                upper_bound = initial_guess;
+            }
+        }
 
-        let fees_on_input = match (self.collect_fee_mode, a_to_b) {
-            (0, _) => false, (1, true) => false, (1, false) => true,
-            _ => bail!("Unsupported collect_fee_mode"),
-        };
+        let mut best_guess: u64 = upper_bound;
+        let mut iterations = 0;
+        const MAX_ITERATIONS: u32 = 32; // Filet de sécurité
 
-        let amount_in_after_transfer_fee = if fees_on_input {
-            // Frais sur l'input: on doit d'abord trouver l'input net, puis inverser les frais
-            let next_sqrt_price = math::get_next_sqrt_price_from_output(self.sqrt_price, self.liquidity, amount_out_after_pool_fee, a_to_b)?;
-            let net_in = math::get_amount_in(self.sqrt_price, next_sqrt_price, self.liquidity, a_to_b)? as u128;
+        // 2. Recherche binaire avec une condition d'arrêt dynamique
+        while lower_bound <= upper_bound && iterations < MAX_ITERATIONS {
+            let guess_input = lower_bound.saturating_add(upper_bound) / 2;
+            if guess_input == 0 {
+                lower_bound = 1;
+                iterations += 1;
+                continue;
+            }
 
-            let numerator = net_in.saturating_mul(FEE_DENOMINATOR);
-            let denominator = FEE_DENOMINATOR.saturating_sub(total_fee_numerator);
-            numerator.div_ceil(denominator)
-        } else {
-            // Frais sur l'output: on doit d'abord trouver le pre_fee_amount_out, puis inverser le swap
-            let numerator = amount_out_after_pool_fee.saturating_mul(FEE_DENOMINATOR);
-            let denominator = FEE_DENOMINATOR.saturating_sub(total_fee_numerator);
-            let pre_fee_amount_out = numerator.div_ceil(denominator);
+            match self.get_quote(&token_in_mint, guess_input, current_timestamp) {
+                Ok(quote_output) if quote_output >= amount_out => {
+                    best_guess = guess_input;
+                    upper_bound = guess_input.saturating_sub(1);
+                }
+                _ => {
+                    lower_bound = guess_input.saturating_add(1);
+                }
+            }
+            iterations += 1;
+        }
 
-            let next_sqrt_price = math::get_next_sqrt_price_from_output(self.sqrt_price, self.liquidity, pre_fee_amount_out, a_to_b)?;
-            math::get_amount_in(self.sqrt_price, next_sqrt_price, self.liquidity, a_to_b)? as u128
-        };
-
-        // --- 3. Inverser les frais de transfert d'ENTRÉE ---
-        let final_amount_in = if in_mint_fee_bps > 0 {
-            let numerator = amount_in_after_transfer_fee.saturating_mul(BPS_DENOMINATOR);
-            let denominator = BPS_DENOMINATOR.saturating_sub(in_mint_fee_bps as u128);
-            numerator.div_ceil(denominator)
-        } else {
-            amount_in_after_transfer_fee
-        };
-
-        Ok(final_amount_in as u64)
+        // 3. Ajouter une petite marge de sécurité
+        Ok(best_guess.saturating_add(2))
     }
+
 
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
         self.get_quote(token_in_mint, amount_in, 0)
