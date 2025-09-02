@@ -262,6 +262,7 @@ impl PoolOperations for DecodedDlmmPool {
     ) -> Result<u64> {
         if amount_out == 0 { return Ok(0); }
         let bin_arrays = self.hydrated_bin_arrays.as_ref().ok_or_else(|| anyhow!("Pool not hydrated"))?;
+        if bin_arrays.is_empty() { return Err(anyhow!("Not enough liquidity in pool.")); }
 
         // --- 1. Configuration initiale ---
         let is_base_output = *token_out_mint == self.mint_a; // Veut du token A (base)
@@ -276,12 +277,12 @@ impl PoolOperations for DecodedDlmmPool {
         // --- 2. Inverser les frais de transfert de SORTIE ---
         let gross_amount_out_target = calculate_gross_amount_before_transfer_fee(amount_out, out_mint_fee_bps, out_mint_max_fee)? as u128;
 
-        // --- 3. Itérer sur les bins à l'envers ---
+        // --- 3. Itérer sur les bins à l'envers pour trouver l'input NET requis ---
         let mut total_amount_in_net: u128 = 0;
         let mut amount_out_remaining = gross_amount_out_target;
         let mut current_bin_id = self.active_bin_id;
 
-        // Simulation des frais dynamiques
+        // Simulation des frais dynamiques (doit être fait dans la boucle)
         let mut temp_v_params = self.v_parameters;
         update_references(&mut temp_v_params, &self.parameters, self.active_bin_id, current_timestamp)?;
 
@@ -300,6 +301,7 @@ impl PoolOperations for DecodedDlmmPool {
             let current_bin = &bin_array.bins[bin_index_in_array as usize];
 
             let out_reserve_in_bin = if is_base_output { current_bin.amount_a } else { current_bin.amount_b };
+
             if out_reserve_in_bin == 0 {
                 current_bin_id = if is_base_input { current_bin_id.saturating_sub(1) } else { current_bin_id.saturating_add(1) };
                 continue;
@@ -307,28 +309,30 @@ impl PoolOperations for DecodedDlmmPool {
 
             let amount_out_from_this_bin = amount_out_remaining.min(out_reserve_in_bin as u128);
 
-            let required_net_in_for_chunk = math::get_amount_in(amount_out_from_this_bin as u64, current_bin.price, is_base_input)? as u128;
+            // --- Logique d'inversion des frais de POOL ---
+            update_volatility_accumulator(&mut temp_v_params, &self.parameters, self.active_bin_id, current_bin_id)?;
+            let total_fee_rate = get_total_fee(self.bin_step, &self.parameters, &temp_v_params)?;
 
-            total_amount_in_net += required_net_in_for_chunk;
+            let required_net_in_for_chunk_no_fee = math::get_amount_in(amount_out_from_this_bin as u64, current_bin.price, is_base_input)? as u128;
+
+            let required_net_in_for_chunk_with_fee = if total_fee_rate > 0 {
+                // On inverse les frais pour trouver le montant brut qui, après frais, donne le montant net.
+                // amount_in_gross = amount_in_net * FEE_PRECISION / (FEE_PRECISION - fee_rate)
+                let num = required_net_in_for_chunk_no_fee.saturating_mul(FEE_PRECISION);
+                let den = FEE_PRECISION.saturating_sub(total_fee_rate);
+                num.div_ceil(den)
+            } else {
+                required_net_in_for_chunk_no_fee
+            };
+
+            total_amount_in_net += required_net_in_for_chunk_with_fee;
             amount_out_remaining -= amount_out_from_this_bin;
 
             current_bin_id = if is_base_input { current_bin_id.saturating_sub(1) } else { current_bin_id.saturating_add(1) };
         }
 
-        // --- 4. Inverser les frais de POOL ---
-        update_volatility_accumulator(&mut temp_v_params, &self.parameters, self.active_bin_id, current_bin_id)?;
-        let total_fee_rate = get_total_fee(self.bin_step, &self.parameters, &temp_v_params)?;
-
-        let amount_in_after_transfer_fee = if total_fee_rate > 0 {
-            let num = total_amount_in_net.saturating_mul(FEE_PRECISION);
-            let den = FEE_PRECISION.saturating_sub(total_fee_rate);
-            num.div_ceil(den)
-        } else {
-            total_amount_in_net
-        };
-
-        // --- 5. Inverser les frais de transfert d'ENTRÉE ---
-        let final_amount_in = calculate_gross_amount_before_transfer_fee(amount_in_after_transfer_fee as u64, in_mint_fee_bps, in_mint_max_fee)?;
+        // --- 4. Inverser les frais de transfert d'ENTRÉE ---
+        let final_amount_in = calculate_gross_amount_before_transfer_fee(total_amount_in_net as u64, in_mint_fee_bps, in_mint_max_fee)?;
 
         Ok(final_amount_in)
     }
@@ -495,8 +499,7 @@ fn calculate_transfer_fee(amount: u64, transfer_fee_bps: u16, max_fee: u64) -> R
     Ok(fee.min(max_fee as u128) as u64)
 }
 
-/// Calcule le montant brut nécessaire pour qu'après déduction des frais de transfert, il reste le montant net.
-/// Traduction fidèle de `calculatePreFeeAmount` et `calculateTransferFeeIncludedAmount` du SDK.
+/// Calcule le montant brut nécessaire pour qu'après déduction des frais, il reste le montant net.
 fn calculate_gross_amount_before_transfer_fee(net_amount: u64, transfer_fee_bps: u16, max_fee: u64) -> Result<u64> {
     if transfer_fee_bps == 0 || net_amount == 0 {
         return Ok(net_amount);
@@ -504,7 +507,7 @@ fn calculate_gross_amount_before_transfer_fee(net_amount: u64, transfer_fee_bps:
 
     const ONE_IN_BASIS_POINTS: u128 = 10000;
 
-    if transfer_fee_bps as u128 == ONE_IN_BASIS_POINTS {
+    if transfer_fee_bps as u128 >= ONE_IN_BASIS_POINTS {
         return Ok(net_amount.saturating_add(max_fee));
     }
 
@@ -621,6 +624,14 @@ fn update_volatility_accumulator(v_params: &mut onchain_layouts::VariableParamet
 
     Ok(())
 }
+
+fn get_price_from_bin_id(bin_id: i32, bin_step: u16) -> u128 {
+    let price_per_token = 1.0001f64;
+    let tick_price = price_per_token.powi(bin_id * bin_step as i32);
+    (tick_price * (1u128 << 64) as f64) as u128
+}
+
+
 
 // ... (le module onchain_layouts reste inchangé)
 mod onchain_layouts {

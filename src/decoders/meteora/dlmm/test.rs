@@ -57,6 +57,33 @@ pub async fn test_dlmm_with_simulation(rpc_client: &RpcClient, payer_keypair: &K
     let ui_predicted_amount_out = predicted_amount_out as f64 / 10f64.powi(output_decimals as i32);
     println!("-> PRÉDICTION LOCALE (Dynamique et Précise): {} UI", ui_predicted_amount_out);
 
+    // --- NOUVEAU BLOC DE VALIDATION ---
+    println!("\n[VALIDATION] Lancement du test d'inversion mathématique...");
+    if predicted_amount_out > 0 {
+        // On utilise la version async car c'est la bonne pratique pour les CLMM/DLMM
+        let required_input_from_quote = pool.get_required_input_async(&output_mint_pubkey, predicted_amount_out, rpc_client).await?;
+
+        println!("  -> Input original     : {}", amount_in_base_units);
+        println!("  -> Output prédit      : {}", predicted_amount_out);
+        println!("  -> Input Re-calculé   : {}", required_input_from_quote);
+
+        if required_input_from_quote >= amount_in_base_units {
+            let difference = required_input_from_quote.saturating_sub(amount_in_base_units);
+            // Tolérance élevée pour les CLMMs à cause des arrondis multiples
+            if difference <= 100 {
+                println!("  -> ✅ SUCCÈS: Le calcul inverse est cohérent (différence: {} lamports).", difference);
+            } else {
+                bail!("  -> ⚠️ ÉCHEC: La différence du calcul inverse est trop grande ({} lamports).", difference);
+            }
+        } else {
+            bail!("  -> ⚠️ ÉCHEC: Le calcul inverse a produit un montant inférieur à l'original !");
+        }
+    } else {
+        println!("  -> AVERTISSEMENT: Le quote est de 0, test d'inversion sauté.");
+    }
+    // --- FIN DU BLOC DE VALIDATION ---
+
+
     // --- 2. Préparation de la Transaction (simplifié) ---
     println!("\n[2/3] Préparation de la transaction de swap...");
 
