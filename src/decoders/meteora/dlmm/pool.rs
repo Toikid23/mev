@@ -255,7 +255,7 @@ impl PoolOperations for DecodedDlmmPool {
     }
 
     fn get_required_input(
-        &self,
+        &mut self,
         token_out_mint: &Pubkey,
         amount_out: u64,
         current_timestamp: i64,
@@ -331,6 +331,11 @@ impl PoolOperations for DecodedDlmmPool {
         let final_amount_in = calculate_gross_amount_before_transfer_fee(amount_in_after_transfer_fee as u64, in_mint_fee_bps, in_mint_max_fee)?;
 
         Ok(final_amount_in)
+    }
+
+    async fn get_required_input_async(&mut self, token_out_mint: &Pubkey, amount_out: u64, _rpc_client: &RpcClient) -> Result<u64> {
+        // La version async appelle simplement la version synchrone car elle n'a pas besoin d'appels RPC.
+        self.get_required_input(token_out_mint, amount_out, 0)
     }
 
 
