@@ -48,7 +48,7 @@ pub async fn test_clmm(rpc_client: &RpcClient, payer: &Keypair, current_timestam
 
     let output_mint_pubkey = if input_mint_pubkey == pool.mint_a { pool.mint_b } else { pool.mint_a };
 
-    /*println!("\n[VALIDATION] Lancement du test d'inversion mathématique...");
+    println!("\n[VALIDATION] Lancement du test d'inversion mathématique...");
     if predicted_amount_out > 0 {
         let required_input_from_quote = pool.get_required_input(&output_mint_pubkey, predicted_amount_out, current_timestamp)?;
         println!("  -> Input original     : {}", amount_in_base_units);
@@ -69,7 +69,7 @@ pub async fn test_clmm(rpc_client: &RpcClient, payer: &Keypair, current_timestam
         }
     } else {
         println!("  -> AVERTISSEMENT: Le quote est de 0, test d'inversion sauté.");
-    }*/
+    }
 
     println!("\n[2/3] Préparation de la simulation...");
 

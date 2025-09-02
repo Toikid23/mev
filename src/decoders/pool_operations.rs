@@ -16,11 +16,14 @@ pub trait PoolOperations {
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, rpc_client: &RpcClient) -> Result<u64>;
 
     fn get_required_input(
-        &self,
+        &mut self,
         token_out_mint: &Pubkey, // Le mint du token que l'on veut recevoir
         amount_out: u64,         // La quantité que l'on veut recevoir
         current_timestamp: i64
     ) -> Result<u64>;
+
+
+    async fn get_required_input_async(&mut self, token_out_mint: &Pubkey, amount_out: u64, rpc_client: &RpcClient) -> Result<u64>;
 
     fn create_swap_instruction(
         &self,

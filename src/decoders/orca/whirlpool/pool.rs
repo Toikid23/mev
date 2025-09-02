@@ -324,7 +324,7 @@ impl PoolOperations for DecodedWhirlpoolPool {
 
 
     fn get_required_input(
-        &self,
+        &mut self,
         token_out_mint: &Pubkey,
         amount_out: u64,
         _current_timestamp: i64,
@@ -414,6 +414,23 @@ impl PoolOperations for DecodedWhirlpoolPool {
         };
 
         Ok(final_amount_in as u64)
+    }
+
+    async fn get_required_input_async(&mut self, token_out_mint: &Pubkey, amount_out: u64, rpc_client: &RpcClient) -> Result<u64> {
+        // Étape 1: Pour obtenir l'input pour `amount_out`, nous devons d'abord estimer un `amount_in` approximatif.
+        // Cela nous permettra de pré-charger les bons tick_arrays.
+        // Nous pouvons utiliser une estimation basée sur le prix actuel.
+        let is_base_output = *token_out_mint == self.mint_a;
+        let price_ratio = (self.sqrt_price as f64 / (1u128 << 64) as f64).powi(2);
+        let estimated_price = if is_base_output { price_ratio } else { 1.0 / price_ratio };
+        let estimated_amount_in = (amount_out as f64 * estimated_price * 1.1) as u64; // *1.1 pour marge
+
+        // Étape 2: On utilise `get_quote_async` comme pré-chargeur. Il va charger les tick_arrays nécessaires.
+        let token_in_mint = if is_base_output { self.mint_b } else { self.mint_a };
+        let _ = self.get_quote_async(&token_in_mint, estimated_amount_in, rpc_client).await;
+
+        // Étape 3: Maintenant que le pool est "super-hydraté", on peut appeler la version synchrone en toute sécurité.
+        self.get_required_input(token_out_mint, amount_out, 0)
     }
 
 

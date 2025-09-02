@@ -497,7 +497,7 @@ impl PoolOperations for DecodedClmmPool {
         self.get_quote(token_in_mint, amount_in, 0)
     }
 
-    fn get_required_input(&self, token_out_mint: &Pubkey, amount_out: u64, _current_timestamp: i64) -> Result<u64> {
+    fn get_required_input(&mut self, token_out_mint: &Pubkey, amount_out: u64, _current_timestamp: i64) -> Result<u64> {
         let is_base_output = *token_out_mint == self.mint_a;
         let is_base_input = !is_base_output;
 
@@ -512,6 +512,11 @@ impl PoolOperations for DecodedClmmPool {
         let net_amount_in_required = self.calculate_required_input_internal(gross_amount_out, is_base_input)?;
 
         calculate_gross_amount_before_transfer_fee(net_amount_in_required, in_mint_fee_bps, in_mint_max_fee)
+    }
+
+    async fn get_required_input_async(&mut self, token_out_mint: &Pubkey, amount_out: u64, _rpc_client: &RpcClient) -> Result<u64> {
+        // La version async appelle simplement la version synchrone car elle n'a pas besoin d'appels RPC.
+        self.get_required_input(token_out_mint, amount_out, 0)
     }
 
     fn create_swap_instruction(

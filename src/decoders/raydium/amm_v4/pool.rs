@@ -153,7 +153,7 @@ impl PoolOperations for DecodedAmmPool {
     }
 
     fn get_required_input(
-        &self,
+        &mut self,
         token_out_mint: &Pubkey,
         amount_out: u64,
         _current_timestamp: i64
@@ -209,6 +209,11 @@ impl PoolOperations for DecodedAmmPool {
         };
 
         Ok(required_amount_in as u64)
+    }
+
+    async fn get_required_input_async(&mut self, token_out_mint: &Pubkey, amount_out: u64, _rpc_client: &RpcClient) -> Result<u64> {
+        // La version async appelle simplement la version synchrone car elle n'a pas besoin d'appels RPC.
+        self.get_required_input(token_out_mint, amount_out, 0)
     }
 
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {

@@ -212,7 +212,7 @@ impl PoolOperations for DecodedMeteoraDammPool {
     /// Cette implémentation utilise l'approche dynamique pour privilégier la vitesse moyenne,
     /// tout en incluant une limite maximale d'itérations comme filet de sécurité contre les boucles infinies.
     fn get_required_input(
-        &self,
+        &mut self,
         token_out_mint: &Pubkey,
         amount_out: u64,
         current_timestamp: i64,
@@ -262,6 +262,11 @@ impl PoolOperations for DecodedMeteoraDammPool {
 
         // 3. Ajouter une petite marge de sécurité
         Ok(best_guess.saturating_add(2))
+    }
+
+    async fn get_required_input_async(&mut self, token_out_mint: &Pubkey, amount_out: u64, _rpc_client: &RpcClient) -> Result<u64> {
+        // La version async appelle simplement la version synchrone car elle n'a pas besoin d'appels RPC.
+        self.get_required_input(token_out_mint, amount_out, 0)
     }
 
 
