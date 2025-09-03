@@ -1,3 +1,5 @@
+// src/decoders/raydium/clmm/pool.rs
+
 use crate::decoders::spl_token_decoders;
 use anyhow::{anyhow, bail, Result};
 use bytemuck::{from_bytes, Pod, Zeroable};
@@ -52,118 +54,8 @@ impl DecodedClmmPool {
         self.trade_fee_rate as f64 / 1_000_000.0 * 100.0
     }
 
-    fn calculate_swap_quote_internal(&self, net_amount_in: u128, is_base_input: bool) -> Result<(u64, Vec<Pubkey>)> {
-        let tick_arrays = self.tick_arrays.as_ref().ok_or_else(|| anyhow!("Pool is not hydrated."))?;
-        if tick_arrays.is_empty() || self.liquidity == 0 {
-            return Ok((0, Vec::new()));
-        }
-
-        let mut amount_remaining = net_amount_in;
-        let mut total_amount_out: u128 = 0;
-        let mut current_sqrt_price = self.sqrt_price_x64;
-        let mut current_tick_index = self.tick_current;
-        let mut current_liquidity = self.liquidity;
-        let mut tick_arrays_crossed = HashSet::new();
-
-        while amount_remaining > 0 {
-            let current_tick_array_start_index = tick_array::get_start_tick_index(current_tick_index, self.tick_spacing);
-            tick_arrays_crossed.insert(tick_array::get_tick_array_address(&self.address, current_tick_array_start_index, &self.program_id));
-
-            if current_liquidity > 0 {
-                let (next_tick_index, next_liquidity_net) = match find_next_initialized_tick(self, current_tick_index, is_base_input, tick_arrays) {
-                    Ok(result) => result,
-                    Err(_) => (if is_base_input { math::MIN_TICK } else { math::MAX_TICK }, 0)
-                };
-                let sqrt_price_target = math::tick_to_sqrt_price_x64(next_tick_index);
-
-                let (next_sqrt_price, amount_in_step, amount_out_step, fee_amount_step) = math::compute_swap_step(
-                    current_sqrt_price, sqrt_price_target, current_liquidity, amount_remaining, self.trade_fee_rate, is_base_input,
-                )?;
-
-                let total_consumed = amount_in_step.saturating_add(fee_amount_step);
-                if total_consumed == 0 { break; }
-
-                amount_remaining = amount_remaining.saturating_sub(total_consumed);
-                total_amount_out = total_amount_out.saturating_add(amount_out_step);
-                current_sqrt_price = next_sqrt_price;
-
-                if current_sqrt_price == sqrt_price_target {
-                    current_liquidity = (current_liquidity as i128 + next_liquidity_net) as u128;
-                    current_tick_index = if is_base_input { next_tick_index - 1 } else { next_tick_index };
-                } else {
-                    current_tick_index = math::get_tick_at_sqrt_price(current_sqrt_price)?;
-                    break;
-                }
-            } else {
-                break;
-            }
-        }
-
-        Ok((total_amount_out as u64, tick_arrays_crossed.into_iter().collect()))
-    }
-
-    /// Helper interne : Calcule le montant d'entrée NET requis pour un montant de sortie BRUT.
-    fn calculate_required_input_internal(&self, gross_amount_out: u64, is_base_input: bool) -> Result<u64> {
-        if gross_amount_out == 0 { return Ok(0); }
-        let tick_arrays = self.tick_arrays.as_ref().ok_or_else(|| anyhow!("Pool not hydrated."))?;
-        if tick_arrays.is_empty() { return Err(anyhow!("Not enough liquidity in pool (no tick arrays).")); }
-
-        let is_base_output = !is_base_input;
-        let mut gross_amount_out_target = gross_amount_out as u128;
-        let mut total_amount_in_net: u128 = 0;
-        let mut current_sqrt_price = self.sqrt_price_x64;
-        let mut current_tick_index = self.tick_current;
-        let mut current_liquidity = self.liquidity;
-
-        while gross_amount_out_target > 0 {
-            if current_liquidity == 0 { return Err(anyhow!("Not enough liquidity to reach target amount out.")); }
-
-            let (next_tick_index, next_liquidity_net) = match find_next_initialized_tick(self, current_tick_index, is_base_input, tick_arrays) {
-                Ok(result) => result,
-                Err(_) => (if is_base_input { math::MIN_TICK } else { math::MAX_TICK }, 0)
-            };
-            let sqrt_price_target = math::tick_to_sqrt_price_x64(next_tick_index);
-
-            let amount_out_available_in_step = (if is_base_output {
-                math::get_amount_x(sqrt_price_target, current_sqrt_price, current_liquidity, false)?
-            } else {
-                math::get_amount_y(current_sqrt_price, sqrt_price_target, current_liquidity, false)?
-            }) as u128;
-
-            let amount_out_chunk = gross_amount_out_target.min(amount_out_available_in_step);
-            if amount_out_chunk == 0 && gross_amount_out_target > 0 {
-                return Err(anyhow!("Calculation stuck, cannot obtain remaining output."));
-            }
-
-            let (prev_sqrt_price, amount_in_step_net) = if is_base_output {
-                let starting_sqrt_price = math::get_sqrt_price_from_amount_x_out(current_sqrt_price, current_liquidity, amount_out_chunk);
-                let required_y = math::get_amount_y(starting_sqrt_price, current_sqrt_price, current_liquidity, true)?;
-                (starting_sqrt_price, required_y as u128)
-            } else {
-                let starting_sqrt_price = math::get_sqrt_price_from_amount_y_out(current_sqrt_price, current_liquidity, amount_out_chunk);
-                let required_x = math::get_amount_x(current_sqrt_price, starting_sqrt_price, current_liquidity, true)?;
-                (starting_sqrt_price, required_x as u128)
-            };
-
-            total_amount_in_net = total_amount_in_net.saturating_add(amount_in_step_net);
-            gross_amount_out_target = gross_amount_out_target.saturating_sub(amount_out_chunk);
-            current_sqrt_price = prev_sqrt_price;
-
-            if current_sqrt_price == sqrt_price_target && next_liquidity_net != 0 {
-                current_liquidity = (current_liquidity as i128 + next_liquidity_net) as u128;
-                current_tick_index = if is_base_input { next_tick_index - 1 } else { next_tick_index };
-            }
-        }
-
-        const FEE_RATE_DENOMINATOR_VALUE: u64 = 1_000_000;
-        let amount_in_after_transfer_fee = (total_amount_in_net as u64).mul_div_ceil(
-            FEE_RATE_DENOMINATOR_VALUE,
-            FEE_RATE_DENOMINATOR_VALUE - self.trade_fee_rate as u64
-        ).ok_or_else(|| anyhow!("Math overflow"))? as u128;
-
-        Ok(amount_in_after_transfer_fee as u64)
-    }
-
+    // --- CETTE FONCTION EST REMPLACÉE PAR get_quote_with_tick_arrays ---
+    // fn calculate_swap_quote_internal(&self, net_amount_in: u128, is_base_input: bool) -> Result<(u64, Vec<Pubkey>)> { ... }
 
 
     pub fn get_quote_with_tick_arrays(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<(u64, Vec<Pubkey>)> {
@@ -173,10 +65,14 @@ impl DecodedClmmPool {
         }
 
         let is_base_input = *token_in_mint == self.mint_a;
-        let in_mint_transfer_fee_bps = if is_base_input { self.mint_a_transfer_fee_bps } else { self.mint_b_transfer_fee_bps };
+        let (in_mint_transfer_fee_bps, in_mint_max_fee, out_mint_transfer_fee_bps, out_mint_max_fee) = if is_base_input {
+            (self.mint_a_transfer_fee_bps, self.mint_a_max_transfer_fee, self.mint_b_transfer_fee_bps, self.mint_b_max_transfer_fee)
+        } else {
+            (self.mint_b_transfer_fee_bps, self.mint_b_max_transfer_fee, self.mint_a_transfer_fee_bps, self.mint_a_max_transfer_fee)
+        };
 
-        let fee_on_input = (amount_in as u128 * in_mint_transfer_fee_bps as u128) / 10000;
-        let mut amount_remaining = amount_in.saturating_sub(fee_on_input as u64) as u128;
+        let fee_on_input = calculate_transfer_fee(amount_in, in_mint_transfer_fee_bps, in_mint_max_fee)?;
+        let mut amount_remaining = amount_in.saturating_sub(fee_on_input) as u128;
         let mut total_amount_out: u128 = 0;
         let mut current_sqrt_price = self.sqrt_price_x64;
         let mut current_tick_index = self.tick_current;
@@ -205,25 +101,21 @@ impl DecodedClmmPool {
                 total_amount_out = total_amount_out.saturating_add(amount_out_step);
                 current_sqrt_price = next_sqrt_price;
 
-                // --- LA CORRECTION FINALE EST ICI ---
                 if current_sqrt_price == sqrt_price_target {
-                    // Nous avons atteint un tick, nous devons le traverser.
                     current_liquidity = (current_liquidity as i128 + next_liquidity_net) as u128;
                     current_tick_index = if is_base_input { next_tick_index - 1 } else { next_tick_index };
                 } else {
-                    // Nous ne sommes pas sur un tick, nous devons recalculer le tick_current
-                    // à partir du nouveau prix, puis la boucle s'arrêtera car amount_remaining sera 0.
-                    // NOTE: get_tick_at_sqrt_price n'est pas dans tick_math
                     current_tick_index = math::get_tick_at_sqrt_price(current_sqrt_price)?;
                 }
-                // --- FIN DE LA CORRECTION ---
-
             } else {
                 break;
             }
         }
 
-        Ok((total_amount_out as u64, tick_arrays_crossed.into_iter().collect()))
+        let fee_on_output = calculate_transfer_fee(total_amount_out as u64, out_mint_transfer_fee_bps, out_mint_max_fee)?;
+        let final_amount_out = total_amount_out.saturating_sub(fee_on_output as u128);
+
+        Ok((final_amount_out as u64, tick_arrays_crossed.into_iter().collect()))
     }
 
     /// Trouve les N prochains TickArrays initialisés dans la direction du swap.
@@ -476,28 +368,28 @@ impl PoolOperations for DecodedClmmPool {
     fn address(&self) -> Pubkey { self.address }
 
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
-        let is_base_input = *token_in_mint == self.mint_a;
-        let (in_mint_fee_bps, in_mint_max_fee, out_mint_fee_bps, out_mint_max_fee) = if is_base_input {
-            (self.mint_a_transfer_fee_bps, self.mint_a_max_transfer_fee, self.mint_b_transfer_fee_bps, self.mint_b_max_transfer_fee)
-        } else {
-            (self.mint_b_transfer_fee_bps, self.mint_b_max_transfer_fee, self.mint_a_transfer_fee_bps, self.mint_a_max_transfer_fee)
-        };
-
-        let fee_on_input = calculate_transfer_fee(amount_in, in_mint_fee_bps, in_mint_max_fee)?;
-        let net_amount_in = amount_in.saturating_sub(fee_on_input);
-
-        let (gross_amount_out, _) = self.calculate_swap_quote_internal(net_amount_in as u128, is_base_input)?;
-
-        let fee_on_output = calculate_transfer_fee(gross_amount_out, out_mint_fee_bps, out_mint_max_fee)?;
-
-        Ok(gross_amount_out.saturating_sub(fee_on_output))
+        // La fonction `get_quote_with_tick_arrays` est la méthode de référence, mais elle retourne aussi
+        // les tick arrays croisés, ce que l'interface `get_quote` ne permet pas. On ignore ce retour ici.
+        let (amount_out, _) = self.get_quote_with_tick_arrays(token_in_mint, amount_in, _current_timestamp)?;
+        Ok(amount_out)
     }
 
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
         self.get_quote(token_in_mint, amount_in, 0)
     }
 
+    // --- DÉBUT DE LA NOUVELLE FONCTION `get_required_input` ---
     fn get_required_input(&mut self, token_out_mint: &Pubkey, amount_out: u64, _current_timestamp: i64) -> Result<u64> {
+        println!("\n[get_required_input DEBUG]");
+        println!(" -> Objectif: {} lamports de {}", amount_out, token_out_mint);
+
+        if amount_out == 0 { return Ok(0); }
+        let tick_arrays = self.tick_arrays.as_ref().ok_or_else(|| anyhow!("Pool not hydrated."))?;
+        if tick_arrays.is_empty() || self.liquidity == 0 {
+            return Err(anyhow!("Not enough liquidity in pool (no tick arrays)."));
+        }
+
+        // --- 1. Configuration et inversion des frais de transfert de SORTIE ---
         let is_base_output = *token_out_mint == self.mint_a;
         let is_base_input = !is_base_output;
 
@@ -507,12 +399,95 @@ impl PoolOperations for DecodedClmmPool {
             (self.mint_b_transfer_fee_bps, self.mint_b_max_transfer_fee, self.mint_a_transfer_fee_bps, self.mint_a_max_transfer_fee)
         };
 
-        let gross_amount_out = calculate_gross_amount_before_transfer_fee(amount_out, out_mint_fee_bps, out_mint_max_fee)?;
+        let mut gross_amount_out_target = calculate_gross_amount_before_transfer_fee(amount_out, out_mint_fee_bps, out_mint_max_fee)? as u128;
+        println!(" -> Montant de sortie brut (après inversion frais T22) : {}", gross_amount_out_target);
 
-        let net_amount_in_required = self.calculate_required_input_internal(gross_amount_out, is_base_input)?;
+        // --- 2. Boucle d'inversion du swap ---
+        let mut total_amount_in_after_transfer_fee: u128 = 0;
+        let mut current_sqrt_price = self.sqrt_price_x64;
+        let mut current_tick_index = self.tick_current;
+        let mut current_liquidity = self.liquidity;
+        let mut step = 0;
 
-        calculate_gross_amount_before_transfer_fee(net_amount_in_required, in_mint_fee_bps, in_mint_max_fee)
+        while gross_amount_out_target > 0 {
+            step += 1;
+            println!("\n  [Step {}]", step);
+
+            if current_liquidity == 0 { return Err(anyhow!("Not enough liquidity to reach target amount out.")); }
+
+            let (next_tick_index, next_liquidity_net) = match find_next_initialized_tick(self, current_tick_index, is_base_input, tick_arrays) {
+                Ok(result) => result,
+                Err(_) => (if is_base_input { math::MIN_TICK } else { math::MAX_TICK }, 0)
+            };
+            let sqrt_price_target = math::tick_to_sqrt_price_x64(next_tick_index);
+            println!("    -> Tick actuel: {}, Liquidity: {}, SqrtPrice: {}", current_tick_index, current_liquidity, current_sqrt_price);
+            println!("    -> Prochain tick initialisé: {}, SqrtPrice Cible: {}", next_tick_index, sqrt_price_target);
+
+            let amount_out_available_in_step = (if is_base_output {
+                math::get_amount_x(sqrt_price_target, current_sqrt_price, current_liquidity, false)?
+            } else {
+                math::get_amount_y(current_sqrt_price, sqrt_price_target, current_liquidity, false)?
+            }) as u128;
+            println!("    -> Montant de sortie dispo dans ce step: {}", amount_out_available_in_step);
+
+            let amount_out_chunk = gross_amount_out_target.min(amount_out_available_in_step);
+            println!("    -> On va calculer l'input pour un chunk de sortie de: {}", amount_out_chunk);
+
+            if amount_out_chunk == 0 && gross_amount_out_target > 0 {
+                // S'il ne reste plus de liquidité et qu'on n'a pas atteint la cible, on s'arrête.
+                println!("    -> AVERTISSEMENT: Chunk de sortie est 0, fin du calcul.");
+                break;
+            }
+
+            // Calcul de l'input NET pour ce chunk
+            let (prev_sqrt_price, amount_in_step_net) = if is_base_output {
+                let starting_sqrt_price = math::get_sqrt_price_from_amount_x_out(current_sqrt_price, current_liquidity, amount_out_chunk);
+                let required_y = math::get_amount_y(starting_sqrt_price, current_sqrt_price, current_liquidity, true)?;
+                (starting_sqrt_price, required_y as u128)
+            } else {
+                let starting_sqrt_price = math::get_sqrt_price_from_amount_y_out(current_sqrt_price, current_liquidity, amount_out_chunk);
+                let required_x = math::get_amount_x(current_sqrt_price, starting_sqrt_price, current_liquidity, true)?;
+                (starting_sqrt_price, required_x as u128)
+            };
+            println!("    -> Input NET requis pour ce chunk: {}", amount_in_step_net);
+
+            // Inversion des frais de pool pour ce chunk
+            const FEE_RATE_DENOMINATOR_VALUE: u64 = 1_000_000;
+            let amount_in_step_gross = (amount_in_step_net as u64).mul_div_ceil(
+                FEE_RATE_DENOMINATOR_VALUE,
+                FEE_RATE_DENOMINATOR_VALUE - self.trade_fee_rate as u64
+            ).ok_or_else(|| anyhow!("Math overflow"))? as u128;
+            println!("    -> Input BRUT (après inversion frais de pool) pour ce chunk: {}", amount_in_step_gross);
+
+            total_amount_in_after_transfer_fee = total_amount_in_after_transfer_fee.saturating_add(amount_in_step_gross);
+            gross_amount_out_target = gross_amount_out_target.saturating_sub(amount_out_chunk);
+            current_sqrt_price = prev_sqrt_price;
+            println!("    -> Nouveau SqrtPrice: {}", current_sqrt_price);
+            println!("    -> Montant de sortie restant à obtenir: {}", gross_amount_out_target);
+
+            // Mise à jour de la liquidité et du tick
+            if current_sqrt_price == sqrt_price_target && next_liquidity_net != 0 {
+                current_liquidity = (current_liquidity as i128 + next_liquidity_net) as u128;
+                current_tick_index = if is_base_input { next_tick_index - 1 } else { next_tick_index };
+            } else {
+                current_tick_index = math::get_tick_at_sqrt_price(current_sqrt_price)?;
+            }
+        }
+
+        println!("\n -> Total input (brut de pool, net de T22): {}", total_amount_in_after_transfer_fee);
+
+        // --- 3. Inversion des frais de transfert d'ENTRÉE ---
+        let final_required_input = calculate_gross_amount_before_transfer_fee(
+            total_amount_in_after_transfer_fee as u64,
+            in_mint_fee_bps,
+            in_mint_max_fee
+        )?;
+        println!(" -> Total input final (brut de tout): {}", final_required_input);
+        println!("[get_required_input DEBUG FIN]\n");
+
+        Ok(final_required_input)
     }
+    // --- FIN DE LA NOUVELLE FONCTION ---
 
     async fn get_required_input_async(&mut self, token_out_mint: &Pubkey, amount_out: u64, _rpc_client: &RpcClient) -> Result<u64> {
         // La version async appelle simplement la version synchrone car elle n'a pas besoin d'appels RPC.
