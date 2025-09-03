@@ -1,3 +1,5 @@
+// src/decoders/raydium/clmm/test.rs
+
 use anyhow::{anyhow, bail, Result};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
@@ -17,6 +19,7 @@ use crate::decoders::raydium::clmm::{
 use crate::decoders::PoolOperations;
 use crate::decoders::pool_operations::UserSwapAccounts;
 
+// Renommée pour la cohérence
 pub async fn test_clmm(rpc_client: &RpcClient, payer: &Keypair, current_timestamp: i64) -> Result<()> {
     const POOL_ADDRESS: &str = "YrrUStgPugDp8BbfosqDeFssen6sA75ZS1QJvgnHtmY";
     const PROGRAM_ID: &str = "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK";
@@ -33,18 +36,14 @@ pub async fn test_clmm(rpc_client: &RpcClient, payer: &Keypair, current_timestam
     hydrate(&mut pool, rpc_client).await?;
     let input_mint_pubkey = Pubkey::from_str(INPUT_MINT_STR)?;
 
-    // La détermination des décimales est maintenant gérée par la fonction de quote elle-même.
     let amount_in_base_units = (INPUT_AMOUNT_UI * 10f64.powi(pool.mint_a_decimals as i32)) as u64;
 
-    // --- LA CORRECTION EST ICI ---
-    // On capture les 4 valeurs retournées par la fonction.
-    let (predicted_amount_out, _) = pool.get_quote_with_tick_arrays(&input_mint_pubkey, amount_in_base_units, current_timestamp)?;
-
-    // On a besoin de `output_decimals` pour l'affichage, donc on le redéfinit ici
+    // On utilise maintenant `get_quote` directement, qui est l'interface standard
+    let predicted_amount_out = pool.get_quote(&input_mint_pubkey, amount_in_base_units, current_timestamp)?;
     let output_decimals = if input_mint_pubkey == pool.mint_a { pool.mint_b_decimals } else { pool.mint_a_decimals };
-    // --- FIN DE LA CORRECTION ---
+
     let ui_predicted_amount_out = predicted_amount_out as f64 / 10f64.powi(output_decimals as i32);
-    println!("-> PRÉDICTION LOCALE (potentiellement fausse): {}", ui_predicted_amount_out);
+    println!("-> PRÉDICTION LOCALE: {}", ui_predicted_amount_out);
 
     let output_mint_pubkey = if input_mint_pubkey == pool.mint_a { pool.mint_b } else { pool.mint_a };
 
@@ -57,9 +56,7 @@ pub async fn test_clmm(rpc_client: &RpcClient, payer: &Keypair, current_timestam
 
         if required_input_from_quote >= amount_in_base_units {
             let difference = required_input_from_quote.saturating_sub(amount_in_base_units);
-            // Pour le CLMM, la complexité des calculs (multiples ticks) peut induire une différence un peu plus grande.
-            // Une tolérance de 100 lamports est très sûre.
-            if difference <= 100 {
+            if difference <= 100 { // Tolérance un peu plus large pour CLMM
                 println!("  -> ✅ SUCCÈS: Le calcul inverse est cohérent (différence: {} lamports).", difference);
             } else {
                 bail!("  -> ⚠️ ÉCHEC: La différence du calcul inverse est trop grande ({} lamports).", difference);
@@ -72,7 +69,6 @@ pub async fn test_clmm(rpc_client: &RpcClient, payer: &Keypair, current_timestam
     }
 
     println!("\n[2/3] Préparation de la simulation...");
-
 
     let user_source_ata = get_associated_token_address(&payer.pubkey(), &input_mint_pubkey);
     let user_destination_ata = spl_associated_token_account::get_associated_token_address_with_program_id(
@@ -90,7 +86,7 @@ pub async fn test_clmm(rpc_client: &RpcClient, payer: &Keypair, current_timestam
     let swap_ix = pool.create_swap_instruction(
         &input_mint_pubkey,
         amount_in_base_units,
-        0,
+        0, // Slippage minimum
         &user_accounts,
     )?;
 
@@ -105,14 +101,13 @@ pub async fn test_clmm(rpc_client: &RpcClient, payer: &Keypair, current_timestam
         bail!("La simulation a échoué. Cause : {:?}", sim_result.err);
     }
 
-    println!("✅✅✅ VICTOIRE ! La simulation a réussi !");
-    println!("Maintenant, vérifions le résultat...");
+    println!("✅ La simulation a réussi !");
 
     let is_base_input = input_mint_pubkey == pool.mint_a;
 
     let simulated_amount_out = match sim_result.logs {
         Some(logs) => parse_swap_event_from_logs(&logs, is_base_input).ok_or_else(|| {
-            anyhow!("Impossible de trouver le transfert dans les logs de simulation.")
+            anyhow!("Impossible de trouver l'événement de swap dans les logs de simulation.")
         })?,
         None => bail!("Logs de simulation vides."),
     };
@@ -123,12 +118,12 @@ pub async fn test_clmm(rpc_client: &RpcClient, payer: &Keypair, current_timestam
     println!("Montant SIMULÉ (on-chain) : {}", ui_simulated_amount_out);
     let difference = (ui_predicted_amount_out - ui_simulated_amount_out).abs();
     let difference_percent = if ui_simulated_amount_out > 0.0 { (difference / ui_simulated_amount_out) * 100.0 } else { 0.0 };
-    println!("-> Différence relative: {:.4} %", difference_percent);
+    println!("-> Différence relative: {:.6} %", difference_percent);
 
-    if difference_percent < 0.1 {
-        println!("✅ La prédiction de `get_quote` est correcte !");
+    if difference_percent < 0.01 { // Seuil de tolérance très strict
+        println!("✅ SUCCÈS DÉFINITIF ! La prédiction est extrêmement précise !");
     } else {
-        println!("⚠️ La simulation fonctionne, mais la prédiction de `get_quote` est à revoir.");
+        println!("⚠️ La simulation fonctionne, mais la prédiction est encore à revoir (diff > 0.01%).");
     }
 
     Ok(())

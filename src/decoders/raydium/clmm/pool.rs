@@ -17,7 +17,7 @@ use super::config;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
-use num_integer::Integer; // Nécessaire pour ceil_div
+use num_integer::Integer;
 use crate::decoders::raydium::clmm::full_math::MulDiv;
 use crate::decoders::spl_token_decoders::mint::{calculate_transfer_fee, calculate_gross_amount_before_transfer_fee};
 
@@ -54,25 +54,21 @@ impl DecodedClmmPool {
         self.trade_fee_rate as f64 / 1_000_000.0 * 100.0
     }
 
-    // --- CETTE FONCTION EST REMPLACÉE PAR get_quote_with_tick_arrays ---
-    // fn calculate_swap_quote_internal(&self, net_amount_in: u128, is_base_input: bool) -> Result<(u64, Vec<Pubkey>)> { ... }
-
-
-    pub fn get_quote_with_tick_arrays(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<(u64, Vec<Pubkey>)> {
+    // Cette fonction est la version "aller" correcte.
+    fn calculate_swap_quote_internal(&self, amount_in: u64, is_base_input: bool) -> Result<(u64, Vec<Pubkey>)> {
         let tick_arrays = self.tick_arrays.as_ref().ok_or_else(|| anyhow!("Pool is not hydrated."))?;
         if tick_arrays.is_empty() || self.liquidity == 0 {
             return Ok((0, Vec::new()));
         }
 
-        let is_base_input = *token_in_mint == self.mint_a;
-        let (in_mint_transfer_fee_bps, in_mint_max_fee, out_mint_transfer_fee_bps, out_mint_max_fee) = if is_base_input {
-            (self.mint_a_transfer_fee_bps, self.mint_a_max_transfer_fee, self.mint_b_transfer_fee_bps, self.mint_b_max_transfer_fee)
-        } else {
-            (self.mint_b_transfer_fee_bps, self.mint_b_max_transfer_fee, self.mint_a_transfer_fee_bps, self.mint_a_max_transfer_fee)
-        };
+        const FEE_RATE_DENOMINATOR_VALUE: u64 = 1_000_000;
+        let fee_amount = (amount_in as u64).mul_div_ceil(
+            self.trade_fee_rate as u64,
+            FEE_RATE_DENOMINATOR_VALUE
+        ).ok_or_else(|| anyhow!("Math overflow"))?;
 
-        let fee_on_input = calculate_transfer_fee(amount_in, in_mint_transfer_fee_bps, in_mint_max_fee)?;
-        let mut amount_remaining = amount_in.saturating_sub(fee_on_input) as u128;
+        let mut amount_remaining = amount_in.saturating_sub(fee_amount as u64) as u128;
+
         let mut total_amount_out: u128 = 0;
         let mut current_sqrt_price = self.sqrt_price_x64;
         let mut current_tick_index = self.tick_current;
@@ -90,14 +86,13 @@ impl DecodedClmmPool {
                 };
                 let sqrt_price_target = math::tick_to_sqrt_price_x64(next_tick_index);
 
-                let (next_sqrt_price, amount_in_step, amount_out_step, fee_amount_step) = math::compute_swap_step(
-                    current_sqrt_price, sqrt_price_target, current_liquidity, amount_remaining, self.trade_fee_rate, is_base_input,
+                let (next_sqrt_price, amount_in_step, amount_out_step) = compute_swap_step_without_fee(
+                    current_sqrt_price, sqrt_price_target, current_liquidity, amount_remaining, is_base_input,
                 )?;
 
-                let total_consumed = amount_in_step.saturating_add(fee_amount_step);
-                if total_consumed == 0 { break; }
+                if amount_in_step == 0 { break; }
 
-                amount_remaining = amount_remaining.saturating_sub(total_consumed);
+                amount_remaining = amount_remaining.saturating_sub(amount_in_step);
                 total_amount_out = total_amount_out.saturating_add(amount_out_step);
                 current_sqrt_price = next_sqrt_price;
 
@@ -112,10 +107,7 @@ impl DecodedClmmPool {
             }
         }
 
-        let fee_on_output = calculate_transfer_fee(total_amount_out as u64, out_mint_transfer_fee_bps, out_mint_max_fee)?;
-        let final_amount_out = total_amount_out.saturating_sub(fee_on_output as u128);
-
-        Ok((final_amount_out as u64, tick_arrays_crossed.into_iter().collect()))
+        Ok((total_amount_out as u64, tick_arrays_crossed.into_iter().collect()))
     }
 
     /// Trouve les N prochains TickArrays initialisés dans la direction du swap.
@@ -124,7 +116,6 @@ impl DecodedClmmPool {
         let mut result = Vec::new();
 
         if is_base_input { // Le prix baisse, on cherche des index plus petits
-            // On itère sur les tick_arrays hydratés en ordre inversé (du plus grand au plus petit start_tick_index)
             for (_, array_state) in tick_arrays.iter().rev() {
                 if array_state.start_tick_index <= self.tick_current {
                     result.push(tick_array::get_tick_array_address(
@@ -138,7 +129,6 @@ impl DecodedClmmPool {
                 }
             }
         } else { // Le prix monte, on cherche des index plus grands
-            // On itère sur les tick_arrays hydratés en ordre normal
             for (_, array_state) in tick_arrays.iter() {
                 if array_state.start_tick_index >= self.tick_current {
                     result.push(tick_array::get_tick_array_address(
@@ -156,6 +146,7 @@ impl DecodedClmmPool {
     }
 }
 
+// ... Le reste du fichier (structs PoolState, RewardInfo, decode_pool, hydrate) ne change pas ...
 #[repr(C, packed)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 struct PoolState {
@@ -198,8 +189,6 @@ struct PoolState {
     pub padding1: [u64; 24],
     pub padding2: [u64; 32],
 }
-
-// Nous avons aussi besoin de la définition de RewardInfo pour que la taille soit correcte
 #[repr(C, packed)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 struct RewardInfo {
@@ -215,8 +204,6 @@ struct RewardInfo {
     pub authority: Pubkey,
     pub reward_growth_global_x64: u128,
 }
-
-// --- LOGIQUE DE DÉCODAGE ET HYDRATATION ---
 pub fn decode_pool(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Result<DecodedClmmPool> {
     const DISCRIMINATOR: [u8; 8] = [247, 237, 227, 245, 215, 195, 222, 70];
     if data.get(..8) != Some(&DISCRIMINATOR) { bail!("Invalid PoolState discriminator."); }
@@ -246,7 +233,6 @@ pub fn decode_pool(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Result
         last_swap_timestamp: 0,
     })
 }
-
 pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &RpcClient) -> Result<()> {
     let bitmap_ext_address = tickarray_bitmap_extension::get_bitmap_extension_address(&pool.address, &pool.program_id);
 
@@ -258,7 +244,6 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &RpcClient) -> Resu
         rpc_client.get_account(&bitmap_ext_address)
     );
 
-    // ... (la première partie de la fonction reste inchangée)
     let config_account_data = config_res?;
     let decoded_config = config::decode_config(&config_account_data)?;
     pool.tick_spacing = decoded_config.tick_spacing;
@@ -283,7 +268,6 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &RpcClient) -> Resu
     if data_slice.len() < std::mem::size_of::<PoolState>() { bail!("PoolState data is too short."); }
     let pool_state_struct: &PoolState = from_bytes(&data_slice[..std::mem::size_of::<PoolState>()]);
 
-    // --- NOUVELLE LOGIQUE DE DÉCODAGE DE BITMAP 1:1 ---
     let default_bitmap = pool_state_struct.tick_array_bitmap;
     let extension_bitmap_words = if let Ok(account) = bitmap_ext_res {
         tickarray_bitmap_extension::decode_tick_array_bitmap_extension(&account.data)?.bitmap_words
@@ -295,7 +279,6 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &RpcClient) -> Resu
     let multiplier = (tick_array::TICK_ARRAY_SIZE as i32) * (pool.tick_spacing as i32);
     let ticks_in_one_bitmap = 512 * multiplier;
 
-    // 1. Décoder le bitmap par défaut
     for (word_index, &word) in default_bitmap.iter().enumerate() {
         if word == 0 { continue; }
         for bit_index in 0..64 {
@@ -309,21 +292,16 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &RpcClient) -> Resu
         }
     }
 
-    // 2. Décoder l'extension en utilisant votre Vec<u64>
-    // Le code source de Raydium a 14 pages de 8 u64 pour le négatif, et 14 pour le positif.
-    // Votre `Vec<u64>` a donc une taille de 14 * 8 + 14 * 8 = 224.
     let negative_pages_len = 14 * 8;
     for (word_index_flat, &word) in extension_bitmap_words.iter().enumerate() {
         if word == 0 { continue; }
         for bit_index in 0..64 {
             if (word & (1 << bit_index)) != 0 {
                 let start_tick_index = if word_index_flat < negative_pages_len {
-                    // C'est un bitmap négatif
                     let page_index = word_index_flat / 8;
                     let bit_pos_in_page = (word_index_flat % 8) * 64 + bit_index;
                     -(ticks_in_one_bitmap * (page_index as i32 + 1)) + (bit_pos_in_page as i32 * multiplier)
                 } else {
-                    // C'est un bitmap positif
                     let pos_idx = word_index_flat - negative_pages_len;
                     let page_index = pos_idx / 8;
                     let bit_pos_in_page = (pos_idx % 8) * 64 + bit_index;
@@ -355,6 +333,7 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &RpcClient) -> Resu
     Ok(())
 }
 
+
 #[async_trait]
 impl PoolOperations for DecodedClmmPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) {
@@ -368,28 +347,33 @@ impl PoolOperations for DecodedClmmPool {
     fn address(&self) -> Pubkey { self.address }
 
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
-        // La fonction `get_quote_with_tick_arrays` est la méthode de référence, mais elle retourne aussi
-        // les tick arrays croisés, ce que l'interface `get_quote` ne permet pas. On ignore ce retour ici.
-        let (amount_out, _) = self.get_quote_with_tick_arrays(token_in_mint, amount_in, _current_timestamp)?;
-        Ok(amount_out)
+        let is_base_input = *token_in_mint == self.mint_a;
+        let (in_mint_fee_bps, in_mint_max_fee, out_mint_fee_bps, out_mint_max_fee) = if is_base_input {
+            (self.mint_a_transfer_fee_bps, self.mint_a_max_transfer_fee, self.mint_b_transfer_fee_bps, self.mint_b_max_transfer_fee)
+        } else {
+            (self.mint_b_transfer_fee_bps, self.mint_b_max_transfer_fee, self.mint_a_transfer_fee_bps, self.mint_a_max_transfer_fee)
+        };
+
+        let fee_on_input = calculate_transfer_fee(amount_in, in_mint_fee_bps, in_mint_max_fee)?;
+        let net_amount_in = amount_in.saturating_sub(fee_on_input);
+
+        let (gross_amount_out, _) = self.calculate_swap_quote_internal(net_amount_in, is_base_input)?;
+        let fee_on_output = calculate_transfer_fee(gross_amount_out, out_mint_fee_bps, out_mint_max_fee)?;
+
+        Ok(gross_amount_out.saturating_sub(fee_on_output))
     }
 
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
         self.get_quote(token_in_mint, amount_in, 0)
     }
 
-    // --- DÉBUT DE LA NOUVELLE FONCTION `get_required_input` ---
     fn get_required_input(&mut self, token_out_mint: &Pubkey, amount_out: u64, _current_timestamp: i64) -> Result<u64> {
-        println!("\n[get_required_input DEBUG]");
-        println!(" -> Objectif: {} lamports de {}", amount_out, token_out_mint);
-
         if amount_out == 0 { return Ok(0); }
         let tick_arrays = self.tick_arrays.as_ref().ok_or_else(|| anyhow!("Pool not hydrated."))?;
         if tick_arrays.is_empty() || self.liquidity == 0 {
             return Err(anyhow!("Not enough liquidity in pool (no tick arrays)."));
         }
 
-        // --- 1. Configuration et inversion des frais de transfert de SORTIE ---
         let is_base_output = *token_out_mint == self.mint_a;
         let is_base_input = !is_base_output;
 
@@ -399,20 +383,17 @@ impl PoolOperations for DecodedClmmPool {
             (self.mint_b_transfer_fee_bps, self.mint_b_max_transfer_fee, self.mint_a_transfer_fee_bps, self.mint_a_max_transfer_fee)
         };
 
-        let mut gross_amount_out_target = calculate_gross_amount_before_transfer_fee(amount_out, out_mint_fee_bps, out_mint_max_fee)? as u128;
-        println!(" -> Montant de sortie brut (après inversion frais T22) : {}", gross_amount_out_target);
+        let gross_amount_out_target = calculate_gross_amount_before_transfer_fee(amount_out, out_mint_fee_bps, out_mint_max_fee)? as u128;
 
-        // --- 2. Boucle d'inversion du swap ---
-        let mut total_amount_in_after_transfer_fee: u128 = 0;
+        // --- LA CORRECTION EST ICI ---
+        let mut mutable_gross_amount_out_target = gross_amount_out_target;
+
+        let mut total_amount_in_net: u128 = 0;
         let mut current_sqrt_price = self.sqrt_price_x64;
         let mut current_tick_index = self.tick_current;
         let mut current_liquidity = self.liquidity;
-        let mut step = 0;
 
-        while gross_amount_out_target > 0 {
-            step += 1;
-            println!("\n  [Step {}]", step);
-
+        while mutable_gross_amount_out_target > 0 {
             if current_liquidity == 0 { return Err(anyhow!("Not enough liquidity to reach target amount out.")); }
 
             let (next_tick_index, next_liquidity_net) = match find_next_initialized_tick(self, current_tick_index, is_base_input, tick_arrays) {
@@ -420,26 +401,16 @@ impl PoolOperations for DecodedClmmPool {
                 Err(_) => (if is_base_input { math::MIN_TICK } else { math::MAX_TICK }, 0)
             };
             let sqrt_price_target = math::tick_to_sqrt_price_x64(next_tick_index);
-            println!("    -> Tick actuel: {}, Liquidity: {}, SqrtPrice: {}", current_tick_index, current_liquidity, current_sqrt_price);
-            println!("    -> Prochain tick initialisé: {}, SqrtPrice Cible: {}", next_tick_index, sqrt_price_target);
 
             let amount_out_available_in_step = (if is_base_output {
                 math::get_amount_x(sqrt_price_target, current_sqrt_price, current_liquidity, false)?
             } else {
                 math::get_amount_y(current_sqrt_price, sqrt_price_target, current_liquidity, false)?
             }) as u128;
-            println!("    -> Montant de sortie dispo dans ce step: {}", amount_out_available_in_step);
 
-            let amount_out_chunk = gross_amount_out_target.min(amount_out_available_in_step);
-            println!("    -> On va calculer l'input pour un chunk de sortie de: {}", amount_out_chunk);
+            let amount_out_chunk = mutable_gross_amount_out_target.min(amount_out_available_in_step);
+            if amount_out_chunk == 0 && mutable_gross_amount_out_target > 0 { break; }
 
-            if amount_out_chunk == 0 && gross_amount_out_target > 0 {
-                // S'il ne reste plus de liquidité et qu'on n'a pas atteint la cible, on s'arrête.
-                println!("    -> AVERTISSEMENT: Chunk de sortie est 0, fin du calcul.");
-                break;
-            }
-
-            // Calcul de l'input NET pour ce chunk
             let (prev_sqrt_price, amount_in_step_net) = if is_base_output {
                 let starting_sqrt_price = math::get_sqrt_price_from_amount_x_out(current_sqrt_price, current_liquidity, amount_out_chunk);
                 let required_y = math::get_amount_y(starting_sqrt_price, current_sqrt_price, current_liquidity, true)?;
@@ -449,23 +420,11 @@ impl PoolOperations for DecodedClmmPool {
                 let required_x = math::get_amount_x(current_sqrt_price, starting_sqrt_price, current_liquidity, true)?;
                 (starting_sqrt_price, required_x as u128)
             };
-            println!("    -> Input NET requis pour ce chunk: {}", amount_in_step_net);
 
-            // Inversion des frais de pool pour ce chunk
-            const FEE_RATE_DENOMINATOR_VALUE: u64 = 1_000_000;
-            let amount_in_step_gross = (amount_in_step_net as u64).mul_div_ceil(
-                FEE_RATE_DENOMINATOR_VALUE,
-                FEE_RATE_DENOMINATOR_VALUE - self.trade_fee_rate as u64
-            ).ok_or_else(|| anyhow!("Math overflow"))? as u128;
-            println!("    -> Input BRUT (après inversion frais de pool) pour ce chunk: {}", amount_in_step_gross);
-
-            total_amount_in_after_transfer_fee = total_amount_in_after_transfer_fee.saturating_add(amount_in_step_gross);
-            gross_amount_out_target = gross_amount_out_target.saturating_sub(amount_out_chunk);
+            total_amount_in_net = total_amount_in_net.saturating_add(amount_in_step_net);
+            mutable_gross_amount_out_target = mutable_gross_amount_out_target.saturating_sub(amount_out_chunk);
             current_sqrt_price = prev_sqrt_price;
-            println!("    -> Nouveau SqrtPrice: {}", current_sqrt_price);
-            println!("    -> Montant de sortie restant à obtenir: {}", gross_amount_out_target);
 
-            // Mise à jour de la liquidité et du tick
             if current_sqrt_price == sqrt_price_target && next_liquidity_net != 0 {
                 current_liquidity = (current_liquidity as i128 + next_liquidity_net) as u128;
                 current_tick_index = if is_base_input { next_tick_index - 1 } else { next_tick_index };
@@ -474,23 +433,16 @@ impl PoolOperations for DecodedClmmPool {
             }
         }
 
-        println!("\n -> Total input (brut de pool, net de T22): {}", total_amount_in_after_transfer_fee);
+        const FEE_RATE_DENOMINATOR_VALUE: u64 = 1_000_000;
+        let amount_in_after_transfer_fee = (total_amount_in_net as u64).mul_div_ceil(
+            FEE_RATE_DENOMINATOR_VALUE,
+            FEE_RATE_DENOMINATOR_VALUE - self.trade_fee_rate as u64
+        ).ok_or_else(|| anyhow!("Math overflow"))?;
 
-        // --- 3. Inversion des frais de transfert d'ENTRÉE ---
-        let final_required_input = calculate_gross_amount_before_transfer_fee(
-            total_amount_in_after_transfer_fee as u64,
-            in_mint_fee_bps,
-            in_mint_max_fee
-        )?;
-        println!(" -> Total input final (brut de tout): {}", final_required_input);
-        println!("[get_required_input DEBUG FIN]\n");
-
-        Ok(final_required_input)
+        calculate_gross_amount_before_transfer_fee(amount_in_after_transfer_fee, in_mint_fee_bps, in_mint_max_fee)
     }
-    // --- FIN DE LA NOUVELLE FONCTION ---
 
     async fn get_required_input_async(&mut self, token_out_mint: &Pubkey, amount_out: u64, _rpc_client: &RpcClient) -> Result<u64> {
-        // La version async appelle simplement la version synchrone car elle n'a pas besoin d'appels RPC.
         self.get_required_input(token_out_mint, amount_out, 0)
     }
 
@@ -498,11 +450,9 @@ impl PoolOperations for DecodedClmmPool {
         &self,
         token_in_mint: &Pubkey,
         amount_in: u64,
-        min_amount_out: u64, // Renommé pour correspondre au trait
+        min_amount_out: u64,
         user_accounts: &UserSwapAccounts,
     ) -> Result<Instruction> {
-
-        // Étape 1 : Calculer les tick_arrays requis en interne (logique prise de votre test)
         let is_base_input = *token_in_mint == self.mint_a;
         let mut tick_arrays = self.get_next_initialized_tick_arrays(is_base_input, 3);
         if tick_arrays.is_empty() {
@@ -512,16 +462,15 @@ impl PoolOperations for DecodedClmmPool {
             tick_arrays.push(*tick_arrays.last().unwrap());
         }
 
-        // --- DÉBUT DE VOTRE CODE ORIGINAL, LÉGÈREMENT ADAPTÉ ---
         let sqrt_price_limit = if is_base_input {
-            4295128739_u128 // MIN_SQRT_PRICE_X64 + 1
+            4295128739_u128
         } else {
-            79226673515401279992447579055_u128 // MAX_SQRT_PRICE_X64 - 1
+            79226673515401279992447579055_u128
         };
 
-        let mut instruction_data: Vec<u8> = vec![43, 4, 237, 11, 26, 201, 30, 98]; // Discriminator `swap_v2`
+        let mut instruction_data: Vec<u8> = vec![43, 4, 237, 11, 26, 201, 30, 98];
         instruction_data.extend_from_slice(&amount_in.to_le_bytes());
-        instruction_data.extend_from_slice(&min_amount_out.to_le_bytes()); // Utilise le nouvel argument
+        instruction_data.extend_from_slice(&min_amount_out.to_le_bytes());
         instruction_data.extend_from_slice(&sqrt_price_limit.to_le_bytes());
         instruction_data.push(u8::from(is_base_input));
 
@@ -532,7 +481,6 @@ impl PoolOperations for DecodedClmmPool {
         };
 
         let mut accounts = vec![
-            // On utilise les champs de `user_accounts` pour remplacer les anciens arguments
             AccountMeta { pubkey: user_accounts.owner, is_signer: true, is_writable: false },
             AccountMeta { pubkey: self.amm_config, is_signer: false, is_writable: false },
             AccountMeta { pubkey: self.address, is_signer: false, is_writable: true },
@@ -551,7 +499,6 @@ impl PoolOperations for DecodedClmmPool {
         let tick_array_bitmap_extension = tickarray_bitmap_extension::get_bitmap_extension_address(&self.address, &self.program_id);
         accounts.push(AccountMeta { pubkey: tick_array_bitmap_extension, is_signer: false, is_writable: true });
 
-        // On utilise le vecteur `tick_arrays` qu'on a calculé au début de la fonction
         for key in tick_arrays {
             accounts.push(AccountMeta { pubkey: key, is_signer: false, is_writable: true });
         }
@@ -563,6 +510,43 @@ impl PoolOperations for DecodedClmmPool {
         })
     }
 }
+
+// Nouvelle fonction helper qui ne gère pas les frais
+fn compute_swap_step_without_fee(
+    sqrt_price_current_x64: u128,
+    sqrt_price_target_x64: u128,
+    liquidity: u128,
+    amount_remaining: u128,
+    is_base_input: bool,
+) -> Result<(u128, u128, u128)> {
+    let mut sqrt_price_next_x64: u128;
+    let amount_in: u128;
+    let amount_out: u128;
+
+    if is_base_input {
+        let amount_in_to_reach_target = math::get_amount_x(sqrt_price_target_x64, sqrt_price_current_x64, liquidity, true)? as u128;
+        if amount_remaining >= amount_in_to_reach_target {
+            sqrt_price_next_x64 = sqrt_price_target_x64;
+            amount_in = amount_in_to_reach_target;
+        } else {
+            sqrt_price_next_x64 = math::get_next_sqrt_price_from_amount_x_in(sqrt_price_current_x64, liquidity, amount_remaining, true);
+            amount_in = amount_remaining;
+        }
+        amount_out = math::get_amount_y(sqrt_price_next_x64, sqrt_price_current_x64, liquidity, false)? as u128;
+    } else {
+        let amount_in_to_reach_target = math::get_amount_y(sqrt_price_current_x64, sqrt_price_target_x64, liquidity, true)? as u128;
+        if amount_remaining >= amount_in_to_reach_target {
+            sqrt_price_next_x64 = sqrt_price_target_x64;
+            amount_in = amount_in_to_reach_target;
+        } else {
+            sqrt_price_next_x64 = math::get_next_sqrt_price_from_amount_y_in(sqrt_price_current_x64, liquidity, amount_remaining, true);
+            amount_in = amount_remaining;
+        }
+        amount_out = math::get_amount_x(sqrt_price_current_x64, sqrt_price_next_x64, liquidity, false)? as u128;
+    }
+    Ok((sqrt_price_next_x64, amount_in, amount_out))
+}
+
 
 fn find_next_initialized_tick<'a>(
     pool: &'a DecodedClmmPool,
@@ -618,6 +602,5 @@ fn find_next_initialized_tick<'a>(
             }
         }
     }
-
     Err(anyhow!("Aucun tick initialisé trouvé dans la direction du swap parmi les arrays chargés."))
 }
