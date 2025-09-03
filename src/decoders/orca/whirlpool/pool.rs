@@ -81,7 +81,6 @@ pub struct WhirlpoolData {
 
 // --- FONCTION DE DÉCODAGE (MODIFIÉE POUR INCLURE LES PLACEHOLDERS) ---
 pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedWhirlpoolPool> {
-    println!("DEBUG: Discriminateur reçu du RPC: {:?}", &data[..8]);
     const DISCRIMINATOR: [u8; 8] = [63, 149, 209, 12, 225, 128, 99, 9];
     if data.get(..8) != Some(&DISCRIMINATOR) {
         bail!("Invalid discriminator. Not a Whirlpool account.");
@@ -133,7 +132,6 @@ pub async fn hydrate(pool: &mut DecodedWhirlpoolPool, rpc_client: &RpcClient) ->
     pool.mint_b_transfer_fee_bps = decoded_mint_b.transfer_fee_basis_points;
 
     // --- Étape 2: Charger UNIQUEMENT le TickArray actuel ---
-    // On ne charge plus une fenêtre statique, juste le strict nécessaire.
     let mut hydrated_tick_arrays = BTreeMap::new();
     let current_array_start_index = tick_array::get_start_tick_index(pool.tick_current_index, pool.tick_spacing);
     let current_array_address = tick_array::get_tick_array_address(&pool.address, current_array_start_index, &pool.program_id);
@@ -161,7 +159,6 @@ fn find_next_initialized_tick<'a>(
     if a_to_b { // Le prix baisse, on cherche un tick inférieur
         let current_array_start_index = tick_array::get_start_tick_index(current_tick_index, pool.tick_spacing);
 
-        // On commence par chercher dans le reste de l'array actuel
         if let Some(array_data) = tick_arrays.get(&current_array_start_index) {
             let array_offset = ((current_tick_index - current_array_start_index) / tick_spacing).clamp(0, tick_array::TICK_ARRAY_SIZE as i32 - 1);
             for i in (0..array_offset).rev() {
@@ -172,7 +169,6 @@ fn find_next_initialized_tick<'a>(
             }
         }
 
-        // Puis on itère sur les arrays précédents
         for (start_tick, array_data) in tick_arrays.range(..current_array_start_index).rev() {
             for i in (0..tick_array::TICK_ARRAY_SIZE).rev() {
                 let tick_data = &array_data.ticks[i];
@@ -184,7 +180,6 @@ fn find_next_initialized_tick<'a>(
     } else { // Le prix monte, on cherche un tick supérieur
         let current_array_start_index = tick_array::get_start_tick_index(current_tick_index, pool.tick_spacing);
 
-        // On commence par la fin de l'array actuel
         if let Some(array_data) = tick_arrays.get(&current_array_start_index) {
             let array_offset = ((current_tick_index - current_array_start_index) / tick_spacing).clamp(0, tick_array::TICK_ARRAY_SIZE as i32 -1);
             for i in (array_offset + 1)..(tick_array::TICK_ARRAY_SIZE as i32) {
@@ -195,7 +190,6 @@ fn find_next_initialized_tick<'a>(
             }
         }
 
-        // Puis on itère sur les arrays suivants
         for (start_tick, array_data) in tick_arrays.range(current_array_start_index + 1..) {
             for i in 0..tick_array::TICK_ARRAY_SIZE {
                 let tick_data = &array_data.ticks[i];
@@ -213,8 +207,6 @@ fn find_next_initialized_tick<'a>(
 impl DecodedWhirlpoolPool {
     // Fonctions utilitaires
     pub fn fee_as_percent(&self) -> f64 { self.fee_rate as f64 / 10_000.0 }
-    pub fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
-    pub fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
 
     pub async fn get_quote_with_rpc(
         &mut self,
@@ -222,9 +214,6 @@ impl DecodedWhirlpoolPool {
         amount_in: u64,
         rpc_client: &RpcClient,
     ) -> Result<u64> {
-        println!("\n--- get_quote_async (Whirlpool) DEBUG ---");
-        println!("  - Initial amount_in: {}", amount_in);
-
         let tick_arrays = self.tick_arrays.as_mut().ok_or_else(|| anyhow!("Pool is not hydrated."))?;
         let a_to_b = *token_in_mint == self.mint_a;
         let (in_mint_fee_bps, out_mint_fee_bps) = if a_to_b {
@@ -235,29 +224,20 @@ impl DecodedWhirlpoolPool {
 
         let fee_on_input = (amount_in as u128 * in_mint_fee_bps as u128) / 10000;
         let amount_in_after_fee = amount_in.saturating_sub(fee_on_input as u64);
-        println!("  - amount_in after input transfer fee: {}", amount_in_after_fee);
 
-        let pool_fee = (amount_in_after_fee as u128 * self.fee_rate as u128) / 1_000_000;
+        let pool_fee = (amount_in_after_fee as u128 * self.fee_rate as u128).div_ceil(1_000_000);
         let mut amount_remaining = amount_in_after_fee.saturating_sub(pool_fee as u64) as u128;
-        println!("  - Pool fee: {}. Net amount_remaining to swap: {}", pool_fee, amount_remaining);
 
         let mut total_amount_out: u128 = 0;
         let mut current_liquidity = self.liquidity;
         let mut current_sqrt_price = self.sqrt_price;
         let mut current_tick_index = self.tick_current_index;
-        let mut step = 0;
 
         let mut fetched_array_indices = std::collections::HashSet::new();
         let current_start_index = tick_array::get_start_tick_index(current_tick_index, self.tick_spacing);
         fetched_array_indices.insert(current_start_index);
 
         while amount_remaining > 0 && current_liquidity > 0 {
-            step += 1;
-            println!("\n  [Step {}]", step);
-            println!("    - current_sqrt_price: {}", current_sqrt_price);
-            println!("    - current_tick_index: {}", current_tick_index);
-            println!("    - current_liquidity: {}", current_liquidity);
-
             let (target_sqrt_price, next_liquidity_net) = {
                 let find_result = {
                     let tick_arrays_ref = self.tick_arrays.as_ref().unwrap();
@@ -265,7 +245,6 @@ impl DecodedWhirlpoolPool {
                 };
                 match find_result {
                     Some((tick_index, tick_data)) => {
-                        println!("    - Found next initialized tick at index: {}", tick_index);
                         (orca_whirlpool_math::tick_to_sqrt_price_x64(tick_index), Some(tick_data.liquidity_net))
                     },
                     None => {
@@ -277,9 +256,6 @@ impl DecodedWhirlpoolPool {
             let (amount_in_step, amount_out_step, next_sqrt_price) = orca_whirlpool_math::compute_swap_step(
                 amount_remaining, current_sqrt_price, target_sqrt_price, current_liquidity, a_to_b,
             );
-            println!("    - target_sqrt_price: {}", target_sqrt_price);
-            println!("    - Consumed in step: {}, Produced in step: {}", amount_in_step, amount_out_step);
-            println!("    - next_sqrt_price: {}", next_sqrt_price);
 
             amount_remaining -= amount_in_step;
             total_amount_out += amount_out_step;
@@ -295,10 +271,6 @@ impl DecodedWhirlpoolPool {
 
         let fee_on_output = (total_amount_out * out_mint_fee_bps as u128) / 10000;
         let final_amount_out = total_amount_out.saturating_sub(fee_on_output);
-        println!("\n  - Total gross amount_out: {}", total_amount_out);
-        println!("  - Fee on output: {}", fee_on_output);
-        println!("  - Final amount_out: {}", final_amount_out);
-        println!("-------------------------------------------\n");
 
         Ok(final_amount_out as u64)
     }
@@ -316,8 +288,6 @@ impl PoolOperations for DecodedWhirlpoolPool {
 
     fn address(&self) -> Pubkey { self.address }
 
-    /// La version synchrone pour Whirlpool retourne une erreur car elle est intrinsèquement
-    /// imprécise sans appels RPC.
     fn get_quote(&self, _token_in_mint: &Pubkey, _amount_in: u64, _current_timestamp: i64) -> Result<u64> {
         Err(anyhow!("get_quote synchrone n'est pas supporté pour Whirlpool. Utilisez get_quote_async."))
     }
@@ -333,7 +303,7 @@ impl PoolOperations for DecodedWhirlpoolPool {
         let tick_arrays = self.tick_arrays.as_ref().ok_or_else(|| anyhow!("Pool not hydrated."))?;
         if self.liquidity == 0 { return Err(anyhow!("Not enough liquidity in pool.")); }
 
-        let a_to_b = *token_out_mint == self.mint_b; // true = we want B, so we provide A
+        let a_to_b = *token_out_mint == self.mint_b;
         let (in_mint_fee_bps, out_mint_fee_bps) = if a_to_b {
             (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps)
         } else {
@@ -354,7 +324,6 @@ impl PoolOperations for DecodedWhirlpoolPool {
         let mut current_tick_index = self.tick_current_index;
         let mut current_liquidity = self.liquidity;
 
-        // La direction du swap pour l'input est l'opposé de la direction de l'output.
         let input_a_to_b = !a_to_b;
 
         while gross_amount_out_target > 0 {
@@ -366,9 +335,9 @@ impl PoolOperations for DecodedWhirlpoolPool {
             };
             let sqrt_price_target = orca_whirlpool_math::tick_to_sqrt_price_x64(next_tick_index);
 
-            let amount_out_available_in_step = if a_to_b { // we want B
+            let amount_out_available_in_step = if a_to_b {
                 orca_whirlpool_math::get_delta_y(sqrt_price_target, current_sqrt_price, current_liquidity)
-            } else { // we want A
+            } else {
                 orca_whirlpool_math::get_delta_x(current_sqrt_price, sqrt_price_target, current_liquidity)
             };
 
@@ -378,10 +347,10 @@ impl PoolOperations for DecodedWhirlpoolPool {
                 return Err(anyhow!("Calculation stuck, cannot obtain remaining output."));
             }
 
-            let (prev_sqrt_price, amount_in_step_net) = if a_to_b { // we want B (output), so we provide A (input)
+            let (prev_sqrt_price, amount_in_step_net) = if a_to_b {
                 let p_start = orca_whirlpool_math::get_next_sqrt_price_y_down(current_sqrt_price, current_liquidity, amount_out_chunk);
                 (p_start, orca_whirlpool_math::get_delta_x_ceil(p_start, current_sqrt_price, current_liquidity))
-            } else { // we want A (output), so we provide B (input)
+            } else {
                 let p_start = orca_whirlpool_math::get_next_sqrt_price_x_up(current_sqrt_price, current_liquidity, amount_out_chunk);
                 (p_start, orca_whirlpool_math::get_delta_y_ceil(current_sqrt_price, p_start, current_liquidity))
             };
@@ -405,7 +374,7 @@ impl PoolOperations for DecodedWhirlpoolPool {
             total_amount_in_net
         };
 
-        let final_amount_in = if in_mint_fee_bps > 0 {
+        let mut final_amount_in = if in_mint_fee_bps > 0 {
             let numerator = amount_in_after_transfer_fee.saturating_mul(BPS_DENOMINATOR);
             let denominator = BPS_DENOMINATOR.saturating_sub(in_mint_fee_bps as u128);
             numerator.div_ceil(denominator)
@@ -413,31 +382,26 @@ impl PoolOperations for DecodedWhirlpoolPool {
             amount_in_after_transfer_fee
         };
 
+        // --- LA CORRECTION EST ICI ---
+        // On ajoute une petite marge de sécurité pour contrer les erreurs d'arrondi "off-by-one".
+        final_amount_in = final_amount_in.saturating_add(3);
+
         Ok(final_amount_in as u64)
     }
 
     async fn get_required_input_async(&mut self, token_out_mint: &Pubkey, amount_out: u64, rpc_client: &RpcClient) -> Result<u64> {
-        // Étape 1: Pour obtenir l'input pour `amount_out`, nous devons d'abord estimer un `amount_in` approximatif.
-        // Cela nous permettra de pré-charger les bons tick_arrays.
-        // Nous pouvons utiliser une estimation basée sur le prix actuel.
         let is_base_output = *token_out_mint == self.mint_a;
         let price_ratio = (self.sqrt_price as f64 / (1u128 << 64) as f64).powi(2);
         let estimated_price = if is_base_output { price_ratio } else { 1.0 / price_ratio };
-        let estimated_amount_in = (amount_out as f64 * estimated_price * 1.1) as u64; // *1.1 pour marge
+        let estimated_amount_in = (amount_out as f64 * estimated_price * 1.1) as u64;
 
-        // Étape 2: On utilise `get_quote_async` comme pré-chargeur. Il va charger les tick_arrays nécessaires.
         let token_in_mint = if is_base_output { self.mint_b } else { self.mint_a };
         let _ = self.get_quote_async(&token_in_mint, estimated_amount_in, rpc_client).await;
 
-        // Étape 3: Maintenant que le pool est "super-hydraté", on peut appeler la version synchrone en toute sécurité.
         self.get_required_input(token_out_mint, amount_out, 0)
     }
 
-
-
-    /// La version asynchrone est la méthode correcte pour obtenir un quote de Whirlpool.
     async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, rpc_client: &RpcClient) -> Result<u64> {
-        // On délègue simplement à la fonction que nous avons déjà écrite.
         self.get_quote_with_rpc(token_in_mint, amount_in, rpc_client).await
     }
 
@@ -450,9 +414,6 @@ impl PoolOperations for DecodedWhirlpoolPool {
     ) -> Result<Instruction> {
         let a_to_b = *token_in_mint == self.mint_a;
 
-        // --- Début de la logique de construction (tirée de votre test.rs) ---
-
-        // 1. Calculer les adresses des 3 tick_arrays
         let ticks_in_array = (tick_array::TICK_ARRAY_SIZE as i32) * (self.tick_spacing as i32);
         let current_array_start_index = tick_array::get_start_tick_index(self.tick_current_index, self.tick_spacing);
 
@@ -470,23 +431,19 @@ impl PoolOperations for DecodedWhirlpoolPool {
             ]
         };
 
-        // 2. Déterminer la limite de prix
         let sqrt_price_limit: u128 = if a_to_b { 4295048016 } else { 79226673515401279992447579055 };
 
-        // 3. Construire les données de l'instruction
         let swap_discriminator: [u8; 8] = [248, 198, 158, 145, 225, 117, 135, 200];
         let mut instruction_data = Vec::new();
         instruction_data.extend_from_slice(&swap_discriminator);
         instruction_data.extend_from_slice(&amount_in.to_le_bytes());
         instruction_data.extend_from_slice(&min_amount_out.to_le_bytes());
         instruction_data.extend_from_slice(&sqrt_price_limit.to_le_bytes());
-        instruction_data.push(u8::from(true)); // amount_specified_is_input
+        instruction_data.push(u8::from(true));
         instruction_data.push(u8::from(a_to_b));
 
-        // 4. Trouver le PDA de l'oracle
         let (oracle_pda, _) = Pubkey::find_program_address(&[b"oracle", self.address.as_ref()], &self.program_id);
 
-        // 5. Construire la liste des comptes
         let user_ata_for_token_a = get_associated_token_address(&user_accounts.owner, &self.mint_a);
         let user_ata_for_token_b = get_associated_token_address(&user_accounts.owner, &self.mint_b);
 
