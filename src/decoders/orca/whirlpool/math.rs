@@ -8,6 +8,11 @@ construct_uint! { pub struct U256(4); }
 // Constante pour la précision des sqrt_price (64 bits de partie fractionnaire).
 const U128_MAX: u128 = u128::MAX;
 
+// --- AJOUTEZ CES DEUX LIGNES ---
+pub const MIN_SQRT_PRICE_X64: u128 = 4295048016;
+pub const MAX_SQRT_PRICE_X64: u128 = 79226673521066979257578248091;
+// --- FIN DE L'AJOUT ---
+
 /// Calcule la racine carrée du prix (sqrt_price) à partir d'un index de tick.
 /// Cette implémentation est standard pour les CLMM.
 pub fn tick_to_sqrt_price_x64(tick: i32) -> u128 {

@@ -51,18 +51,18 @@ pub async fn test_whirlpool_with_simulation(rpc_client: &RpcClient, payer: &Keyp
     let ui_predicted_amount_out = predicted_amount_out as f64 / 10f64.powi(output_decimals as i32);
     println!("-> PRÉDICTION LOCALE: {} UI", ui_predicted_amount_out);
 
-    // --- NOUVEAU BLOC DE VALIDATION ---
     println!("\n[VALIDATION] Lancement du test d'inversion mathématique...");
     if predicted_amount_out > 0 {
-        let required_input_from_quote = pool.get_required_input(&output_mint_pubkey, predicted_amount_out, 0)?; // timestamp non utilisé
+        // On appelle la bonne fonction asynchrone
+        let required_input_from_quote = pool.get_required_input_async(&output_mint_pubkey, predicted_amount_out, rpc_client).await?;
 
+        // ... (le reste du bloc de validation est inchangé et correct)
         println!("  -> Input original     : {}", amount_in_base_units);
         println!("  -> Output prédit      : {}", predicted_amount_out);
         println!("  -> Input Re-calculé   : {}", required_input_from_quote);
 
         if required_input_from_quote >= amount_in_base_units {
             let difference = required_input_from_quote.saturating_sub(amount_in_base_units);
-            // Tolérance plus élevée pour les CLMMs
             if difference <= 100 {
                 println!("  -> ✅ SUCCÈS: Le calcul inverse est cohérent (différence: {} lamports).", difference);
             } else {
