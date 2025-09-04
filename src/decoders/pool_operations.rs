@@ -7,13 +7,16 @@ use async_trait::async_trait;
 
 #[async_trait]
 pub trait PoolOperations {
+
     fn get_mints(&self) -> (Pubkey, Pubkey);
+
     fn get_vaults(&self) -> (Pubkey, Pubkey);
+
+    fn get_reserves(&self) -> (u64, u64);
+
     fn address(&self) -> Pubkey;
 
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<u64>;
-
-    async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, rpc_client: &RpcClient) -> Result<u64>;
 
     fn get_required_input(
         &mut self,
@@ -21,9 +24,6 @@ pub trait PoolOperations {
         amount_out: u64,         // La quantité que l'on veut recevoir
         current_timestamp: i64
     ) -> Result<u64>;
-
-
-    async fn get_required_input_async(&mut self, token_out_mint: &Pubkey, amount_out: u64, rpc_client: &RpcClient) -> Result<u64>;
 
     fn create_swap_instruction(
         &self,

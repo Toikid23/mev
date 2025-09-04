@@ -114,6 +114,7 @@ impl PoolOperations for DecodedStableSwapPool {
     fn get_vaults(&self) -> (Pubkey, Pubkey) {
         (self.vault_a, self.vault_b)
     }
+    fn get_reserves(&self) -> (u64, u64) { (self.reserve_a, self.reserve_b) }
     fn address(&self) -> Pubkey { self.address }
 
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
@@ -150,14 +151,6 @@ impl PoolOperations for DecodedStableSwapPool {
         Err(anyhow!("get_required_input is not yet implemented for Raydium Stable Swap."))
     }
 
-    async fn get_required_input_async(&mut self, token_out_mint: &Pubkey, amount_out: u64, _rpc_client: &RpcClient) -> Result<u64> {
-        // La version async appelle simplement la version synchrone car elle n'a pas besoin d'appels RPC.
-        self.get_required_input(token_out_mint, amount_out, 0)
-    }
-
-    async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
-        self.get_quote(token_in_mint, amount_in, 0)
-    }
     fn create_swap_instruction(
         &self,
         token_in_mint: &Pubkey,

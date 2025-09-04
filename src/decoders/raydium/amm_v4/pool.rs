@@ -119,6 +119,7 @@ pub async fn hydrate(pool: &mut DecodedAmmPool, rpc_client: &RpcClient) -> Resul
 impl PoolOperations for DecodedAmmPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
+    fn get_reserves(&self) -> (u64, u64) { (self.reserve_a, self.reserve_b) }
     fn address(&self) -> Pubkey { self.address }
 
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
@@ -210,16 +211,7 @@ impl PoolOperations for DecodedAmmPool {
 
         Ok(required_amount_in as u64)
     }
-
-    async fn get_required_input_async(&mut self, token_out_mint: &Pubkey, amount_out: u64, _rpc_client: &RpcClient) -> Result<u64> {
-        // La version async appelle simplement la version synchrone car elle n'a pas besoin d'appels RPC.
-        self.get_required_input(token_out_mint, amount_out, 0)
-    }
-
-    async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
-        self.get_quote(token_in_mint, amount_in, 0)
-    }
-
+    
     // --- VOTRE create_swap_instruction ORIGINAL, VALIDÉ ET CORRECT ---
     fn create_swap_instruction(
         &self,

@@ -64,21 +64,6 @@ pub struct DecodedBinArray {
 impl DecodedDlmmPool {
     pub fn fee_as_percent(&self) -> f64 { (self.base_fee_rate as f64 / 100_000.0) * 100.0 }
 
-    pub async fn get_quote_with_rpc(
-        &mut self,
-        token_in_mint: &Pubkey,
-        amount_in: u64,
-        rpc_client: &RpcClient,
-    ) -> Result<u64> {
-        // Logique de préparation
-        let swap_for_y = *token_in_mint == self.mint_a;
-        let clock_account = rpc_client.get_account(&solana_sdk::sysvar::clock::ID).await?;
-        let clock: solana_sdk::sysvar::clock::Clock = bincode::deserialize(&clock_account.data)?;
-        let current_timestamp = clock.unix_timestamp;
-
-        // Appel à votre fonction de calcul renommée
-        self.calculate_swap_quote_async(amount_in, swap_for_y, current_timestamp, rpc_client).await
-    }
 
     pub async fn calculate_swap_quote_async(
         &mut self,
@@ -233,10 +218,16 @@ impl DecodedDlmmPool {
 impl PoolOperations for DecodedDlmmPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
+
+    fn get_reserves(&self) -> (u64, u64) {
+        // Les CLMM n'ont pas de réserves simples. On retourne 0 pour que la stratégie utilise son fallback.
+        (0, 0)
+    }
+
     fn address(&self) -> Pubkey { self.address }
 
+    // VERSION SYNCHRONE AMÉLIORÉE
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<u64> {
-        // La version synchrone est maintenant une estimation qui n'utilise que les données en cache
         let swap_for_y = *token_in_mint == self.mint_a;
         let (in_mint_fee_bps, in_mint_max_fee, out_mint_fee_bps, out_mint_max_fee) = if swap_for_y {
             (self.mint_a_transfer_fee_bps, self.mint_a_transfer_fee_max, self.mint_b_transfer_fee_bps, self.mint_b_transfer_fee_max)
@@ -246,7 +237,7 @@ impl PoolOperations for DecodedDlmmPool {
         let fee_on_input = calculate_transfer_fee(amount_in, in_mint_fee_bps, in_mint_max_fee)?;
         let amount_in_after_transfer_fee = amount_in.saturating_sub(fee_on_input);
 
-        // On appelle l'ancienne logique de calcul qui ne fait pas d'appels RPC
+        // On appelle la fonction de calcul interne, qui est déjà synchrone
         let gross_amount_out = self.calculate_swap_quote(amount_in_after_transfer_fee, swap_for_y, current_timestamp)?;
 
         let fee_on_output = calculate_transfer_fee(gross_amount_out, out_mint_fee_bps, out_mint_max_fee)?;
@@ -254,6 +245,7 @@ impl PoolOperations for DecodedDlmmPool {
         Ok(final_amount_out)
     }
 
+    // VERSION SYNCHRONE
     fn get_required_input(
         &mut self,
         token_out_mint: &Pubkey,
@@ -264,9 +256,8 @@ impl PoolOperations for DecodedDlmmPool {
         let bin_arrays = self.hydrated_bin_arrays.as_ref().ok_or_else(|| anyhow!("Pool not hydrated"))?;
         if bin_arrays.is_empty() { return Err(anyhow!("Not enough liquidity in pool.")); }
 
-        // --- 1. Configuration initiale ---
-        let is_base_output = *token_out_mint == self.mint_a; // Veut du token A (base)
-        let is_base_input = !is_base_output;                 // Donc fournit du token B (quote)
+        let is_base_output = *token_out_mint == self.mint_a;
+        let is_base_input = !is_base_output;
 
         let (in_mint_fee_bps, in_mint_max_fee, out_mint_fee_bps, out_mint_max_fee) = if is_base_input {
             (self.mint_a_transfer_fee_bps, self.mint_a_transfer_fee_max, self.mint_b_transfer_fee_bps, self.mint_b_transfer_fee_max)
@@ -274,15 +265,12 @@ impl PoolOperations for DecodedDlmmPool {
             (self.mint_b_transfer_fee_bps, self.mint_b_transfer_fee_max, self.mint_a_transfer_fee_bps, self.mint_a_transfer_fee_max)
         };
 
-        // --- 2. Inverser les frais de transfert de SORTIE ---
         let gross_amount_out_target = calculate_gross_amount_before_transfer_fee(amount_out, out_mint_fee_bps, out_mint_max_fee)? as u128;
 
-        // --- 3. Itérer sur les bins à l'envers pour trouver l'input NET requis ---
         let mut total_amount_in_net: u128 = 0;
         let mut amount_out_remaining = gross_amount_out_target;
         let mut current_bin_id = self.active_bin_id;
 
-        // Simulation des frais dynamiques (doit être fait dans la boucle)
         let mut temp_v_params = self.v_parameters;
         update_references(&mut temp_v_params, &self.parameters, self.active_bin_id, current_timestamp)?;
 
@@ -309,15 +297,12 @@ impl PoolOperations for DecodedDlmmPool {
 
             let amount_out_from_this_bin = amount_out_remaining.min(out_reserve_in_bin as u128);
 
-            // --- Logique d'inversion des frais de POOL ---
             update_volatility_accumulator(&mut temp_v_params, &self.parameters, self.active_bin_id, current_bin_id)?;
             let total_fee_rate = get_total_fee(self.bin_step, &self.parameters, &temp_v_params)?;
 
             let required_net_in_for_chunk_no_fee = math::get_amount_in(amount_out_from_this_bin as u64, current_bin.price, is_base_input)? as u128;
 
             let required_net_in_for_chunk_with_fee = if total_fee_rate > 0 {
-                // On inverse les frais pour trouver le montant brut qui, après frais, donne le montant net.
-                // amount_in_gross = amount_in_net * FEE_PRECISION / (FEE_PRECISION - fee_rate)
                 let num = required_net_in_for_chunk_no_fee.saturating_mul(FEE_PRECISION);
                 let den = FEE_PRECISION.saturating_sub(total_fee_rate);
                 num.div_ceil(den)
@@ -331,22 +316,11 @@ impl PoolOperations for DecodedDlmmPool {
             current_bin_id = if is_base_input { current_bin_id.saturating_sub(1) } else { current_bin_id.saturating_add(1) };
         }
 
-        // --- 4. Inverser les frais de transfert d'ENTRÉE ---
         let final_amount_in = calculate_gross_amount_before_transfer_fee(total_amount_in_net as u64, in_mint_fee_bps, in_mint_max_fee)?;
 
-        Ok(final_amount_in)
+        Ok(final_amount_in.saturating_add(0)) // On garde une petite marge de sécurité
     }
 
-    async fn get_required_input_async(&mut self, token_out_mint: &Pubkey, amount_out: u64, _rpc_client: &RpcClient) -> Result<u64> {
-        // La version async appelle simplement la version synchrone car elle n'a pas besoin d'appels RPC.
-        self.get_required_input(token_out_mint, amount_out, 0)
-    }
-
-
-    async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, rpc_client: &RpcClient) -> Result<u64> {
-        // Cet appel est maintenant correct car la signature correspond
-        self.get_quote_with_rpc(token_in_mint, amount_in, rpc_client).await
-    }
 
     fn create_swap_instruction(
         &self,
@@ -449,12 +423,12 @@ pub fn decode_lb_pair(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Res
 }
 
 pub async fn hydrate(pool: &mut DecodedDlmmPool, rpc_client: &RpcClient) -> Result<()> {
-    // On garde l'hydratation des mints, c'est parfait
+    // Étape 1: Hydrater les mints (inchangé)
     let (mint_a_res, mint_b_res) = tokio::join!(
         rpc_client.get_account(&pool.mint_a),
         rpc_client.get_account(&pool.mint_b)
     );
-
+    // ... (le reste de l'hydratation des mints est correct et ne change pas)
     let mint_a_account = mint_a_res?;
     let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_account.data)?;
     pool.mint_a_decimals = decoded_mint_a.decimals;
@@ -469,19 +443,117 @@ pub async fn hydrate(pool: &mut DecodedDlmmPool, rpc_client: &RpcClient) -> Resu
     pool.mint_b_transfer_fee_max = decoded_mint_b.max_transfer_fee;
     pool.mint_b_program = mint_b_account.owner;
 
-    // --- NOUVELLE LOGIQUE D'HYDRATATION MINIMALE ---
-    // On ne charge que le BinArray qui contient le tick actif.
+
+    // Étape 2: Hydratation "Look-Ahead" des BinArrays (version simplifiée)
     let mut hydrated_bin_arrays = BTreeMap::new();
     let active_array_idx = get_bin_array_index_from_bin_id(pool.active_bin_id);
-    let address_to_fetch = get_bin_array_address(&pool.address, active_array_idx, &pool.program_id);
 
-    if let Ok(account) = rpc_client.get_account(&address_to_fetch).await {
-        if let Ok(decoded_array) = decode_bin_array(active_array_idx, &account.data) {
-            hydrated_bin_arrays.insert(active_array_idx, decoded_array);
+    // On définit les 3 index que nous voulons charger
+    let indices_to_fetch = [
+        active_array_idx - 1,
+        active_array_idx,
+        active_array_idx + 1
+    ];
+
+    for &index in &indices_to_fetch {
+        let address = get_bin_array_address(&pool.address, index, &pool.program_id);
+        if let Ok(account) = rpc_client.get_account(&address).await {
+            if let Ok(decoded_array) = decode_bin_array(index, &account.data) {
+                hydrated_bin_arrays.insert(index, decoded_array);
+            }
         }
     }
 
     pool.hydrated_bin_arrays = Some(hydrated_bin_arrays);
+
+    Ok(())
+}
+
+// NOUVELLE FONCTION D'HYDRATATION PARAMÉTRABLE
+pub async fn hydrate_with_depth(pool: &mut DecodedDlmmPool, rpc_client: &RpcClient, depth: usize) -> Result<()> {
+    // Étape 1: Hydrater les mints (inchangé)
+    let (mint_a_res, mint_b_res) = tokio::join!(
+        rpc_client.get_account(&pool.mint_a),
+        rpc_client.get_account(&pool.mint_b)
+    );
+    // ... (le code d'hydratation des mints reste le même)
+    let mint_a_account = mint_a_res?;
+    let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_account.data)?;
+    pool.mint_a_decimals = decoded_mint_a.decimals;
+    pool.mint_a_transfer_fee_bps = decoded_mint_a.transfer_fee_basis_points;
+    pool.mint_a_transfer_fee_max = decoded_mint_a.max_transfer_fee;
+    pool.mint_a_program = mint_a_account.owner;
+    let mint_b_account = mint_b_res?;
+    let decoded_mint_b = spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_account.data)?;
+    pool.mint_b_decimals = decoded_mint_b.decimals;
+    pool.mint_b_transfer_fee_bps = decoded_mint_b.transfer_fee_basis_points;
+    pool.mint_b_transfer_fee_max = decoded_mint_b.max_transfer_fee;
+    pool.mint_b_program = mint_b_account.owner;
+
+    // Étape 2: Hydratation "Look-Ahead" (version simple et fiable)
+    let mut hydrated_bin_arrays = BTreeMap::new();
+    let active_array_idx = get_bin_array_index_from_bin_id(pool.active_bin_id);
+
+    // On crée la liste des index à charger
+    let mut indices_to_fetch = vec![active_array_idx];
+    for i in 1..=depth {
+        indices_to_fetch.push(active_array_idx - i as i64);
+        indices_to_fetch.push(active_array_idx + i as i64);
+    }
+
+    // On fait des appels séparés (plus simple et évite les erreurs de logique)
+    for &index in &indices_to_fetch {
+        let address = get_bin_array_address(&pool.address, index, &pool.program_id);
+        if let Ok(account) = rpc_client.get_account(&address).await {
+            if let Ok(decoded_array) = decode_bin_array(index, &account.data) {
+                hydrated_bin_arrays.insert(index, decoded_array);
+            }
+        }
+    }
+
+    pool.hydrated_bin_arrays = Some(hydrated_bin_arrays);
+    Ok(())
+}
+
+pub async fn rehydrate_for_escalation(
+    pool: &mut DecodedDlmmPool,
+    rpc_client: &RpcClient,
+    go_up: bool, // true si on a besoin d'index plus élevés, false sinon
+) -> Result<()> {
+    if pool.hydrated_bin_arrays.is_none() {
+        return hydrate(pool, rpc_client).await; // Fallback au cas où
+    }
+
+    let bin_arrays = pool.hydrated_bin_arrays.as_mut().unwrap();
+
+    // On trouve l'index le plus haut ou le plus bas déjà chargé
+    let boundary_index = if go_up {
+        *bin_arrays.keys().max().unwrap_or(&0)
+    } else {
+        *bin_arrays.keys().min().unwrap_or(&0)
+    };
+
+    let mut new_indices_to_fetch = vec![];
+    for i in 1..=3 { // On va chercher les 3 suivants
+        let next_index = if go_up {
+            boundary_index + i
+        } else {
+            boundary_index - i
+        };
+        new_indices_to_fetch.push(next_index);
+    }
+
+    // On fait les appels RPC pour les nouveaux arrays
+    for &index in &new_indices_to_fetch {
+        let address = get_bin_array_address(&pool.address, index, &pool.program_id);
+        if let Ok(account) = rpc_client.get_account(&address).await {
+            if let Ok(decoded_array) = decode_bin_array(index, &account.data) {
+                // On ajoute les nouveaux arrays au BTreeMap existant
+                bin_arrays.insert(index, decoded_array);
+            }
+        }
+    }
+
     Ok(())
 }
 

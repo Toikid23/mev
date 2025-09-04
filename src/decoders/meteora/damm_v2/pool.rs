@@ -125,6 +125,24 @@ pub async fn hydrate(pool: &mut DecodedMeteoraDammPool, rpc_client: &RpcClient) 
 impl PoolOperations for DecodedMeteoraDammPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
+
+    fn get_reserves(&self) -> (u64, u64) {
+        // Pour DAMM V2, on peut faire une estimation des réserves effectives
+        // en utilisant la liquidité et le prix actuels.
+        let price_x64 = U256::from(self.sqrt_price);
+        let liquidity_u256 = U256::from(self.liquidity);
+        let q64 = U256::one() << 64;
+
+        if price_x64.is_zero() { return (0, 0); }
+
+        // Formules inversées : amount_a = L / sqrt(P), amount_b = L * sqrt(P)
+        // C'est une approximation de la liquidité "autour" du prix actuel.
+        let estimated_reserve_a = (liquidity_u256 * q64 / price_x64).as_u64();
+        let estimated_reserve_b = ((liquidity_u256 * price_x64) >> 64).as_u64();
+
+        (estimated_reserve_a, estimated_reserve_b)
+    }
+
     fn address(&self) -> Pubkey { self.address }
 
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<u64> {
@@ -264,15 +282,6 @@ impl PoolOperations for DecodedMeteoraDammPool {
         Ok(best_guess.saturating_add(2))
     }
 
-    async fn get_required_input_async(&mut self, token_out_mint: &Pubkey, amount_out: u64, _rpc_client: &RpcClient) -> Result<u64> {
-        // La version async appelle simplement la version synchrone car elle n'a pas besoin d'appels RPC.
-        self.get_required_input(token_out_mint, amount_out, 0)
-    }
-
-
-    async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
-        self.get_quote(token_in_mint, amount_in, 0)
-    }
 
     fn create_swap_instruction(
         &self,

@@ -20,6 +20,7 @@ use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 use num_integer::Integer;
 use crate::decoders::raydium::clmm::full_math::MulDiv;
 use crate::decoders::spl_token_decoders::mint::{calculate_transfer_fee, calculate_gross_amount_before_transfer_fee};
+use crate::decoders::orca::whirlpool::math::U256;
 
 // --- STRUCTURES (Inchangées) ---
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -344,6 +345,34 @@ impl PoolOperations for DecodedClmmPool {
         (self.vault_a, self.vault_b)
     }
 
+    fn get_reserves(&self) -> (u64, u64) {
+        if let Some(tick_arrays) = &self.tick_arrays {
+            let mut total_liquidity: u128 = 0;
+            // On somme la liquidité brute de tous les ticks initialisés dans tous les arrays chargés.
+            for (_, tick_array_state) in tick_arrays.iter() {
+                for tick in tick_array_state.ticks.iter() {
+                    total_liquidity = total_liquidity.saturating_add(tick.liquidity_gross);
+                }
+            }
+
+            // On estime les réserves totales en se basant sur la liquidité totale et le prix actuel.
+            // C'est une approximation, mais elle est basée sur l'ensemble de la liquidité du pool.
+            let price_x64 = U256::from(self.sqrt_price_x64);
+            let liquidity_u256 = U256::from(total_liquidity);
+            let q64 = U256::one() << 64;
+
+            if price_x64.is_zero() { return (0, 0); }
+
+            let estimated_reserve_a = (liquidity_u256 * q64 / price_x64).as_u64();
+            let estimated_reserve_b = ((liquidity_u256 * price_x64) >> 64).as_u64();
+
+            (estimated_reserve_a, estimated_reserve_b)
+        } else {
+            // Si le pool n'a pas été hydraté, on ne peut rien dire.
+            (0, 0)
+        }
+    }
+
     fn address(&self) -> Pubkey { self.address }
 
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
@@ -363,9 +392,6 @@ impl PoolOperations for DecodedClmmPool {
         Ok(gross_amount_out.saturating_sub(fee_on_output))
     }
 
-    async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
-        self.get_quote(token_in_mint, amount_in, 0)
-    }
 
     fn get_required_input(&mut self, token_out_mint: &Pubkey, amount_out: u64, _current_timestamp: i64) -> Result<u64> {
         if amount_out == 0 { return Ok(0); }
@@ -442,9 +468,6 @@ impl PoolOperations for DecodedClmmPool {
         calculate_gross_amount_before_transfer_fee(amount_in_after_transfer_fee, in_mint_fee_bps, in_mint_max_fee)
     }
 
-    async fn get_required_input_async(&mut self, token_out_mint: &Pubkey, amount_out: u64, _rpc_client: &RpcClient) -> Result<u64> {
-        self.get_required_input(token_out_mint, amount_out, 0)
-    }
 
     fn create_swap_instruction(
         &self,

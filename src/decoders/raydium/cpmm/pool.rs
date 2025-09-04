@@ -39,6 +39,8 @@ pub struct DecodedCpmmPool {
     pub mint_1_decimals: u8,
     // Les champs "intelligents"
     pub trade_fee_rate: u64,
+    pub creator_fee_rate: u64,
+    pub enable_creator_fee: bool,
     pub reserve_a: u64,
     pub reserve_b: u64,
     pub last_swap_timestamp: i64,
@@ -78,11 +80,10 @@ struct CpmmPoolStateData {
     pub open_time: u64,
     pub recent_epoch: u64,
     pub creator_fee_on: u8,
-    pub enable_creator_fee: u8, // bool est 1 byte
+    pub enable_creator_fee: u8, // bool est 1 byte en Rust
     pub padding1: [u8; 6],
     pub creator_fees_token_0: u64,
     pub creator_fees_token_1: u64,
-    // Padding final réduit
     pub padding: [u64; 28],
 }
 
@@ -126,6 +127,8 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedCpmmPool> {
         mint_0_decimals: 0,
         mint_1_decimals: 0,
         trade_fee_rate: 0,
+        creator_fee_rate: 0,
+        enable_creator_fee: false,
         reserve_a: 0,
         reserve_b: 0,
         last_swap_timestamp: 0,
@@ -141,43 +144,46 @@ impl PoolOperations for DecodedCpmmPool {
     fn get_vaults(&self) -> (Pubkey, Pubkey) {
         (self.token_0_vault, self.token_1_vault)
     }
+
+    fn get_reserves(&self) -> (u64, u64) { (self.reserve_a, self.reserve_b) }
     fn address(&self) -> Pubkey { self.address }
 
     // --- VERSION AMÉLIORÉE DE GET_QUOTE ---
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
         let (in_mint_fee_bps, out_mint_fee_bps, in_reserve, out_reserve) = if *token_in_mint == self.token_0_mint {
             (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps, self.reserve_a, self.reserve_b)
-        } else if *token_in_mint == self.token_1_mint {
-            (self.mint_b_transfer_fee_bps, self.mint_a_transfer_fee_bps, self.reserve_b, self.reserve_a)
         } else {
-            return Err(anyhow!("Input token does not belong to this pool."));
+            (self.mint_b_transfer_fee_bps, self.mint_a_transfer_fee_bps, self.reserve_b, self.reserve_a)
         };
 
-        // Étape 1 : Frais de transfert Token-2022 (inchangé)
+        // Étape 1 : Frais de transfert sur l'input (inchangé)
         let fee_on_input = (amount_in as u128 * in_mint_fee_bps as u128) / 10000;
         let amount_in_after_transfer_fee = amount_in.saturating_sub(fee_on_input as u64) as u128;
 
-        if in_reserve == 0 || out_reserve == 0 {
-            return Ok(0);
-        }
+        if in_reserve == 0 || out_reserve == 0 { return Ok(0); }
 
-        // --- DÉBUT DE LA LOGIQUE DE FRAIS 1:1 ---
         const FEE_DENOMINATOR: u128 = 1_000_000;
 
-        // Étape 2 : Calculer les frais de trading avec un arrondi au plafond (ceil).
-        // C'est la réplique exacte du code on-chain.
+        // Étape 2 : Calculer les frais de trading avec un arrondi au plafond (ceil), comme le programme on-chain.
         let trade_fee = (amount_in_after_transfer_fee * self.trade_fee_rate as u128).div_ceil(FEE_DENOMINATOR);
 
         // Étape 3 : Soustraire les frais pour obtenir le montant net pour le swap.
-        let amount_in_less_fees = amount_in_after_transfer_fee.saturating_sub(trade_fee);
+        let creator_fee = if self.enable_creator_fee {
+            (amount_in_after_transfer_fee * self.creator_fee_rate as u128).div_ceil(FEE_DENOMINATOR)
+        } else {
+            0
+        };
+        // --- FIN DE L'AJOUT ---
 
-        // Étape 4 : Calculer le swap avec la formule de produit constant pure (inchangé).
+        let amount_in_less_fees = amount_in_after_transfer_fee
+            .saturating_sub(trade_fee)
+            .saturating_sub(creator_fee); // <-- On soustrait aussi les frais du créateur
+
+        // Étape 4 : Calculer le swap avec la formule de produit constant (arrondi au plancher).
         let numerator = amount_in_less_fees * out_reserve as u128;
         let denominator = in_reserve as u128 + amount_in_less_fees;
         if denominator == 0 { return Ok(0); }
         let gross_amount_out = (numerator / denominator) as u64;
-
-        // --- FIN DE LA LOGIQUE DE FRAIS 1:1 ---
 
         // Étape 5 : Frais de transfert sur l'output (inchangé)
         let fee_on_output = (gross_amount_out as u128 * out_mint_fee_bps as u128) / 10000;
@@ -186,6 +192,7 @@ impl PoolOperations for DecodedCpmmPool {
         Ok(final_amount_out)
     }
 
+    // --- NOUVELLE FONCTION get_required_input ---
     fn get_required_input(
         &mut self,
         token_out_mint: &Pubkey,
@@ -194,7 +201,6 @@ impl PoolOperations for DecodedCpmmPool {
     ) -> Result<u64> {
         if amount_out == 0 { return Ok(0); }
 
-        // --- 1. Configuration initiale (inverse de get_quote) ---
         let (in_mint_fee_bps, out_mint_fee_bps, in_reserve, out_reserve) = if *token_out_mint == self.token_1_mint {
             (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps, self.reserve_a, self.reserve_b)
         } else {
@@ -204,8 +210,9 @@ impl PoolOperations for DecodedCpmmPool {
         if out_reserve == 0 || in_reserve == 0 { return Err(anyhow!("Pool has no liquidity")); }
 
         const BPS_DENOMINATOR: u128 = 10000;
+        const FEE_DENOMINATOR: u128 = 1_000_000;
 
-        // --- 2. Inverser les frais de transfert Token-2022 sur la SORTIE ---
+        // Étape 1: Inverser les frais de transfert Token-2022 sur la SORTIE (inchangé)
         let gross_amount_out = if out_mint_fee_bps > 0 {
             let numerator = (amount_out as u128).saturating_mul(BPS_DENOMINATOR);
             let denominator = BPS_DENOMINATOR.saturating_sub(out_mint_fee_bps as u128);
@@ -213,27 +220,29 @@ impl PoolOperations for DecodedCpmmPool {
         } else {
             amount_out as u128
         };
+        if gross_amount_out >= out_reserve as u128 { return Err(anyhow!("Amount out is too high")); }
 
-        if gross_amount_out >= out_reserve as u128 {
-            return Err(anyhow!("Cannot get required input, amount_out is too high."));
-        }
-
-        // --- 3. Inverser la formule du produit constant ---
+        // Étape 2: Inverser la formule du produit constant (inchangé)
         let numerator = gross_amount_out.saturating_mul(in_reserve as u128);
         let denominator = (out_reserve as u128).saturating_sub(gross_amount_out);
         let amount_in_less_fees = numerator.div_ceil(denominator);
 
-        // --- 4. Inverser les frais de trading du pool ---
-        const FEE_DENOMINATOR: u128 = 1_000_000;
-        let amount_in_after_transfer_fee = if self.trade_fee_rate > 0 {
+        // Étape 3: Inverser les frais de trading du pool. C'est le miroir de `get_quote`.
+        let total_fee_rate = if self.enable_creator_fee {
+            self.trade_fee_rate + self.creator_fee_rate
+        } else {
+            self.trade_fee_rate
+        };
+
+        let amount_in_after_transfer_fee = if total_fee_rate > 0 {
             let num = amount_in_less_fees.saturating_mul(FEE_DENOMINATOR);
-            let den = FEE_DENOMINATOR.saturating_sub(self.trade_fee_rate as u128);
+            let den = FEE_DENOMINATOR.saturating_sub(total_fee_rate as u128);
             num.div_ceil(den)
         } else {
             amount_in_less_fees
         };
 
-        // --- 5. Inverser les frais de transfert Token-2022 sur l'ENTRÉE ---
+        // Étape 4: Inverser les frais de transfert Token-2022 sur l'ENTRÉE (inchangé)
         let required_amount_in = if in_mint_fee_bps > 0 {
             let num = amount_in_after_transfer_fee.saturating_mul(BPS_DENOMINATOR);
             let den = BPS_DENOMINATOR.saturating_sub(in_mint_fee_bps as u128);
@@ -245,15 +254,6 @@ impl PoolOperations for DecodedCpmmPool {
         Ok(required_amount_in as u64)
     }
 
-    async fn get_required_input_async(&mut self, token_out_mint: &Pubkey, amount_out: u64, _rpc_client: &RpcClient) -> Result<u64> {
-        // La version async appelle simplement la version synchrone car elle n'a pas besoin d'appels RPC.
-        self.get_required_input(token_out_mint, amount_out, 0)
-    }
-
-
-    async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, _rpc_client: &RpcClient) -> Result<u64> {
-        self.get_quote(token_in_mint, amount_in, 0)
-    }
     fn create_swap_instruction(
         &self,
         token_in_mint: &Pubkey,
@@ -314,6 +314,15 @@ pub async fn hydrate(pool: &mut DecodedCpmmPool, rpc_client: &RpcClient) -> Resu
     let config_data = config_res?;
     let decoded_config = config::decode_config(&config_data)?;
     pool.trade_fee_rate = decoded_config.trade_fee_rate;
+    pool.creator_fee_rate = decoded_config.creator_fee_rate;
+
+    // --- LOGIQUE POUR RÉCUPÉRER `enable_creator_fee` ---
+    // Il faut re-fetcher le pool_state pour avoir la donnée on-chain complète
+    let pool_account_data = rpc_client.get_account_data(&pool.address).await?;
+    let data_slice = &pool_account_data[8..];
+    let pool_struct: &CpmmPoolStateData = from_bytes(&data_slice[..std::mem::size_of::<CpmmPoolStateData>()]);
+    pool.enable_creator_fee = if pool_struct.enable_creator_fee == 1 { true } else { false };
+    // --- FIN ---
 
     let vault_a_data = vault_a_res?;
     pool.reserve_a = u64::from_le_bytes(vault_a_data[64..72].try_into()?);

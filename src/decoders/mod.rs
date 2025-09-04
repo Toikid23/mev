@@ -73,6 +73,24 @@ impl PoolOperations for Pool {
         }
     }
 
+    fn get_reserves(&self) -> (
+        u64, u64) {
+        match self {
+            Pool::RaydiumAmmV4(p) => p.get_reserves(),
+            Pool::RaydiumCpmm(p) => p.get_reserves(),
+            Pool::RaydiumClmm(p) => p.get_reserves(),
+            Pool::RaydiumStableSwap(p) => p.get_reserves(),
+            Pool::RaydiumLaunchpad(p) => p.get_reserves(),
+            Pool::MeteoraDammV1(p) => p.get_reserves(),
+            Pool::MeteoraDammV2(p) => p.get_reserves(),
+            Pool::MeteoraDlmm(p) => p.get_reserves(),
+            Pool::OrcaWhirlpool(p) => p.get_reserves(),
+            Pool::OrcaAmmV2(p) => p.get_reserves(),
+            Pool::OrcaAmmV1(p) => p.get_reserves(),
+            Pool::PumpAmm(p) => p.get_reserves(),
+        }
+    }
+
     fn address(&self) -> Pubkey {
         match self {
             Pool::RaydiumAmmV4(p) => p.address,
@@ -103,10 +121,8 @@ impl PoolOperations for Pool {
             Pool::OrcaAmmV1(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
             Pool::PumpAmm(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
             Pool::RaydiumClmm(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
-
-            //pool complexe
-            Pool::MeteoraDlmm(_) => Err(anyhow::anyhow!("Utiliser get_quote_async pour Meteora DLMM")),
-            Pool::OrcaWhirlpool(_) => Err(anyhow::anyhow!("Utiliser get_quote_async pour Orca Whirlpool")),
+            Pool::OrcaWhirlpool(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
+            Pool::MeteoraDlmm(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
         }
     }
 
@@ -124,40 +140,6 @@ impl PoolOperations for Pool {
             Pool::OrcaAmmV2(p) => p.get_required_input(token_out_mint, amount_out, current_timestamp),
             Pool::OrcaAmmV1(p) => p.get_required_input(token_out_mint, amount_out, current_timestamp),
             Pool::PumpAmm(p) => p.get_required_input(token_out_mint, amount_out, current_timestamp),
-        }
-    }
-
-    async fn get_required_input_async(&mut self, token_out_mint: &Pubkey, amount_out: u64, rpc_client: &RpcClient) -> Result<u64> {
-        match self {
-            // Pour tous les pools simples, la version async appelle simplement la version synchrone.
-            Pool::RaydiumAmmV4(p) => p.get_required_input_async(token_out_mint, amount_out, rpc_client).await,
-            Pool::RaydiumCpmm(p) => p.get_required_input_async(token_out_mint, amount_out, rpc_client).await,
-            Pool::RaydiumStableSwap(p) => p.get_required_input_async(token_out_mint, amount_out, rpc_client).await,
-            Pool::RaydiumLaunchpad(p) => p.get_required_input_async(token_out_mint, amount_out, rpc_client).await,
-            Pool::MeteoraDammV1(p) => p.get_required_input_async(token_out_mint, amount_out, rpc_client).await,
-            Pool::MeteoraDammV2(p) => p.get_required_input_async(token_out_mint, amount_out, rpc_client).await,
-            Pool::OrcaAmmV2(p) => p.get_required_input_async(token_out_mint, amount_out, rpc_client).await,
-            Pool::OrcaAmmV1(p) => p.get_required_input_async(token_out_mint, amount_out, rpc_client).await,
-            Pool::PumpAmm(p) => p.get_required_input_async(token_out_mint, amount_out, rpc_client).await,
-
-            // Pour les pools complexes, on appelle leur implémentation spécifique.
-            Pool::RaydiumClmm(p) => p.get_required_input_async(token_out_mint, amount_out, rpc_client).await,
-            Pool::MeteoraDlmm(p) => p.get_required_input_async(token_out_mint, amount_out, rpc_client).await,
-            Pool::OrcaWhirlpool(p) => p.get_required_input_async(token_out_mint, amount_out, rpc_client).await,
-        }
-    }
-
-
-    async fn get_quote_async(&mut self, token_in_mint: &Pubkey, amount_in: u64, rpc_client: &RpcClient) -> Result<u64> {
-        match self {
-            // On gère déjà le cas Whirlpool
-            Pool::OrcaWhirlpool(p) => p.get_quote_with_rpc(token_in_mint, amount_in, rpc_client).await,
-
-            // TODO: Implémenter la logique async pour CLMM
-            Pool::MeteoraDlmm(p) => p.get_quote_with_rpc(token_in_mint, amount_in, rpc_client).await,
-
-            // Pour les pools simples, on appelle simplement leur version synchrone
-            _ => self.get_quote(token_in_mint, amount_in, 0),
         }
     }
 

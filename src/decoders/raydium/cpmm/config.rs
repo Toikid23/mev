@@ -15,6 +15,7 @@ pub struct DecodedAmmConfig {
     pub trade_fee_rate: u64,
     pub protocol_fee_rate: u64,
     pub fund_fee_rate: u64,
+    pub creator_fee_rate: u64,
 }
 
 // --- STRUCTURE DE DONNÉES BRUTES (Miroir exact de l'IDL) ---
@@ -22,7 +23,7 @@ pub struct DecodedAmmConfig {
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 struct AmmConfigData {
     pub bump: u8,
-    pub disable_create_pool: u8, // bool est 1 byte
+    pub disable_create_pool: u8,
     pub index: u16,
     pub trade_fee_rate: u64,
     pub protocol_fee_rate: u64,
@@ -30,7 +31,10 @@ struct AmmConfigData {
     pub create_pool_fee: u64,
     pub protocol_owner: Pubkey,
     pub fund_owner: Pubkey,
-    pub padding: [u64; 16],
+    // Le code source de Raydium confirme que `creator_fee_rate` est ici.
+    pub creator_fee_rate: u64,
+    // Le padding est donc réduit. (16 * 8) - 8 = 120 bytes = 15 * 8
+    pub padding: [u64; 15],
 }
 
 /// Tente de décoder les données brutes d'un compte Raydium AmmConfig.
@@ -59,5 +63,7 @@ pub fn decode_config(data: &[u8]) -> Result<DecodedAmmConfig> {
         trade_fee_rate: config_struct.trade_fee_rate,
         protocol_fee_rate: config_struct.protocol_fee_rate,
         fund_fee_rate: config_struct.fund_fee_rate,
+        creator_fee_rate: config_struct.creator_fee_rate,
+
     })
 }

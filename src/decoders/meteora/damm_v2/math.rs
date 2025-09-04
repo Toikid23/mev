@@ -4,6 +4,9 @@ use super::pool::onchain_layouts; // Pour accéder aux structs de frais
 
 construct_uint! { pub struct U256(4); }
 
+
+
+
 // --- Fonctions de calcul des frais ---
 
 pub fn get_base_fee(base_fee: &onchain_layouts::BaseFeeStruct, current_timestamp: i64, activation_point: u64) -> Result<u64> {
