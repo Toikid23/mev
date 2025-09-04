@@ -179,15 +179,18 @@ fn find_next_initialized_tick<'a>(
 
         if let Some(array_data) = tick_arrays.get(&current_array_start_index) {
             let array_offset = ((current_tick_index - current_array_start_index) / tick_spacing).clamp(0, tick_array::TICK_ARRAY_SIZE as i32 - 1);
-            // On cherche le prochain tick initialisé *avant* l'offset actuel
+            // On cherche le prochain tick initialisé *avant* l'offset actuel.
+            // La boucle commence à array_offset - 1.
             for i in (0..array_offset).rev() {
                 let tick_data = &array_data.ticks[i as usize];
+                // La seule condition est que le tick soit initialisé.
                 if tick_data.initialized == 1 {
                     return Some((current_array_start_index + i * tick_spacing, tick_data));
                 }
             }
         }
 
+        // On continue sur les arrays précédents
         for (start_tick, array_data) in tick_arrays.range(..current_array_start_index).rev() {
             for i in (0..tick_array::TICK_ARRAY_SIZE).rev() {
                 let tick_data = &array_data.ticks[i];
@@ -210,6 +213,7 @@ fn find_next_initialized_tick<'a>(
             }
         }
 
+        // On continue sur les arrays suivants
         for (start_tick, array_data) in tick_arrays.range(current_array_start_index + 1..) {
             for i in 0..tick_array::TICK_ARRAY_SIZE {
                 let tick_data = &array_data.ticks[i];
@@ -498,7 +502,7 @@ impl PoolOperations for DecodedWhirlpoolPool {
         let user_ata_for_token_a = get_associated_token_address(&user_accounts.owner, &self.mint_a);
         let user_ata_for_token_b = get_associated_token_address(&user_accounts.owner, &self.mint_b);
 
-        let accounts = vec![
+        let mut accounts = vec![
             AccountMeta::new_readonly(spl_token::id(), false),
             AccountMeta::new_readonly(user_accounts.owner, true),
             AccountMeta::new(self.address, false),
@@ -511,6 +515,11 @@ impl PoolOperations for DecodedWhirlpoolPool {
             AccountMeta::new(tick_array_addresses[2], false),
             AccountMeta::new_readonly(oracle_pda, false),
         ];
+
+        // --- LA CORRECTION EST ICI ---
+        // On ajoute le Clock sysvar, qui est attendu par l'instruction de swap
+        // pour valider le timestamp.
+        accounts.push(AccountMeta::new_readonly(solana_sdk::sysvar::clock::ID, false));
 
         Ok(Instruction {
             program_id: self.program_id,
