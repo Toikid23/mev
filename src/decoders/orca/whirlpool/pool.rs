@@ -384,7 +384,7 @@ impl PoolOperations for DecodedWhirlpoolPool {
 
         // --- LA CORRECTION EST ICI ---
         // On ajoute une petite marge de sécurité pour contrer les erreurs d'arrondi "off-by-one".
-        final_amount_in = final_amount_in.saturating_add(3);
+        final_amount_in = final_amount_in.saturating_add(4);
 
         Ok(final_amount_in as u64)
     }
