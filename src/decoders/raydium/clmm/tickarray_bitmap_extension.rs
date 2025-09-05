@@ -1,9 +1,6 @@
-// Fichier : src/decoders/raydium_decoders/tickarray_bitmap_extension.rs
-
 use bytemuck::{Pod, Zeroable, from_bytes};
 use solana_sdk::pubkey::Pubkey;
 use anyhow::{Result, bail};
-use std::mem;
 
 #[repr(C, packed)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
@@ -25,11 +22,11 @@ pub fn decode_tick_array_bitmap_extension(data: &[u8]) -> Result<DecodedTickArra
     }
 
     let data_slice = &data[8..];
-    if data_slice.len() < mem::size_of::<TickArrayBitmapExtensionData>() {
+    if data_slice.len() < size_of::<TickArrayBitmapExtensionData>() {
         bail!("Données de TickArrayBitmapExtension trop courtes.");
     }
 
-    let bitmap_struct: &TickArrayBitmapExtensionData = from_bytes(&data_slice[..mem::size_of::<TickArrayBitmapExtensionData>()]);
+    let bitmap_struct: &TickArrayBitmapExtensionData = from_bytes(&data_slice[..size_of::<TickArrayBitmapExtensionData>()]);
 
     // On copie les données pour éviter les problèmes d'alignement
     let negative_bitmap = bitmap_struct.negative_tick_array_bitmap;

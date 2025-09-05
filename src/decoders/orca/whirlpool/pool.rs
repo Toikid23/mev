@@ -82,7 +82,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedWhirlpoolPool
     }
 
     let data_slice = &data[8..];
-    let expected_size = std::mem::size_of::<WhirlpoolData>();
+    let expected_size = size_of::<WhirlpoolData>();
     if data_slice.len() < expected_size {
         bail!("Whirlpool data length mismatch.");
     }

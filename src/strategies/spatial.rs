@@ -206,10 +206,10 @@ fn find_optimal_arbitrage(
                 pool_buy_from_key: pool_buy_from.address(),
                 pool_sell_to_key: pool_sell_to.address(),
             };
-            if hit_the_wall {
-                return Some(OptimizationResult::HitTheWall(opportunity));
+            return if hit_the_wall {
+                Some(OptimizationResult::HitTheWall(opportunity))
             } else {
-                return Some(OptimizationResult::Optimal(opportunity));
+                Some(OptimizationResult::Optimal(opportunity))
             }
         }
     }

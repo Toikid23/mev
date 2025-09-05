@@ -82,7 +82,7 @@ pub struct StableSwapAmmInfoData {
 /// Décode le compte principal d'un pool Stable Swap.
 /// Retourne une structure PARTIELLE qui doit être complétée par le ModelDataAccount.
 pub fn decode_pool_info(_address: &Pubkey, data: &[u8]) -> Result<(StableSwapAmmInfoData, f64)> {
-    if data.len() != std::mem::size_of::<StableSwapAmmInfoData>() {
+    if data.len() != size_of::<StableSwapAmmInfoData>() {
         bail!("Stable Swap Pool data length mismatch.");
     }
     let pool_struct: &StableSwapAmmInfoData = from_bytes(data);
@@ -164,7 +164,7 @@ impl PoolOperations for DecodedStableSwapPool {
         instruction_data.extend_from_slice(&amount_in.to_le_bytes());
         instruction_data.extend_from_slice(&min_amount_out.to_le_bytes());
 
-        let (pool_authority, _) = Pubkey::find_program_address(&[b"amm_authority"], &Pubkey::from_str("SSwpkEEcbUqx4vtoEsgK9bGAoTVis3ZMrBPyGZ5eebT").unwrap());
+        let (pool_authority, _) = Pubkey::find_program_address(&[b"amm_authority"], &Pubkey::from_str("SSwpkEEcbUqx4vtoEsgK9bGAoTVis3ZMrBPyGZ5eebT")?);
 
         // Le compte de frais de l'admin est l'ATA du token de SORTIE, possédé par l'autorité du pool.
         let admin_fee_account = if *token_in_mint == self.mint_a {
@@ -187,7 +187,7 @@ impl PoolOperations for DecodedStableSwapPool {
         ];
 
         Ok(Instruction {
-            program_id: Pubkey::from_str("SSwpkEEcbUqx4vtoEsgK9bGAoTVis3ZMrBPyGZ5eebT").unwrap(),
+            program_id: Pubkey::from_str("SSwpkEEcbUqx4vtoEsgK9bGAoTVis3ZMrBPyGZ5eebT")?,
             accounts,
             data: instruction_data,
         })

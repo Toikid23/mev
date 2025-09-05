@@ -95,14 +95,14 @@ pub fn get_next_sqrt_price_from_amount_x_in(sqrt_price: u128, liquidity: u128, a
         if product / U256::from(amount_in) == U256::from(sqrt_price) {
             let denominator = numerator + product;
             if denominator >= numerator {
-                return (numerator.mul_div_ceil(U256::from(sqrt_price), denominator).unwrap()).as_u128();
+                return numerator.mul_div_ceil(U256::from(sqrt_price), denominator).unwrap().as_u128();
             }
         }
         (numerator / (numerator / U256::from(sqrt_price) + U256::from(amount_in))).as_u128()
     } else {
         let product = U256::from(amount_in) * U256::from(sqrt_price);
         let denominator = numerator.checked_sub(product).unwrap();
-        (numerator.mul_div_ceil(U256::from(sqrt_price), denominator).unwrap()).as_u128()
+        numerator.mul_div_ceil(U256::from(sqrt_price), denominator).unwrap().as_u128()
     }
 }
 
@@ -113,7 +113,7 @@ pub fn get_next_sqrt_price_from_amount_y_in(sqrt_price: u128, liquidity: u128, a
         (U256::from(sqrt_price) + quotient).as_u128()
     } else {
         let quotient = (U256::from(amount_in) << BITS).div_ceil(U256::from(liquidity));
-        (U256::from(sqrt_price).checked_sub(quotient).unwrap()).as_u128()
+        U256::from(sqrt_price).checked_sub(quotient).unwrap().as_u128()
     }
 }
 
@@ -128,7 +128,7 @@ pub fn get_sqrt_price_from_amount_x_out(sqrt_price_current: u128, liquidity: u12
     if liquidity == 0 || amount_out == 0 { return sqrt_price_current; }
     let numerator = U256::from(liquidity) << BITS;
     let denominator = (numerator / U256::from(sqrt_price_current)).checked_add(U256::from(amount_out)).unwrap();
-    (numerator.div_ceil(denominator)).as_u128()
+    numerator.div_ceil(denominator).as_u128()
 }
 
 pub fn compute_swap_step(

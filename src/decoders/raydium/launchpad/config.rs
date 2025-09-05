@@ -47,10 +47,10 @@ pub fn decode_global_config(data: &[u8]) -> Result<DecodedGlobalConfig> {
 
     let data_slice = &data[8..];
 
-    if data_slice.len() != std::mem::size_of::<GlobalConfigData>() {
+    if data_slice.len() != size_of::<GlobalConfigData>() {
         bail!(
             "GlobalConfig data length mismatch. Expected {}, got {}.",
-            std::mem::size_of::<GlobalConfigData>(),
+            size_of::<GlobalConfigData>(),
             data_slice.len()
         );
     }

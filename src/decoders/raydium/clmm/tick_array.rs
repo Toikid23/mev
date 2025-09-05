@@ -1,10 +1,6 @@
-// Fichier : src/decoders/raydium_decoders/tick_array.rs
-// STATUT : VERSION FINALE DE DÉBOGAGE ET DE CORRECTION
-
 use bytemuck::{from_bytes, Pod, Zeroable};
 use solana_sdk::pubkey::Pubkey;
 use anyhow::{Result, bail};
-use std::mem;
 use serde::{Serialize, Deserialize};
 
 pub const TICK_ARRAY_SIZE: usize = 60;
@@ -66,7 +62,7 @@ pub fn decode_tick_array(data: &[u8]) -> Result<TickArrayState> {
 
     // --- DÉBOGAGE DU DISCRIMINATEUR ---
     if data.len() >= 8 {
-        let _received_discriminator: [u8; 8] = data[..8].try_into().unwrap();
+        let _received_discriminator: [u8; 8] = data[..8].try_into()?;
     }
     // --- FIN DU DÉBOGAGE ---
 
@@ -75,10 +71,10 @@ pub fn decode_tick_array(data: &[u8]) -> Result<TickArrayState> {
     }
 
     let data_slice = &data[8..];
-    if data_slice.len() != mem::size_of::<TickArrayState>() {
+    if data_slice.len() != size_of::<TickArrayState>() {
         bail!(
             "Taille de données de TickArray invalide. Attendu {}, reçu {}.",
-            mem::size_of::<TickArrayState>(),
+            size_of::<TickArrayState>(),
             data_slice.len()
         );
     }
@@ -92,7 +88,7 @@ pub fn decode_tick_array(data: &[u8]) -> Result<TickArrayState> {
     let start_tick_index = i32::from_le_bytes(start_tick_bytes);
     offset += 4;
     let mut ticks = [TickState::default(); TICK_ARRAY_SIZE];
-    let tick_data_size = mem::size_of::<TickState>();
+    let tick_data_size = size_of::<TickState>();
     for i in 0..TICK_ARRAY_SIZE {
         let start = offset + i * tick_data_size;
         let end = start + tick_data_size;

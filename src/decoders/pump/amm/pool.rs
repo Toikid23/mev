@@ -85,8 +85,8 @@ pub mod onchain_layouts {
 pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedPumpAmmPool> {
     if data.get(..8) != Some(&POOL_ACCOUNT_DISCRIMINATOR) { bail!("Invalid discriminator."); }
     let data_slice = &data[8..];
-    if data_slice.len() < std::mem::size_of::<onchain_layouts::Pool>() { bail!("Data length mismatch."); }
-    let pool_struct: &onchain_layouts::Pool = bytemuck::from_bytes(&data_slice[..std::mem::size_of::<onchain_layouts::Pool>()]);
+    if data_slice.len() < size_of::<onchain_layouts::Pool>() { bail!("Data length mismatch."); }
+    let pool_struct: &onchain_layouts::Pool = bytemuck::from_bytes(&data_slice[..size_of::<onchain_layouts::Pool>()]);
 
     Ok(DecodedPumpAmmPool {
         address: *address, creator: pool_struct.creator, mint_a: pool_struct.base_mint,
@@ -129,7 +129,7 @@ pub async fn hydrate(pool: &mut DecodedPumpAmmPool, rpc_client: &RpcClient) -> R
     let global_config_data = accounts_data[4].take().ok_or_else(|| anyhow!("GlobalConfig not found"))?.data;
     if global_config_data.get(..8) != Some(&GLOBAL_CONFIG_ACCOUNT_DISCRIMINATOR) { bail!("Invalid GlobalConfig discriminator"); }
     let config_data_slice = &global_config_data[8..];
-    pool.global_config = *bytemuck::from_bytes(&config_data_slice[..std::mem::size_of::<onchain_layouts::GlobalConfig>()]);
+    pool.global_config = *bytemuck::from_bytes(&config_data_slice[..size_of::<onchain_layouts::GlobalConfig>()]);
     pool.protocol_fee_recipients = pool.global_config.protocol_fee_recipients;
 
     if let Some(fee_config_account) = accounts_data[5].take() {
@@ -168,11 +168,11 @@ fn is_pump_pool(base_mint: &Pubkey, pool_creator: &Pubkey) -> bool {
 // CORRECTION : La fonction n'est plus `async` et n'a plus besoin du `rpc_client`.
 fn compute_fees_bps(pool: &DecodedPumpAmmPool, base_mint_supply: u64, _trade_size: u64) -> Result<DecodedFees> {
     if let Some(fee_config) = &pool.fee_config {
-        if is_pump_pool(&pool.mint_a, &pool.creator) {
+        return if is_pump_pool(&pool.mint_a, &pool.creator) {
             let market_cap = pool_market_cap(base_mint_supply, pool.reserve_a, pool.reserve_b)?;
-            return Ok(calculate_fee_tier(&fee_config.fee_tiers, market_cap));
+            Ok(calculate_fee_tier(&fee_config.fee_tiers, market_cap))
         } else {
-            return Ok(fee_config.flat_fees.clone());
+            Ok(fee_config.flat_fees.clone())
         }
     }
     Ok(DecodedFees {

@@ -90,7 +90,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedLaunchpadPool
         bail!("Invalid discriminator.");
     }
     let data_slice = &data[8..];
-    if data_slice.len() != std::mem::size_of::<PoolStateData>() {
+    if data_slice.len() != size_of::<PoolStateData>() {
         bail!("Data length mismatch.");
     }
     let pool_struct: &PoolStateData = from_bytes(data_slice);
@@ -186,7 +186,7 @@ impl PoolOperations for DecodedLaunchpadPool {
 
         // --- 4. Appliquer les frais de transfert sur l'OUTPUT ---
         let fee_on_output = (amount_out_after_pool_fee * out_mint_fee_bps as u128) / 10000;
-        let final_amount_out = (amount_out_after_pool_fee).saturating_sub(fee_on_output);
+        let final_amount_out = amount_out_after_pool_fee.saturating_sub(fee_on_output);
 
         Ok(final_amount_out as u64)
     }
@@ -228,7 +228,7 @@ impl PoolOperations for DecodedLaunchpadPool {
         ];
 
         Ok(Instruction {
-            program_id: Pubkey::from_str("LPadV31sBCi2t5tWvN2b7N66aYhM6fw21n5v9r2i").unwrap(),
+            program_id: Pubkey::from_str("LPadV31sBCi2t5tWvN2b7N66aYhM6fw21n5v9r2i")?,
             accounts,
             data: instruction_data,
         })

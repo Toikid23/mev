@@ -37,10 +37,10 @@ pub fn decode_config(data: &[u8]) -> Result<DecodedClmmConfig> {
     }
 
     let data_slice = &data[8..];
-    if data_slice.len() != std::mem::size_of::<ClmmAmmConfigData>() {
+    if data_slice.len() != size_of::<ClmmAmmConfigData>() {
         bail!(
             "CLMM AmmConfig data length mismatch. Expected {}, got {}.",
-            std::mem::size_of::<ClmmAmmConfigData>(),
+            size_of::<ClmmAmmConfigData>(),
             data_slice.len()
         );
     }

@@ -60,12 +60,12 @@ impl DecodedClmmPool {
         }
 
         const FEE_RATE_DENOMINATOR_VALUE: u64 = 1_000_000;
-        let fee_amount = (amount_in as u64).mul_div_ceil(
+        let fee_amount = amount_in.mul_div_ceil(
             self.trade_fee_rate as u64,
             FEE_RATE_DENOMINATOR_VALUE
         ).ok_or_else(|| anyhow!("Math overflow"))?;
 
-        let mut amount_remaining = amount_in.saturating_sub(fee_amount as u64) as u128;
+        let mut amount_remaining = amount_in.saturating_sub(fee_amount) as u128;
 
         let mut total_amount_out: u128 = 0;
         let mut current_sqrt_price = self.sqrt_price_x64;
@@ -206,8 +206,8 @@ pub fn decode_pool(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Result
     const DISCRIMINATOR: [u8; 8] = [247, 237, 227, 245, 215, 195, 222, 70];
     if data.get(..8) != Some(&DISCRIMINATOR) { bail!("Invalid PoolState discriminator."); }
     let data_slice = &data[8..];
-    if data_slice.len() < std::mem::size_of::<PoolState>() { bail!("PoolState data length mismatch."); }
-    let pool_struct: &PoolState = from_bytes(&data_slice[..std::mem::size_of::<PoolState>()]);
+    if data_slice.len() < size_of::<PoolState>() { bail!("PoolState data length mismatch."); }
+    let pool_struct: &PoolState = from_bytes(&data_slice[..size_of::<PoolState>()]);
 
     Ok(DecodedClmmPool {
         address: *address,
@@ -263,8 +263,8 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &RpcClient) -> Resu
     const POOL_STATE_DISCRIMINATOR: [u8; 8] = [247, 237, 227, 245, 215, 195, 222, 70];
     if pool_state_data.get(..8) != Some(&POOL_STATE_DISCRIMINATOR) { bail!("Invalid PoolState discriminator during hydration."); }
     let data_slice = &pool_state_data[8..];
-    if data_slice.len() < std::mem::size_of::<PoolState>() { bail!("PoolState data is too short."); }
-    let pool_state_struct: &PoolState = from_bytes(&data_slice[..std::mem::size_of::<PoolState>()]);
+    if data_slice.len() < size_of::<PoolState>() { bail!("PoolState data is too short."); }
+    let pool_state_struct: &PoolState = from_bytes(&data_slice[..size_of::<PoolState>()]);
 
     let default_bitmap = pool_state_struct.tick_array_bitmap;
     let extension_bitmap_words = if let Ok(account) = bitmap_ext_res {
@@ -274,7 +274,7 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &RpcClient) -> Resu
     };
 
     let mut addresses_to_fetch = HashSet::new();
-    let multiplier = (tick_array::TICK_ARRAY_SIZE as i32) * (pool.tick_spacing as i32);
+    let multiplier = (TICK_ARRAY_SIZE as i32) * (pool.tick_spacing as i32);
     let ticks_in_one_bitmap = 512 * multiplier;
 
     for (word_index, &word) in default_bitmap.iter().enumerate() {

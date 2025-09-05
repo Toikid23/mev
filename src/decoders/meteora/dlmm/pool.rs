@@ -15,7 +15,7 @@ use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 use crate::decoders::pool_operations::find_input_by_binary_search;
 
 // --- CONSTANTES ---
-pub const PROGRAM_ID: pubkey::Pubkey = pubkey!("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo");
+pub const PROGRAM_ID: Pubkey = pubkey!("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo");
 const MAX_BIN_PER_ARRAY: usize = 70;
 const BIN_ARRAY_SEED: &[u8] = b"bin_array";
 

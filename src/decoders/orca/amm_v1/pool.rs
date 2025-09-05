@@ -3,15 +3,13 @@ use anyhow::{anyhow, bail, Result};
 use bytemuck::{from_bytes, Pod, Zeroable};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
-use std::mem;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 use solana_sdk::instruction::{AccountMeta, Instruction};
 use std::str::FromStr;
 
-// NOTE: Cette structure est intentionnellement quasi-identique à celle de la V2,
-// car les layouts on-chain sont compatibles.
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecodedOrcaAmmV1Pool {
     pub address: Pubkey,
@@ -69,7 +67,7 @@ mod onchain_layouts {
 }
 
 pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedOrcaAmmV1Pool> {
-    let struct_len = mem::size_of::<onchain_layouts::OrcaTokenSwapV1PoolData>();
+    let struct_len = size_of::<onchain_layouts::OrcaTokenSwapV1PoolData>();
     if data.len() != struct_len + 1 {
         bail!(
             "Invalid data length for Orca V1 Pool. Expected {} bytes, got {}",
@@ -221,7 +219,7 @@ impl PoolOperations for DecodedOrcaAmmV1Pool {
 
         let (pool_authority, _) = Pubkey::find_program_address(
             &[&self.address.to_bytes()],
-            &Pubkey::from_str("9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP").unwrap(), // Programme Token Swap V1
+            &Pubkey::from_str("9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP")?, // Programme Token Swap V1
         );
 
         // Le programme Orca AMM V1/V2 utilise le programme Token Swap sous-jacent.
@@ -234,8 +232,8 @@ impl PoolOperations for DecodedOrcaAmmV1Pool {
             AccountMeta::new(user_accounts.destination, false),
             AccountMeta::new(self.vault_a, false),
             AccountMeta::new(self.vault_b, false),
-            AccountMeta::new(Pubkey::from_str("3wVrtQZ4C4H4D2E2zwy622m5Kjw3z1h76hA6F2SCL2sE").unwrap(), false), // Pool Mint (statique pour ce pool)
-            AccountMeta::new(Pubkey::from_str("54q2ctpQ35a93r5wsd4p5a7Yw5f2s4ZifbUTk2MCR2Gq").unwrap(), false), // Fee Account (statique pour ce pool)
+            AccountMeta::new(Pubkey::from_str("3wVrtQZ4C4H4D2E2zwy622m5Kjw3z1h76hA6F2SCL2sE")?, false), // Pool Mint (statique pour ce pool)
+            AccountMeta::new(Pubkey::from_str("54q2ctpQ35a93r5wsd4p5a7Yw5f2s4ZifbUTk2MCR2Gq")?, false), // Fee Account (statique pour ce pool)
             AccountMeta::new_readonly(spl_token::id(), false),
         ];
 

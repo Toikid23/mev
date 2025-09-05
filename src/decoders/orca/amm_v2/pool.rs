@@ -2,7 +2,6 @@ use crate::decoders::spl_token_decoders;
 use anyhow::{anyhow, bail, Result};
 use bytemuck::{from_bytes, Pod, Zeroable};
 use solana_client::nonblocking::rpc_client::RpcClient;
-use std::mem;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
@@ -73,7 +72,7 @@ mod onchain_layouts {
 
 // --- LA CORRECTION EST DANS CETTE FONCTION ---
 pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedOrcaAmmPool> {
-    let struct_len = mem::size_of::<onchain_layouts::OrcaTokenSwapV2PoolData>(); // = 323 bytes
+    let struct_len = size_of::<onchain_layouts::OrcaTokenSwapV2PoolData>(); // = 323 bytes
 
     // On s'attend maintenant à ce que les données on-chain fassent la taille de notre struct + 1 byte de préfixe.
     if data.len() != struct_len + 1 { // 324 bytes
@@ -241,7 +240,7 @@ impl PoolOperations for DecodedOrcaAmmPool {
         // Le programme V2 utilise une adresse de programme différente pour trouver l'autorité
         let (pool_authority, _) = Pubkey::find_program_address(
             &[&self.address.to_bytes()],
-            &Pubkey::from_str("DjVE6JNiYqPL2QXyCUUh8rNjHrbz9hXHNYt99MQ59qw1").unwrap(), // Programme Token Swap V2
+            &Pubkey::from_str("DjVE6JNiYqPL2QXyCUUh8rNjHrbz9hXHNYt99MQ59qw1")?, // Programme Token Swap V2
         );
 
         let accounts = vec![
@@ -252,13 +251,13 @@ impl PoolOperations for DecodedOrcaAmmPool {
             AccountMeta::new(user_accounts.destination, false),
             AccountMeta::new(self.vault_a, false),
             AccountMeta::new(self.vault_b, false),
-            AccountMeta::new(Pubkey::from_str("3wVrtQZ4C4H4D2E2zwy622m5Kjw3z1h76hA6F2SCL2sE").unwrap(), false), // Pool Mint (statique pour ce pool)
-            AccountMeta::new(Pubkey::from_str("54q2ctpQ35a93r5wsd4p5a7Yw5f2s4ZifbUTk2MCR2Gq").unwrap(), false), // Fee Account (statique pour ce pool)
+            AccountMeta::new(Pubkey::from_str("3wVrtQZ4C4H4D2E2zwy622m5Kjw3z1h76hA6F2SCL2sE")?, false), // Pool Mint (statique pour ce pool)
+            AccountMeta::new(Pubkey::from_str("54q2ctpQ35a93r5wsd4p5a7Yw5f2s4ZifbUTk2MCR2Gq")?, false), // Fee Account (statique pour ce pool)
             AccountMeta::new_readonly(spl_token::id(), false),
         ];
 
         Ok(Instruction {
-            program_id: Pubkey::from_str("DjVE6JNiYqPL2QXyCUUh8rNjHrbz9hXHNYt99MQ59qw1").unwrap(), // Programme Token Swap V2
+            program_id: Pubkey::from_str("DjVE6JNiYqPL2QXyCUUh8rNjHrbz9hXHNYt99MQ59qw1")?, // Programme Token Swap V2
             accounts,
             data: instruction_data,
         })

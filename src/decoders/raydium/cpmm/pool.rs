@@ -97,17 +97,17 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedCpmmPool> {
 
     // Étape 2: Vérifier que les données sont AU MOINS assez longues.
     // Cela nous protège contre les données corrompues et permet les futures mises à jour du programme.
-    if data_slice.len() < std::mem::size_of::<CpmmPoolStateData>() {
+    if data_slice.len() < size_of::<CpmmPoolStateData>() {
         bail!(
             "CPMM PoolState data length mismatch. Expected at least {}, got {}.",
-            std::mem::size_of::<CpmmPoolStateData>(),
+            size_of::<CpmmPoolStateData>(),
             data_slice.len()
         );
     }
 
     // Étape 3: "Caster" les données en utilisant la taille de notre struct.
     // On ignore les octets supplémentaires s'il y en a.
-    let pool_struct: &CpmmPoolStateData = from_bytes(&data_slice[..std::mem::size_of::<CpmmPoolStateData>()]);
+    let pool_struct: &CpmmPoolStateData = from_bytes(&data_slice[..size_of::<CpmmPoolStateData>()]);
 
     // Étape 4: Créer la sortie propre et unifiée
     Ok(DecodedCpmmPool {
@@ -346,7 +346,7 @@ pub async fn hydrate(pool: &mut DecodedCpmmPool, rpc_client: &RpcClient) -> Resu
         bail!("Discriminator de PoolState invalide lors de l'hydratation.");
     }
     let data_slice = &pool_account_data[8..];
-    let pool_struct: &CpmmPoolStateData = from_bytes(&data_slice[..std::mem::size_of::<CpmmPoolStateData>()]);
+    let pool_struct: &CpmmPoolStateData = from_bytes(&data_slice[..size_of::<CpmmPoolStateData>()]);
     pool.enable_creator_fee = pool_struct.enable_creator_fee == 1;
 
     // Décodage des vaults pour les réserves

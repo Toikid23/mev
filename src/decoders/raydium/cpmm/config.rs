@@ -47,10 +47,10 @@ pub fn decode_config(data: &[u8]) -> Result<DecodedAmmConfig> {
     let data_slice = &data[8..];
 
     // Étape 2: Vérifier la taille
-    if data_slice.len() != std::mem::size_of::<AmmConfigData>() {
+    if data_slice.len() != size_of::<AmmConfigData>() {
         bail!(
             "AmmConfig data length mismatch. Expected {}, got {}.",
-            std::mem::size_of::<AmmConfigData>(),
+            size_of::<AmmConfigData>(),
             data_slice.len()
         );
     }

@@ -31,10 +31,10 @@ pub fn parse_swap_event_from_logs(logs: &[String], is_base_input: bool) -> Optio
                     if let Ok(event) = SwapEvent::try_from_slice(&mut event_data) {
                         // Si l'input est le token de base (A), la sortie est `amount_1` (token B)
                         // Sinon, la sortie est `amount_0` (token A)
-                        if is_base_input {
-                            return Some(event.amount_1);
+                        return if is_base_input {
+                            Some(event.amount_1)
                         } else {
-                            return Some(event.amount_0);
+                            Some(event.amount_0)
                         }
                     }
                 }

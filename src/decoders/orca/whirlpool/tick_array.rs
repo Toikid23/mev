@@ -1,9 +1,6 @@
-// DANS: src/decoders/orca_decoders/tick_array.rs
-
 use bytemuck::{Pod, Zeroable};
 use solana_sdk::pubkey::Pubkey;
 use anyhow::{Result, ensure};
-use std::mem;
 use serde::{Serialize, Deserialize};
 
 pub const TICK_ARRAY_SIZE: usize = 88;
@@ -58,7 +55,7 @@ pub fn decode_tick_array(data: &[u8]) -> Result<TickArrayData> {
     ensure!(data.get(..8) == Some(&CORRECT_DISCRIMINATOR), "Invalid TickArray discriminator");
 
     let data_slice = &data[8..];
-    let expected_size = mem::size_of::<TickArrayData>();
+    let expected_size = size_of::<TickArrayData>();
     ensure!(data_slice.len() >= expected_size, "TickArray data length mismatch");
 
     let mut offset = 0;
@@ -68,7 +65,7 @@ pub fn decode_tick_array(data: &[u8]) -> Result<TickArrayData> {
     offset += 4;
 
     let mut ticks = [TickData::default(); TICK_ARRAY_SIZE];
-    let tick_data_size = mem::size_of::<TickData>();
+    let tick_data_size = size_of::<TickData>();
     for i in 0..TICK_ARRAY_SIZE {
         let start = offset + i * tick_data_size;
         let end = start + tick_data_size;
