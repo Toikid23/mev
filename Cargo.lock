@@ -2522,6 +2522,7 @@ dependencies = [
  "spl-associated-token-account 7.0.0",
  "spl-math",
  "spl-memo",
+ "spl-stake-pool",
  "spl-token 8.0.0",
  "spl-token-2022 9.0.0",
  "tokio",
@@ -6357,6 +6358,30 @@ dependencies = [
  "quote",
  "sha2 0.10.9",
  "syn 2.0.104",
+]
+
+[[package]]
+name = "spl-stake-pool"
+version = "2.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f0db03f091f43b5766296e80088718491b50949cd3eb4cce3e0cfed58fe2c18"
+dependencies = [
+ "arrayref",
+ "bincode",
+ "borsh 1.5.7",
+ "bytemuck",
+ "num-derive 0.4.2",
+ "num-traits",
+ "num_enum 0.7.4",
+ "serde",
+ "serde_derive",
+ "solana-program 2.3.0",
+ "solana-security-txt",
+ "solana-stake-interface",
+ "solana-system-interface",
+ "spl-pod",
+ "spl-token-2022 9.0.0",
+ "thiserror 2.0.12",
 ]
 
 [[package]]
