@@ -1,5 +1,6 @@
 use borsh::BorshDeserialize;
 use solana_sdk::pubkey::Pubkey;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 #[derive(BorshDeserialize, Debug)]
 pub struct DammSwapResult {
@@ -27,7 +28,7 @@ pub fn parse_damm_swap_event_from_logs(logs: &[String]) -> Option<u64> {
 
     for log in logs {
         if let Some(data_str) = log.strip_prefix("Program data: ") {
-            if let Ok(bytes) = base64::decode(data_str) {
+            if let Ok(bytes) = STANDARD.decode(data_str) {
                 if bytes.len() > 8 && bytes.starts_with(&SWAP_EVENT_DISCRIMINATOR) {
                     let event_data = &bytes[8..];
 

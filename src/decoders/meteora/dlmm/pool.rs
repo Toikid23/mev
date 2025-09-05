@@ -2,19 +2,16 @@
 use crate::decoders::spl_token_decoders;
 use super::math::{self, FEE_PRECISION};
 use anyhow::{anyhow, bail, Result};
-// Correction du warning "unused_import": `from_bytes` a été enlevé
 use bytemuck::{pod_read_unaligned, Pod, Zeroable};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::BTreeMap;
 use std::mem;
-use solana_sdk::instruction::{Instruction, AccountMeta}; // Assurez-vous que ces imports sont présents en haut du fichier.
-use spl_associated_token_account::get_associated_token_address_with_program_id;
+use solana_sdk::instruction::{Instruction, AccountMeta};
 use solana_sdk::pubkey;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
-use num_integer::Integer;
 
 // --- CONSTANTES ---
 pub const PROGRAM_ID: pubkey::Pubkey = pubkey!("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo");
@@ -177,7 +174,7 @@ impl DecodedDlmmPool {
             update_volatility_accumulator(&mut temp_v_params, &self.parameters, self.active_bin_id, current_bin_id)?;
             let total_fee_rate = get_total_fee(self.bin_step, &self.parameters, &temp_v_params)?;
 
-            let (out_reserve, in_reserve_for_out) = if swap_for_y {
+            let (out_reserve, _in_reserve_for_out) = if swap_for_y {
                 (current_bin.amount_b, current_bin.amount_a)
             } else {
                 (current_bin.amount_a, current_bin.amount_b)
@@ -659,13 +656,6 @@ fn get_total_fee(bin_step: u16, s_params: &onchain_layouts::StaticParameters, v_
     Ok(total_fee_rate.min(MAX_FEE_RATE))
 }
 
-fn compute_amount_in_with_fees(amount_in: u128, total_fee_rate: u128) -> Result<u128> {
-    let denominator = FEE_PRECISION.saturating_sub(total_fee_rate);
-    if denominator == 0 { return Ok(u128::MAX); }
-    amount_in.checked_mul(FEE_PRECISION).ok_or_else(|| anyhow!("MathOverflow"))?
-        .checked_add(denominator - 1).ok_or_else(|| anyhow!("MathOverflow"))?
-        .checked_div(denominator).ok_or_else(|| anyhow!("MathOverflow"))
-}
 
 fn update_references(v_params: &mut onchain_layouts::VariableParameters, s_params: &onchain_layouts::StaticParameters, active_id: i32, current_timestamp: i64) -> Result<()> {
     let elapsed = current_timestamp.checked_sub(v_params.last_update_timestamp).ok_or_else(|| anyhow!("MathOverflow: timestamp diff"))?;
@@ -683,7 +673,7 @@ fn update_references(v_params: &mut onchain_layouts::VariableParameters, s_param
 }
 
 // Correction du warning "unused_variable": `start_id` a été enlevé
-fn update_volatility_accumulator(v_params: &mut onchain_layouts::VariableParameters, s_params: &onchain_layouts::StaticParameters, start_id: i32, end_id: i32) -> Result<()> {
+fn update_volatility_accumulator(v_params: &mut onchain_layouts::VariableParameters, s_params: &onchain_layouts::StaticParameters, _start_id: i32, end_id: i32) -> Result<()> {
     // La distance parcourue DEPUIS LA RÉFÉRENCE, pas depuis le début du swap.
     let delta_id = (i64::from(v_params.index_reference) - i64::from(end_id)).unsigned_abs();
 
@@ -697,15 +687,6 @@ fn update_volatility_accumulator(v_params: &mut onchain_layouts::VariableParamet
     Ok(())
 }
 
-fn get_price_from_bin_id(bin_id: i32, bin_step: u16) -> u128 {
-    let price_per_token = 1.0001f64;
-    let tick_price = price_per_token.powi(bin_id * bin_step as i32);
-    (tick_price * (1u128 << 64) as f64) as u128
-}
-
-
-
-// ... (le module onchain_layouts reste inchangé)
 mod onchain_layouts {
     use super::*;
 

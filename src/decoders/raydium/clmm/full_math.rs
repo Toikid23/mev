@@ -1,7 +1,4 @@
-// Fichier : src/decoders/raydium/clmm/full_math.rs (VERSION FINALE CENTRALISÉE)
-
 use uint::{construct_uint};
-use num_integer::Integer; // Nécessaire pour u128::div_ceil
 
 construct_uint! { pub struct U128(2); }
 construct_uint! { pub struct U256(4); }

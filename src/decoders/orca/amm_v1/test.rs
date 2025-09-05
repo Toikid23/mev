@@ -18,7 +18,7 @@ use crate::decoders::orca::amm_v1::{decode_pool, hydrate};
 // --- Supprimer l'ancienne fonction print_quote_result ---
 
 // --- Remplacer toute la fonction de test ---
-pub async fn test_orca_amm_v1(rpc_client: &RpcClient, payer: &Keypair, current_timestamp: i64) -> Result<()> {
+pub async fn test_orca_amm_v1(rpc_client: &RpcClient, payer: &Keypair, _current_timestamp: i64) -> Result<()> {
     const POOL_ADDRESS: &str = "6fTRDD7sYxCN7oyoSQaN1AWC3P2m8A6gVZzGrpej9DvL"; // SOL/USDC
     println!("\n--- Test et Simulation Orca AMM V1 ({}) ---", POOL_ADDRESS);
 

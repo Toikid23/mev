@@ -1,7 +1,7 @@
 // Fichier : src/decoders/raydium/clmm/math.rs (Version finale utilisant full_math)
 
 use anyhow::{Result, anyhow};
-use super::full_math::{self, MulDiv, U256, DivCeil}; // On importe notre nouveau trait
+use super::full_math::{MulDiv, U256, DivCeil};
 
 const BITS: u32 = 64;
 const U128_MAX: u128 = 340282366920938463463374607431768211455;
@@ -139,9 +139,9 @@ pub fn compute_swap_step(
     fee_rate: u32,
     is_base_input: bool,
 ) -> Result<(u128, u128, u128, u128)> {
-    let mut sqrt_price_next_x64: u128;
-    let mut amount_in: u128;
-    let mut amount_out: u128;
+    let sqrt_price_next_x64: u128;
+    let amount_in: u128;
+    let amount_out: u128;
     let fee_rate_u64 = fee_rate as u64;
     const FEE_RATE_DENOMINATOR_VALUE: u64 = 1_000_000;
 

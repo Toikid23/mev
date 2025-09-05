@@ -14,7 +14,6 @@ use crate::decoders::raydium::clmm::{
     decode_pool,
     hydrate,
     events::parse_swap_event_from_logs,
-    tick_array,
 };
 use crate::decoders::PoolOperations;
 use crate::decoders::pool_operations::UserSwapAccounts;

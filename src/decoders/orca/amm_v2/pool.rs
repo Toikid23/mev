@@ -1,6 +1,3 @@
-// DANS : src/decoders/orca_decoders/pool
-
-// ... (tous les imports restent les mêmes)
 use crate::decoders::spl_token_decoders;
 use anyhow::{anyhow, bail, Result};
 use bytemuck::{from_bytes, Pod, Zeroable};
@@ -10,9 +7,9 @@ use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 use solana_sdk::instruction::{AccountMeta, Instruction};
-use solana_sdk::pubkey::Pubkey; // Assurez-vous que Pubkey est importé directement
+use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
-use num_integer::Integer;
+
 
 
 // ... (La struct DecodedOrcaAmmPool et son impl fee_as_percent ne changent pas)

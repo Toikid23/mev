@@ -6,7 +6,6 @@ use anyhow::{bail, Result, anyhow};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use super::config;
 use crate::decoders::spl_token_decoders;
-use num_integer::Integer;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 use crate::decoders::pool_operations::UserSwapAccounts;
@@ -313,7 +312,7 @@ pub async fn hydrate(pool: &mut DecodedCpmmPool, rpc_client: &RpcClient) -> Resu
     ];
 
     // 2. Faire un seul appel RPC groupé pour récupérer tous les comptes.
-    let mut accounts_data = rpc_client.get_multiple_accounts(&accounts_to_fetch).await?;
+    let accounts_data = rpc_client.get_multiple_accounts(&accounts_to_fetch).await?;
     let mut accounts_iter = accounts_data.into_iter();
 
     // 3. Traiter les résultats dans l'ordre, avec une gestion d'erreur robuste.

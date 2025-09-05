@@ -2,6 +2,7 @@
 
 use borsh::BorshDeserialize;
 use solana_sdk::pubkey::Pubkey;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 /// Représente la structure de l'événement de swap émis par le programme CPMM.
 /// L'ordre des champs est crucial pour le décodage.
@@ -22,7 +23,7 @@ pub fn parse_output_amount_from_cpmm_event(logs: &[String]) -> Option<u64> {
         // Étape 1 : Trouver le bon log.
         if let Some(data_str) = log.strip_prefix("Program data: ") {
             // Étape 2 : Décoder la chaîne Base64.
-            if let Ok(bytes) = base64::decode(data_str) {
+            if let Ok(bytes) = STANDARD.decode(data_str) {
                 // Étape 3 : Définir l'offset correct.
                 // D'après l'analyse des transactions CPMM sur Solscan, l'événement brut
                 // contient plusieurs champs avant le montant de sortie. L'offset

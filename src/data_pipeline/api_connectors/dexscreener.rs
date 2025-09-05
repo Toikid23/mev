@@ -1,6 +1,6 @@
 // src/data_pipeline/api_connectors/dexscreener.rs
 
-use serde::{Deserialize, de::Error as SerdeError};
+use serde::Deserialize;
 use anyhow::{Result, anyhow};
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
@@ -52,13 +52,6 @@ pub struct Volume {
 pub struct Liquidity {
     #[serde(default)]
     pub usd: f64,
-}
-fn timestamp_from_i64<'de, D>(deserializer: D) -> Result<i64, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let ts: i64 = Deserialize::deserialize(deserializer)?;
-    Ok(ts / 1000)
 }
 
 fn optional_timestamp_from_i64<'de, D>(deserializer: D) -> Result<i64, D::Error>

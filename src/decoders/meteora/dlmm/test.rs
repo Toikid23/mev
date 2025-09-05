@@ -16,6 +16,7 @@ use solana_account_decoder::UiAccountData;
 use spl_token::state::Account as SplTokenAccount;
 use solana_program_pack::Pack;
 use crate::decoders::pool_operations::UserSwapAccounts;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 // Imports depuis notre propre crate
 use crate::decoders::PoolOperations;
@@ -118,7 +119,7 @@ pub async fn test_dlmm_with_simulation(rpc_client: &RpcClient, payer_keypair: &K
     let post_accounts = sim_result.accounts.ok_or_else(|| anyhow!("La simulation n'a pas retourné l'état des comptes."))?;
     let destination_account_state = post_accounts.get(0).and_then(|acc| acc.as_ref()).ok_or_else(|| anyhow!("L'état du compte de destination n'a pas été retourné."))?;
     let decoded_data = match &destination_account_state.data {
-        UiAccountData::Binary(data_str, _) => base64::decode(data_str)?,
+        UiAccountData::Binary(data_str, _) => STANDARD.decode(data_str)?,
         _ => bail!("Format de données de compte inattendu."),
     };
     let token_account_data = SplTokenAccount::unpack(&decoded_data)?;

@@ -1,5 +1,3 @@
-// DANS: src/decoders/orca_decoders/pool
-
 use crate::decoders::spl_token_decoders;
 use anyhow::{anyhow, bail, Result};
 use bytemuck::{from_bytes, Pod, Zeroable};
@@ -11,7 +9,6 @@ use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 use solana_sdk::instruction::{AccountMeta, Instruction};
 use std::str::FromStr;
-use num_integer::Integer;
 
 // NOTE: Cette structure est intentionnellement quasi-identique à celle de la V2,
 // car les layouts on-chain sont compatibles.

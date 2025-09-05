@@ -2518,6 +2518,7 @@ dependencies = [
  "solana-program 2.3.0",
  "solana-program-pack",
  "solana-sdk",
+ "solana-sdk-ids",
  "solana-transaction-status",
  "spl-associated-token-account 7.0.0",
  "spl-math",

@@ -6,7 +6,6 @@ use anyhow::{bail, Result, anyhow};
 use super::math;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
-use solana_client::nonblocking::rpc_client::RpcClient;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts}; // Le trait et la struct
 use solana_sdk::instruction::{AccountMeta, Instruction}; // Les types pour l'instruction
 use spl_associated_token_account::get_associated_token_address; // Pour dériver un compte

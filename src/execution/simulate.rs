@@ -15,6 +15,7 @@ use solana_sdk::{
     transaction::Transaction,
 };
 use serde_json::{json, Value};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 pub async fn simulate_instruction(
     rpc_client: &RpcClient,
@@ -28,7 +29,7 @@ pub async fn simulate_instruction(
     transaction.sign(&[payer], recent_blockhash);
 
     let serialized_tx = bincode::serialize(&transaction)?;
-    let encoded_tx = base64::encode(serialized_tx);
+    let encoded_tx = STANDARD.encode(serialized_tx);
 
     // --- LA CORRECTION EST ICI ---
     // On transforme notre liste de comptes en un format JSON qui est un tableau de [pubkey_str, account_data_base64_str]
@@ -36,7 +37,7 @@ pub async fn simulate_instruction(
         .into_iter()
         .map(|(pubkey, account)| {
             let account_data_bincode = bincode::serialize(&account).unwrap();
-            let account_data_base64 = base64::encode(account_data_bincode);
+            let account_data_base64 = STANDARD.encode(account_data_bincode);
             json!([pubkey.to_string(), account_data_base64])
         })
         .collect();

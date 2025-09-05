@@ -1,7 +1,7 @@
 // src/decoders/meteora/damm_v1/pool.rs
 
 use super::math;
-use bytemuck::{pod_read_unaligned, Pod, Zeroable};
+use bytemuck::{Pod, Zeroable};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::program_pack::Pack;
 use solana_sdk::pubkey::Pubkey;
@@ -11,10 +11,6 @@ use solana_sdk::instruction::{Instruction, AccountMeta};
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
-use num_integer::Integer;
-use borsh::BorshDeserialize;
-use spl_stake_pool::state::StakePool;
-use solana_sdk::account::Account;
 
 // --- CONSTANTES ---
 pub const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB");
@@ -82,41 +78,6 @@ pub struct DecodedMeteoraSbpPool {
     pub enabled: bool, pub stake: Pubkey, pub depeg_virtual_price: u128, pub last_swap_timestamp: i64,
 }
 
-// **CORRECTION MAJEURE**
-fn get_spl_stake_virtual_price(stake_pool_data: &[u8]) -> Result<u128> {
-    // Les offsets suivants sont spécifiques à la structure du StakePool de Jito.
-    // Ils ont été vérifiés par rapport aux implémentations existantes qui interagissent avec ce pool.
-    const TOTAL_LAMPORTS_OFFSET: usize = 1 + 32 + 32 + 32 + 1 + 1 + 32 + 32 + 32 + 32 + 8; // Offset: 241
-    const POOL_TOKEN_SUPPLY_OFFSET: usize = TOTAL_LAMPORTS_OFFSET + 8; // Offset: 249
-
-    println!("[DEBUG] Lecture du compte Jito (longueur: {})", stake_pool_data.len());
-
-    // Vérification que les données sont assez longues pour éviter un panic.
-    if stake_pool_data.len() < POOL_TOKEN_SUPPLY_OFFSET + 8 {
-        bail!("Données du stake pool Jito trop courtes. Longueur: {}, Requis: {}", stake_pool_data.len(), POOL_TOKEN_SUPPLY_OFFSET + 8);
-    }
-
-    let total_lamports_bytes: [u8; 8] = stake_pool_data[TOTAL_LAMPORTS_OFFSET..POOL_TOKEN_SUPPLY_OFFSET].try_into()?;
-    let pool_token_supply_bytes: [u8; 8] = stake_pool_data[POOL_TOKEN_SUPPLY_OFFSET..POOL_TOKEN_SUPPLY_OFFSET + 8].try_into()?;
-
-    let total_lamports = u64::from_le_bytes(total_lamports_bytes);
-    let pool_token_supply = u64::from_le_bytes(pool_token_supply_bytes);
-
-    println!("[DEBUG] total_lamports lu à l'offset {}: {}", TOTAL_LAMPORTS_OFFSET, total_lamports);
-    println!("[DEBUG] pool_token_supply lu à l'offset {}: {}", POOL_TOKEN_SUPPLY_OFFSET, pool_token_supply);
-
-    if pool_token_supply == 0 {
-        return Ok(0);
-    }
-
-    const PRECISION: u128 = 1_000_000;
-
-    let virtual_price = (total_lamports as u128)
-        .saturating_mul(PRECISION)
-        .saturating_div(pool_token_supply as u128);
-
-    Ok(virtual_price)
-}
 
 fn read_pod<T: Pod>(data: &[u8], offset: usize) -> Result<T> {
     let size = std::mem::size_of::<T>();
@@ -142,7 +103,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraSbpPoo
 
             // **CORRECTION** : Nous lisons le depeg_virtual_price directement depuis le pool state ici.
             const DEPEG_OFFSET: usize = STABLE_PARAMS_OFFSET + 8 + std::mem::size_of::<onchain_layouts::TokenMultiplier>();
-            let depeg_struct: Depeg = read_pod(data_slice, DEPEG_OFFSET)?;
+            let _depeg_struct: Depeg = read_pod(data_slice, DEPEG_OFFSET)?;
 
             MeteoraCurveType::Stable { amp, token_multiplier }
         }
@@ -188,7 +149,7 @@ pub async fn hydrate(pool: &mut DecodedMeteoraSbpPool, rpc_client: &RpcClient) -
         pool.mint_b,
     ];
 
-    let mut initial_accounts = rpc_client.get_multiple_accounts(&initial_keys).await?;
+    let initial_accounts = rpc_client.get_multiple_accounts(&initial_keys).await?;
     let mut accounts_iter = initial_accounts.into_iter();
 
     let vault_a_account = accounts_iter.next().flatten().ok_or_else(|| anyhow!("Compte vault A ({}) non trouvé", pool.vault_a))?;
@@ -228,7 +189,7 @@ pub async fn hydrate(pool: &mut DecodedMeteoraSbpPool, rpc_client: &RpcClient) -
         solana_sdk::sysvar::clock::ID,
     ];
 
-    let mut secondary_accounts = rpc_client.get_multiple_accounts(&secondary_keys).await?;
+    let secondary_accounts = rpc_client.get_multiple_accounts(&secondary_keys).await?;
     let mut secondary_iter = secondary_accounts.into_iter();
 
     let vault_a_lp_mint_data = secondary_iter.next().flatten().ok_or_else(|| anyhow!("Compte LP mint A ({}) non trouvé", pool.a_vault_lp_mint))?.data;
@@ -311,8 +272,8 @@ impl PoolOperations for DecodedMeteoraSbpPool {
 
         let fees = &self.fees;
         // **CORRECTION PRECISION 1 : Utilisation de div_ceil pour les frais**
-        let trade_fee_on_input = (amount_in as u128).saturating_mul(fees.trade_fee_numerator as u128).div_ceil((fees.trade_fee_denominator as u128));
-        let protocol_fee = trade_fee_on_input.saturating_mul(fees.protocol_trade_fee_numerator as u128).div_ceil((fees.protocol_trade_fee_denominator as u128));
+        let trade_fee_on_input = (amount_in as u128).saturating_mul(fees.trade_fee_numerator as u128).div_ceil(fees.trade_fee_denominator as u128);
+        let protocol_fee = trade_fee_on_input.saturating_mul(fees.protocol_trade_fee_numerator as u128).div_ceil(fees.protocol_trade_fee_denominator as u128);
         let amount_in_after_protocol_fee = amount_in.saturating_sub(protocol_fee as u64);
 
         let unlocked_in_vault_before = get_unlocked_amount(&in_vault_state, current_timestamp);
@@ -327,7 +288,7 @@ impl PoolOperations for DecodedMeteoraSbpPool {
         let actual_amount_in = new_in_reserve.saturating_sub(in_reserve);
 
         // **CORRECTION PRECISION 2 : Utilisation de div_ceil pour les frais**
-        let trade_fee_on_actual = (actual_amount_in as u128).saturating_mul(fees.trade_fee_numerator as u128).div_ceil((fees.trade_fee_denominator as u128));
+        let trade_fee_on_actual = (actual_amount_in as u128).saturating_mul(fees.trade_fee_numerator as u128).div_ceil(fees.trade_fee_denominator as u128);
         let lp_fee = trade_fee_on_actual.saturating_sub(protocol_fee);
         let net_amount_in_for_curve = actual_amount_in.saturating_sub(lp_fee as u64);
 
@@ -360,8 +321,7 @@ impl PoolOperations for DecodedMeteoraSbpPool {
 
                 let norm_out = math::get_quote(norm_in_amount, norm_in_reserve, norm_out_reserve, *amp)?;
 
-                // **CORRECTION PRECISION 3 : Utilisation de div_ceil pour la dénormalisation**
-                let pre_depeg_out = norm_out.div_ceil((out_mult as u128));
+                let pre_depeg_out = norm_out.div_ceil(out_mult as u128);
                 let final_out = pre_depeg_out.checked_div(final_downscale_divisor).unwrap_or(0);
 
                 Ok(final_out as u64)
@@ -371,7 +331,7 @@ impl PoolOperations for DecodedMeteoraSbpPool {
         let unlocked_out_vault = get_unlocked_amount(&out_vault_state, current_timestamp);
         let out_lp_to_burn = get_lp_for_tokens(amount_out_gross, unlocked_out_vault, out_vault_lp_supply);
         let final_amount_out = get_tokens_for_lp(out_lp_to_burn, unlocked_out_vault, out_vault_lp_supply);
-        
+
 
         Ok(final_amount_out)
     }

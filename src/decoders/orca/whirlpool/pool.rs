@@ -7,19 +7,14 @@ use std::collections::BTreeMap;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey;
 use serde::{Serialize, Deserialize};
-
 use crate::decoders::spl_token_decoders;
 use super::math as orca_whirlpool_math;
 use super::tick_array;
 use super::math::sqrt_price_to_tick_index;
-use tokio::runtime::Runtime;
-use crate::config::Config;
 use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 use solana_sdk::instruction::{Instruction, AccountMeta};
 use spl_associated_token_account::get_associated_token_address;
-use num_integer::Integer;
-use crate::decoders::orca::whirlpool::math::U256;
 
 // --- STRUCTURE DE TRAVAIL "PROPRE" (MODIFIÉE) ---
 #[derive(Debug, Clone, Serialize, Deserialize)]

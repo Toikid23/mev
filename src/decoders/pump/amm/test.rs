@@ -1,7 +1,7 @@
 // DANS src/decoders/pump/amm/test.rs
 // REMPLACEZ L'INTÉGRALITÉ DU FICHIER
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
     pubkey::Pubkey,
@@ -12,12 +12,13 @@ use solana_sdk::{
 use std::str::FromStr;
 use crate::decoders::pool_operations::UserSwapAccounts;
 use spl_associated_token_account::get_associated_token_address_with_program_id;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 use crate::decoders::PoolOperations;
 use crate::decoders::pump::amm::{
     decode_pool,
     hydrate,
-    events::{self, PumpBuyEvent}, // Importer la structure de l'événement complet
+    events::{PumpBuyEvent}, // Importer la structure de l'événement complet
 };
 use borsh::BorshDeserialize;
 
@@ -91,7 +92,7 @@ pub async fn test_amm_with_simulation(rpc_client: &RpcClient, payer_keypair: &Ke
     let mut onchain_event: Option<PumpBuyEvent> = None;
     for log in logs {
         if let Some(data_str) = log.strip_prefix("Program data: ") {
-            if let Ok(bytes) = base64::decode(data_str) {
+            if let Ok(bytes) = STANDARD.decode(data_str) {
                 if bytes.len() > 8 && bytes.starts_with(&BUY_EVENT_DISCRIMINATOR) {
                     let mut event_data = &bytes[8..];
                     onchain_event = PumpBuyEvent::deserialize(&mut event_data).ok();

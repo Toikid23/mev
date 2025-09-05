@@ -8,7 +8,7 @@ use spl_token_2022::{
     state::Mint,
 };
 use anyhow::anyhow;
-use serde::{Serialize, Deserialize}; // <-- AJOUTER CET IMPORT
+use serde::{Serialize, Deserialize};
 
 // --- STRUCTURE DE SORTIE PROPRE ---
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] // <-- AJOUTER Serialize, Deserialize
@@ -59,7 +59,6 @@ pub fn calculate_gross_amount_before_transfer_fee(net_amount: u64, transfer_fee_
     if transfer_fee_basis_points as u128 >= ONE_IN_BASIS_POINTS { return Ok(net_amount.saturating_add(max_fee)); }
     let numerator = (net_amount as u128).checked_mul(ONE_IN_BASIS_POINTS).ok_or_else(|| anyhow!("MathOverflow"))?;
     let denominator = ONE_IN_BASIS_POINTS.checked_sub(transfer_fee_basis_points as u128).ok_or_else(|| anyhow!("MathOverflow"))?;
-    use num_integer::Integer;
     let raw_gross_amount = numerator.div_ceil(denominator);
     let fee = raw_gross_amount.saturating_sub(net_amount as u128);
     if fee >= max_fee as u128 { Ok(net_amount.saturating_add(max_fee)) } else { Ok(raw_gross_amount as u64) }

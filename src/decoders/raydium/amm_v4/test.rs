@@ -1,10 +1,9 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
     pubkey::Pubkey,
     signature::Keypair,
     signer::Signer,
-    instruction::AccountMeta,
     transaction::Transaction,
 };
 use std::str::FromStr;
@@ -17,12 +16,11 @@ use solana_program_pack::Pack;
 use crate::decoders::raydium::amm_v4::{
     decode_pool,
     hydrate,
-    events::parse_ammv4_output_amount_from_logs,
-    openbook_market,
     RAYDIUM_AMM_V4_PROGRAM_ID,
 };
 use crate::decoders::PoolOperations;
 use crate::decoders::pool_operations::UserSwapAccounts;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 
 pub async fn test_ammv4_with_simulation(rpc_client: &RpcClient, payer_keypair: &Keypair, current_timestamp: i64) -> anyhow::Result<()> {
@@ -198,7 +196,7 @@ pub async fn test_ammv4_with_simulation(rpc_client: &RpcClient, payer_keypair: &
     let destination_account_state = post_accounts.get(0).and_then(|acc| acc.as_ref()).ok_or_else(|| anyhow!("L'état du compte de destination n'a pas été retourné."))?;
 
     let decoded_data = match &destination_account_state.data {
-        UiAccountData::Binary(data_str, _) => base64::decode(data_str)?,
+        UiAccountData::Binary(data_str, _) => STANDARD.decode(data_str)?,
         _ => bail!("Format de données de compte inattendu."),
     };
 

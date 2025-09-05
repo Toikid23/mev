@@ -1,22 +1,17 @@
-// FICHIER : src/decoders/pump/amm/pool.rs
-// VERSION CORRIGÉE AVEC FIX `unsafe` ET FIX LOGIQUE `compute_fees_bps`
-
 use bytemuck::{Pod, Zeroable};
 use solana_sdk::pubkey::Pubkey;
 use anyhow::{anyhow, bail, Result};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use crate::decoders::spl_token_decoders;
 use solana_sdk::instruction::{Instruction, AccountMeta};
-use solana_sdk::system_program;
+use solana_sdk_ids::system_program;
 use spl_associated_token_account::get_associated_token_address_with_program_id;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
-use num_integer::Integer;
 use std::str::FromStr;
 use borsh::{BorshDeserialize, BorshSerialize};
 use crate::decoders::spl_token_decoders::mint::DecodedMint;
-use crate::decoders::raydium::clmm::full_math::MulDiv;
 
 // --- CONSTANTES ---
 pub const PUMP_PROGRAM_ID: Pubkey = solana_sdk::pubkey!("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA");

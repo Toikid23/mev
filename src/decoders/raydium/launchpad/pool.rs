@@ -201,7 +201,7 @@ impl PoolOperations for DecodedLaunchpadPool {
     
     fn create_swap_instruction(
         &self,
-        token_in_mint: &Pubkey,
+        _token_in_mint: &Pubkey,
         amount_in: u64,
         min_amount_out: u64,
         user_accounts: &UserSwapAccounts,

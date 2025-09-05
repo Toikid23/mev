@@ -1,9 +1,12 @@
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+
 /// Tente de parser le montant de sortie (`out_amount`) depuis les logs
 /// d'une transaction de swap Raydium AMMv4.
 pub fn parse_ammv4_output_amount_from_logs(logs: &[String]) -> Option<u64> {
     for log in logs {
         if let Some(data_str) = log.strip_prefix("Program log: ray_log: ") {
-            if let Ok(bytes) = base64::decode(data_str) {
+            if let Ok(bytes) = STANDARD.decode(data_str) {
                 // L'offset pour `out_amount` dans l'événement SwapBaseInLog est de 66.
                 const OFFSET_TO_OUT_AMOUNT: usize = 66;
 

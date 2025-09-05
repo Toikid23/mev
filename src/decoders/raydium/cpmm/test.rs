@@ -9,12 +9,9 @@ use solana_sdk::{
 use std::str::FromStr;
 use spl_associated_token_account::get_associated_token_address;
 
-// --- Imports depuis notre propre crate ---
-// On utilise 'crate::' car on est à l'intérieur de notre propre projet
 use crate::decoders::raydium::cpmm::{
     decode_pool,
     hydrate,
-    events,
 };
 use crate::decoders::PoolOperations;
 use solana_client::rpc_config::RpcSimulateTransactionConfig;
@@ -23,6 +20,7 @@ use solana_account_decoder::UiAccountData;
 use spl_token::state::Account as SplTokenAccount;
 use solana_program_pack::Pack;
 use crate::decoders::pool_operations::UserSwapAccounts;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 
 pub async fn test_cpmm_with_simulation(rpc_client: &RpcClient, payer_keypair: &Keypair, current_timestamp: i64) -> Result<()> {
@@ -39,7 +37,7 @@ pub async fn test_cpmm_with_simulation(rpc_client: &RpcClient, payer_keypair: &K
     hydrate(&mut pool, rpc_client).await?;
 
     let input_mint_pubkey = Pubkey::from_str(INPUT_MINT_STR)?;
-    let (input_decimals, output_decimals, output_mint_pubkey, input_is_token_0) = if input_mint_pubkey == pool.token_0_mint {
+    let (input_decimals, output_decimals, output_mint_pubkey, _input_is_token_0) = if input_mint_pubkey == pool.token_0_mint {
         (pool.mint_0_decimals, pool.mint_1_decimals, pool.token_1_mint, true)
     } else {
         (pool.mint_1_decimals, pool.mint_0_decimals, pool.token_0_mint, false)
@@ -143,7 +141,7 @@ pub async fn test_cpmm_with_simulation(rpc_client: &RpcClient, payer_keypair: &K
     let destination_account_state = post_accounts.get(0).and_then(|acc| acc.as_ref()).ok_or_else(|| anyhow!("L'état du compte de destination n'a pas été retourné."))?;
 
     let decoded_data = match &destination_account_state.data {
-        UiAccountData::Binary(data_str, _) => base64::decode(data_str)?,
+        UiAccountData::Binary(data_str, _) => STANDARD.decode(data_str)?,
         _ => bail!("Format de données de compte inattendu."),
     };
 

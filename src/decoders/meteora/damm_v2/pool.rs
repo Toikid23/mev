@@ -11,8 +11,6 @@ use spl_token;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
-use spl_associated_token_account::get_associated_token_address_with_program_id;
-use num_integer::Integer;
 use super::math;
 
 construct_uint! { pub struct U256(4); }
@@ -105,7 +103,7 @@ pub async fn hydrate(pool: &mut DecodedMeteoraDammPool, rpc_client: &RpcClient) 
     let mint_keys = vec![pool.mint_a, pool.mint_b];
 
     // 2. Faire un seul appel RPC pour récupérer les deux comptes.
-    let mut accounts_data = rpc_client.get_multiple_accounts(&mint_keys).await?;
+    let accounts_data = rpc_client.get_multiple_accounts(&mint_keys).await?;
 
     // 3. Traiter les résultats avec une gestion d'erreur robuste.
     let mut accounts_iter = accounts_data.into_iter();

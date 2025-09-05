@@ -66,7 +66,7 @@ pub fn decode_tick_array(data: &[u8]) -> Result<TickArrayState> {
 
     // --- DÉBOGAGE DU DISCRIMINATEUR ---
     if data.len() >= 8 {
-        let received_discriminator: [u8; 8] = data[..8].try_into().unwrap();
+        let _received_discriminator: [u8; 8] = data[..8].try_into().unwrap();
     }
     // --- FIN DU DÉBOGAGE ---
 

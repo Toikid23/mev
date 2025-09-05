@@ -59,8 +59,8 @@ pub async fn find_spatial_arbitrage(
                 let key1 = pool_keys[i];
                 let key2 = pool_keys[j];
 
-                let mut pool1 = pools_map_clone.get(&key1).unwrap().clone();
-                let mut pool2 = pools_map_clone.get(&key2).unwrap().clone();
+                let pool1 = pools_map_clone.get(&key1).unwrap().clone();
+                let pool2 = pools_map_clone.get(&key2).unwrap().clone();
 
                 let quote1_res = pool1.get_quote(mint_a, 1_000_000, 0);
                 let quote2_res = pool2.get_quote(mint_a, 1_000_000, 0);

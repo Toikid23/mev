@@ -1,5 +1,3 @@
-// Fichier : src/decoders/raydium/stable_swap/test.rs (Version Complète)
-
 use anyhow::{bail, Result};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
@@ -34,7 +32,7 @@ pub async fn test_stable_swap(rpc_client: &RpcClient, payer: &Keypair, _current_
     let vault_b_data = rpc_client.get_account_data(&pool_info.pc_vault).await?;
     let reserve_b = u64::from_le_bytes(vault_b_data[64..72].try_into()?);
 
-    let mut pool = DecodedStableSwapPool {
+    let pool = DecodedStableSwapPool {
         address: pool_pubkey,
         mint_a: pool_info.coin_mint,
         mint_b: pool_info.pc_mint,

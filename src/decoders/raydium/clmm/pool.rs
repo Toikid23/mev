@@ -6,8 +6,6 @@ use bytemuck::{from_bytes, Pod, Zeroable};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::instruction::{Instruction, AccountMeta};
-use spl_associated_token_account::get_associated_token_address;
-use solana_program_pack::Pack;
 use std::collections::{BTreeMap, HashSet};
 use crate::decoders::raydium::clmm::tick_array::TICK_ARRAY_SIZE;
 use super::math;
@@ -17,7 +15,6 @@ use super::config;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
-use num_integer::Integer;
 use crate::decoders::raydium::clmm::full_math::MulDiv;
 use crate::decoders::spl_token_decoders::mint::{calculate_transfer_fee, calculate_gross_amount_before_transfer_fee};
 use crate::decoders::orca::whirlpool::math::U256;
@@ -542,7 +539,7 @@ fn compute_swap_step_without_fee(
     amount_remaining: u128,
     is_base_input: bool,
 ) -> Result<(u128, u128, u128)> {
-    let mut sqrt_price_next_x64: u128;
+    let sqrt_price_next_x64: u128;
     let amount_in: u128;
     let amount_out: u128;
 

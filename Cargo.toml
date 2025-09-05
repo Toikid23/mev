@@ -55,6 +55,7 @@ futures-util = "0.3.31"
 chrono = "0.4.41"
 solana-address-lookup-table-program = { git = "https://github.com/solana-program/address-lookup-table", package = "solana-address-lookup-table-program" }
 spl-stake-pool = "2.0.3"
+solana-sdk-ids = "2.2.1"
 
 
 [[bin]]
