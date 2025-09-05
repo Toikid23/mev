@@ -252,9 +252,9 @@ impl PoolOperations for DecodedMeteoraSbpPool {
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<u64> {
         if !self.enabled || amount_in == 0 { return Ok(0); }
 
-        println!("\n--- [DEBUG get_quote] ---");
+        // --- LOGS DE DÉBOGAGE CONSERVÉS ---
+        println!("\n--- [DEBUG get_quote v2 - Precision] ---");
         println!("-> Input: {} lamports de {}", amount_in, token_in_mint);
-        println!("-> Réserves initiales: A={}, B={}", self.reserve_a, self.reserve_b);
 
         let (in_reserve, out_reserve, in_vault_state, out_vault_state, in_vault_lp_supply, out_vault_lp_supply, in_pool_lp_amount, _out_pool_lp_amount) =
             if *token_in_mint == self.mint_a {
@@ -264,10 +264,10 @@ impl PoolOperations for DecodedMeteoraSbpPool {
             };
 
         let fees = &self.fees;
-        let trade_fee_on_input = (amount_in as u128 * fees.trade_fee_numerator as u128).div_ceil(fees.trade_fee_denominator as u128);
-        let protocol_fee = (trade_fee_on_input * fees.protocol_trade_fee_numerator as u128).div_ceil(fees.protocol_trade_fee_denominator as u128);
+        // **CORRECTION PRECISION 1 : Utilisation de div_ceil pour les frais**
+        let trade_fee_on_input = (amount_in as u128).saturating_mul(fees.trade_fee_numerator as u128).div_ceil((fees.trade_fee_denominator as u128));
+        let protocol_fee = trade_fee_on_input.saturating_mul(fees.protocol_trade_fee_numerator as u128).div_ceil((fees.protocol_trade_fee_denominator as u128));
         let amount_in_after_protocol_fee = amount_in.saturating_sub(protocol_fee as u64);
-        println!("-> Frais: trade_fee_on_input={}, protocol_fee={}, amount_in_after_protocol_fee={}", trade_fee_on_input, protocol_fee, amount_in_after_protocol_fee);
 
         let unlocked_in_vault_before = get_unlocked_amount(&in_vault_state, current_timestamp);
         let in_lp_minted = get_lp_for_tokens(amount_in_after_protocol_fee, unlocked_in_vault_before, in_vault_lp_supply);
@@ -280,28 +280,21 @@ impl PoolOperations for DecodedMeteoraSbpPool {
         let new_in_reserve = get_tokens_for_lp(new_in_pool_lp_amount, unlocked_in_vault_after, new_in_vault_lp_supply);
         let actual_amount_in = new_in_reserve.saturating_sub(in_reserve);
 
-        let trade_fee_on_actual = (actual_amount_in as u128 * fees.trade_fee_numerator as u128).div_ceil(fees.trade_fee_denominator as u128);
+        // **CORRECTION PRECISION 2 : Utilisation de div_ceil pour les frais**
+        let trade_fee_on_actual = (actual_amount_in as u128).saturating_mul(fees.trade_fee_numerator as u128).div_ceil((fees.trade_fee_denominator as u128));
         let lp_fee = trade_fee_on_actual.saturating_sub(protocol_fee);
         let net_amount_in_for_curve = actual_amount_in.saturating_sub(lp_fee as u64);
-        println!("-> Logique Vault In: actual_amount_in={}, net_amount_in_for_curve={}", actual_amount_in, net_amount_in_for_curve);
 
         let amount_out_gross = match &self.curve_type {
             MeteoraCurveType::ConstantProduct => {
                 let numerator = (net_amount_in_for_curve as u128).saturating_mul(out_reserve as u128);
                 let denominator = (in_reserve as u128).saturating_add(actual_amount_in as u128);
-                let result_value = if denominator == 0 {
-                    0
-                } else {
-                    (numerator / denominator) as u64
-                };
-                // On spécifie explicitement le type de retour pour aider le compilateur.
+                let result_value = if denominator == 0 { 0 } else { (numerator / denominator) as u64 };
                 Ok(result_value) as Result<u64>
             }
             MeteoraCurveType::Stable { amp, token_multiplier } => {
-                println!("-> Utilisation de la courbe STABLE avec amp={}", amp);
                 const DEPEG_PRECISION: u128 = 1_000_000;
                 let virtual_price = if self.depeg_virtual_price > 0 { self.depeg_virtual_price } else { DEPEG_PRECISION };
-                println!("-> Utilisation du virtual_price={}", virtual_price);
 
                 let (scaled_in_reserve, scaled_out_reserve, scaled_in_amount, final_downscale_divisor) =
                     if self.stake != Pubkey::default() {
@@ -313,33 +306,28 @@ impl PoolOperations for DecodedMeteoraSbpPool {
                     } else {
                         (in_reserve as u128, out_reserve as u128, net_amount_in_for_curve as u128, 1)
                     };
-                println!("-> Réserves normalisées (depeg): scaled_in={}, scaled_out={}, scaled_in_amount={}", scaled_in_reserve, scaled_out_reserve, scaled_in_amount);
 
                 let (in_mult, out_mult) = if *token_in_mint == self.mint_a { (token_multiplier.token_a_multiplier, token_multiplier.token_b_multiplier) } else { (token_multiplier.token_b_multiplier, token_multiplier.token_a_multiplier) };
                 let norm_in_reserve = scaled_in_reserve.saturating_mul(in_mult as u128);
                 let norm_out_reserve = scaled_out_reserve.saturating_mul(out_mult as u128);
                 let norm_in_amount = scaled_in_amount.saturating_mul(in_mult as u128);
-                println!("-> Réserves normalisées (décimales): norm_in={}, norm_out={}, norm_in_amount={}", norm_in_reserve, norm_out_reserve, norm_in_amount);
 
                 let norm_out = math::get_quote(norm_in_amount, norm_in_reserve, norm_out_reserve, *amp)?;
-                println!("-> Sortie de la courbe (norm): {}", norm_out);
 
-                let pre_depeg_out = norm_out.div_ceil(out_mult as u128);
-                println!("-> Sortie après dénormalisation (décimales): {}", pre_depeg_out);
-
+                // **CORRECTION PRECISION 3 : Utilisation de div_ceil pour la dénormalisation**
+                let pre_depeg_out = norm_out.div_ceil((out_mult as u128));
                 let final_out = pre_depeg_out.checked_div(final_downscale_divisor).unwrap_or(0);
-                println!("-> Sortie après dénormalisation (depeg): {}", final_out);
 
                 Ok(final_out as u64)
             }
         }?;
 
-        println!("-> Sortie brute de la courbe: {}", amount_out_gross);
         let unlocked_out_vault = get_unlocked_amount(&out_vault_state, current_timestamp);
         let out_lp_to_burn = get_lp_for_tokens(amount_out_gross, unlocked_out_vault, out_vault_lp_supply);
         let final_amount_out = get_tokens_for_lp(out_lp_to_burn, unlocked_out_vault, out_vault_lp_supply);
-        println!("-> Logique Vault Out: unlocked_out_vault={}, out_lp_to_burn={}, final_amount_out={}", unlocked_out_vault, out_lp_to_burn, final_amount_out);
-        println!("--- [FIN DEBUG get_quote] ---");
+
+        println!("-> Prédiction finale (précision améliorée): {}", final_amount_out);
+        println!("--- [FIN DEBUG get_quote v2] ---");
 
         Ok(final_amount_out)
     }
@@ -377,11 +365,18 @@ impl PoolOperations for DecodedMeteoraSbpPool {
         instruction_data.extend_from_slice(&instruction_discriminator);
         instruction_data.extend_from_slice(&amount_in.to_le_bytes());
         instruction_data.extend_from_slice(&min_amount_out.to_le_bytes());
-        let protocol_fee = if *token_in_mint == self.mint_a {
-            Pubkey::find_program_address(&[b"fee", self.mint_a.as_ref(), self.address.as_ref()], &PROGRAM_ID).0
-        } else {
-            Pubkey::find_program_address(&[b"fee", self.mint_b.as_ref(), self.address.as_ref()], &PROGRAM_ID).0
-        };
+
+        // **CORRECTION ICI : On dérive le PDA du compte de frais dynamiquement, comme le fait le SDK.**
+        // C'est la méthode la plus robuste.
+        let (protocol_fee_account, _) = Pubkey::find_program_address(
+            &[
+                b"fee",
+                token_in_mint.as_ref(),
+                self.address.as_ref()
+            ],
+            &PROGRAM_ID
+        );
+
         let mut accounts = vec![
             AccountMeta::new(self.address, false),
             AccountMeta::new(user_accounts.source, false),
@@ -394,17 +389,19 @@ impl PoolOperations for DecodedMeteoraSbpPool {
             AccountMeta::new(self.b_vault_lp_mint, false),
             AccountMeta::new(self.a_vault_lp, false),
             AccountMeta::new(self.b_vault_lp, false),
-            AccountMeta::new(protocol_fee, false),
+            AccountMeta::new(protocol_fee_account, false), // Utilisation du PDA dérivé
             AccountMeta::new_readonly(user_accounts.owner, true),
             AccountMeta::new_readonly(VAULT_PROGRAM_ID, false),
             AccountMeta::new_readonly(spl_token::id(), false),
-            AccountMeta::new_readonly(solana_sdk::sysvar::clock::ID, false),
         ];
+
+        // On ajoute le compte de stake UNIQUEMENT si nécessaire.
         if let MeteoraCurveType::Stable {..} = self.curve_type {
             if self.stake != Pubkey::default() {
                 accounts.push(AccountMeta::new_readonly(self.stake, false));
             }
         }
+
         Ok(Instruction { program_id: PROGRAM_ID, accounts, data: instruction_data })
     }
 }
