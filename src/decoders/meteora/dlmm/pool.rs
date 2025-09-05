@@ -12,6 +12,7 @@ use solana_sdk::pubkey;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
+use crate::decoders::pool_operations::find_input_by_binary_search;
 
 // --- CONSTANTES ---
 pub const PROGRAM_ID: pubkey::Pubkey = pubkey!("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo");
@@ -249,73 +250,36 @@ impl PoolOperations for DecodedDlmmPool {
         amount_out: u64,
         current_timestamp: i64,
     ) -> Result<u64> {
+        // 1. Logique spécifique au pool
         if amount_out == 0 { return Ok(0); }
         let bin_arrays = self.hydrated_bin_arrays.as_ref().ok_or_else(|| anyhow!("Pool not hydrated"))?;
         if bin_arrays.is_empty() { return Err(anyhow!("Not enough liquidity in pool.")); }
 
-        let is_base_output = *token_out_mint == self.mint_a;
-        let is_base_input = !is_base_output;
+        let token_in_mint = if *token_out_mint == self.mint_a { self.mint_b } else { self.mint_a };
 
-        let (in_mint_fee_bps, in_mint_max_fee, out_mint_fee_bps, out_mint_max_fee) = if is_base_input {
-            (self.mint_a_transfer_fee_bps, self.mint_a_transfer_fee_max, self.mint_b_transfer_fee_bps, self.mint_b_transfer_fee_max)
-        } else {
-            (self.mint_b_transfer_fee_bps, self.mint_b_transfer_fee_max, self.mint_a_transfer_fee_bps, self.mint_a_transfer_fee_max)
-        };
+        // 2. Calcul de la borne de recherche
+        // Pour un CLMM, une estimation basée sur le prix du bin actif est une bonne heuristique.
+        let mut high_bound: u64 = amount_out.saturating_mul(4); // Fallback
 
-        let gross_amount_out_target = calculate_gross_amount_before_transfer_fee(amount_out, out_mint_fee_bps, out_mint_max_fee)? as u128;
-
-        let mut total_amount_in_net: u128 = 0;
-        let mut amount_out_remaining = gross_amount_out_target;
-        let mut current_bin_id = self.active_bin_id;
-
-        let mut temp_v_params = self.v_parameters;
-        update_references(&mut temp_v_params, &self.parameters, self.active_bin_id, current_timestamp)?;
-
-        while amount_out_remaining > 0 {
-            if current_bin_id < self.parameters.min_bin_id || current_bin_id > self.parameters.max_bin_id {
-                return Err(anyhow!("Not enough liquidity to fulfill the order."));
+        let active_bin_array_idx = get_bin_array_index_from_bin_id(self.active_bin_id);
+        if let Some(active_bin_array) = bin_arrays.get(&active_bin_array_idx) {
+            let bin_index_in_array = (self.active_bin_id % (MAX_BIN_PER_ARRAY as i32) + (MAX_BIN_PER_ARRAY as i32)) % (MAX_BIN_PER_ARRAY as i32);
+            let active_bin = &active_bin_array.bins[bin_index_in_array as usize];
+            if active_bin.price > 0 {
+                let is_base_input = token_in_mint == self.mint_a;
+                // Estime le coût en utilisant le prix du bin actuel, avec une marge.
+                let estimated_cost = math::get_amount_in(amount_out, active_bin.price, is_base_input)?;
+                high_bound = estimated_cost.saturating_mul(2); // Marge x2 pour le slippage et les frais
             }
-
-            let bin_array_idx = get_bin_array_index_from_bin_id(current_bin_id);
-            let bin_array = match bin_arrays.get(&bin_array_idx) {
-                Some(array) => array,
-                None => return Err(anyhow!("Required bin array #{} is not loaded.", bin_array_idx)),
-            };
-
-            let bin_index_in_array = (current_bin_id % (MAX_BIN_PER_ARRAY as i32) + (MAX_BIN_PER_ARRAY as i32)) % (MAX_BIN_PER_ARRAY as i32);
-            let current_bin = &bin_array.bins[bin_index_in_array as usize];
-
-            let out_reserve_in_bin = if is_base_output { current_bin.amount_a } else { current_bin.amount_b };
-
-            if out_reserve_in_bin == 0 {
-                current_bin_id = if is_base_input { current_bin_id.saturating_sub(1) } else { current_bin_id.saturating_add(1) };
-                continue;
-            }
-
-            let amount_out_from_this_bin = amount_out_remaining.min(out_reserve_in_bin as u128);
-
-            update_volatility_accumulator(&mut temp_v_params, &self.parameters, self.active_bin_id, current_bin_id)?;
-            let total_fee_rate = get_total_fee(self.bin_step, &self.parameters, &temp_v_params)?;
-
-            let required_net_in_for_chunk_no_fee = math::get_amount_in(amount_out_from_this_bin as u64, current_bin.price, is_base_input)? as u128;
-
-            let required_net_in_for_chunk_with_fee = if total_fee_rate > 0 {
-                let num = required_net_in_for_chunk_no_fee.saturating_mul(FEE_PRECISION);
-                let den = FEE_PRECISION.saturating_sub(total_fee_rate);
-                num.div_ceil(den)
-            } else {
-                required_net_in_for_chunk_no_fee
-            };
-
-            total_amount_in_net += required_net_in_for_chunk_with_fee;
-            amount_out_remaining -= amount_out_from_this_bin;
-
-            current_bin_id = if is_base_input { current_bin_id.saturating_sub(1) } else { current_bin_id.saturating_add(1) };
         }
 
-        let final_amount_in = calculate_gross_amount_before_transfer_fee(total_amount_in_net as u64, in_mint_fee_bps, in_mint_max_fee)?;
+        // 3. Création de la closure
+        let quote_fn = |guess_input: u64| {
+            self.get_quote(&token_in_mint, guess_input, current_timestamp)
+        };
 
-        Ok(final_amount_in.saturating_add(0)) // On garde une petite marge de sécurité
+        // 4. Appel à l'utilitaire de recherche dynamique
+        find_input_by_binary_search(quote_fn, amount_out, high_bound)
     }
 
 
@@ -568,38 +532,6 @@ fn calculate_transfer_fee(amount: u64, transfer_fee_bps: u16, max_fee: u64) -> R
     Ok(fee.min(max_fee as u128) as u64)
 }
 
-/// Calcule le montant brut nécessaire pour qu'après déduction des frais, il reste le montant net.
-fn calculate_gross_amount_before_transfer_fee(net_amount: u64, transfer_fee_bps: u16, max_fee: u64) -> Result<u64> {
-    if transfer_fee_bps == 0 || net_amount == 0 {
-        return Ok(net_amount);
-    }
-
-    const ONE_IN_BASIS_POINTS: u128 = 10000;
-
-    if transfer_fee_bps as u128 >= ONE_IN_BASIS_POINTS {
-        return Ok(net_amount.saturating_add(max_fee));
-    }
-
-    let numerator = (net_amount as u128).checked_mul(ONE_IN_BASIS_POINTS).ok_or_else(|| anyhow!("MathOverflow"))?;
-    let denominator = ONE_IN_BASIS_POINTS.checked_sub(transfer_fee_bps as u128).ok_or_else(|| anyhow!("MathOverflow"))?;
-
-    // Division au plafond (Ceiling division)
-    let raw_gross_amount = numerator
-        .checked_add(denominator)
-        .ok_or_else(|| anyhow!("MathOverflow"))?
-        .checked_sub(1)
-        .ok_or_else(|| anyhow!("MathOverflow"))?
-        .checked_div(denominator)
-        .ok_or_else(|| anyhow!("MathOverflow"))?;
-
-    let fee = raw_gross_amount.saturating_sub(net_amount as u128);
-
-    if fee >= max_fee as u128 {
-        Ok(net_amount.saturating_add(max_fee))
-    } else {
-        Ok(raw_gross_amount as u64)
-    }
-}
 
 fn get_bin_array_index_from_bin_id(bin_id: i32) -> i64 {
     (bin_id as i64 / (MAX_BIN_PER_ARRAY as i64))

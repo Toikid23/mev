@@ -11,6 +11,7 @@ use solana_sdk::instruction::{Instruction, AccountMeta};
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
+use crate::decoders::pool_operations::find_input_by_binary_search;
 
 // --- CONSTANTES ---
 pub const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB");
@@ -80,7 +81,7 @@ pub struct DecodedMeteoraSbpPool {
 
 
 fn read_pod<T: Pod>(data: &[u8], offset: usize) -> Result<T> {
-    let size = std::mem::size_of::<T>();
+    let size = size_of::<T>();
     let end = offset.checked_add(size).ok_or_else(|| anyhow!("Offset overflow"))?;
     if end > data.len() { bail!("Buffer underflow reading at offset {}", offset); }
     Ok(bytemuck::pod_read_unaligned(&data[offset..end]))
@@ -89,7 +90,7 @@ fn read_pod<T: Pod>(data: &[u8], offset: usize) -> Result<T> {
 pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraSbpPool> {
     if data.get(..8) != Some(&POOL_STATE_DISCRIMINATOR) { bail!("Invalid discriminator."); }
     let data_slice = &data[8..];
-    let pool_struct: &onchain_layouts::Pool = bytemuck::from_bytes(&data_slice[..std::mem::size_of::<onchain_layouts::Pool>()]);
+    let pool_struct: &onchain_layouts::Pool = bytemuck::from_bytes(&data_slice[..size_of::<onchain_layouts::Pool>()]);
 
     const CURVE_TYPE_OFFSET: usize = 866;
     let curve_kind: u8 = read_pod(data_slice, CURVE_TYPE_OFFSET)?;
@@ -102,7 +103,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraSbpPoo
             let token_multiplier: onchain_layouts::TokenMultiplier = read_pod(data_slice, STABLE_PARAMS_OFFSET + 8)?;
 
             // **CORRECTION** : Nous lisons le depeg_virtual_price directement depuis le pool state ici.
-            const DEPEG_OFFSET: usize = STABLE_PARAMS_OFFSET + 8 + std::mem::size_of::<onchain_layouts::TokenMultiplier>();
+            const DEPEG_OFFSET: usize = STABLE_PARAMS_OFFSET + 8 + size_of::<onchain_layouts::TokenMultiplier>();
             let _depeg_struct: Depeg = read_pod(data_slice, DEPEG_OFFSET)?;
 
             MeteoraCurveType::Stable { amp, token_multiplier }
@@ -113,8 +114,8 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraSbpPoo
     // **CORRECTION** : Récupérer le prix virtuel directement lors du décodage initial
     let mut depeg_virtual_price = 0;
     if let MeteoraCurveType::Stable { .. } = curve_type {
-        const DEPEG_OFFSET: usize = 866 + 1 + 8 + std::mem::size_of::<onchain_layouts::TokenMultiplier>();
-        if data_slice.len() >= DEPEG_OFFSET + std::mem::size_of::<Depeg>() {
+        const DEPEG_OFFSET: usize = 866 + 1 + 8 + size_of::<onchain_layouts::TokenMultiplier>();
+        if data_slice.len() >= DEPEG_OFFSET + size_of::<Depeg>() {
             let depeg_struct: Depeg = read_pod(data_slice, DEPEG_OFFSET)?;
             // Le SDK utilise une précision de 10^6. Le prix stocké peut avoir une autre précision.
             // Pour l'instant, on l'utilise tel quel, mais c'est un point de vigilance.
@@ -160,7 +161,7 @@ pub async fn hydrate(pool: &mut DecodedMeteoraSbpPool, rpc_client: &RpcClient) -
     let mint_b_data = accounts_iter.next().flatten().ok_or_else(|| anyhow!("Compte mint B ({}) non trouvé", pool.mint_b))?.data;
 
     // --- Étape 2 : Décodage partiel avec la CORRECTION de slicing ---
-    let expected_vault_size = std::mem::size_of::<onchain_layouts::Vault>();
+    let expected_vault_size = size_of::<onchain_layouts::Vault>();
 
     // Vérification de sécurité pour des messages d'erreur clairs
     if vault_a_account.data.len() < 8 + expected_vault_size || vault_b_account.data.len() < 8 + expected_vault_size {
@@ -338,30 +339,27 @@ impl PoolOperations for DecodedMeteoraSbpPool {
 
     // ... (get_required_input et create_swap_instruction inchangés)
     fn get_required_input(&mut self, token_out_mint: &Pubkey, amount_out: u64, current_timestamp: i64) -> Result<u64> {
+        // 1. Logique spécifique au pool (vérifications, détermination des variables)
         if amount_out == 0 { return Ok(0); }
         if !self.enabled { return Err(anyhow!("Pool disabled")); }
+
         let token_in_mint = if *token_out_mint == self.mint_a { self.mint_b } else { self.mint_a };
-        let mut low_bound: u64 = 0;
-        let mut high_bound: u64 = amount_out.saturating_mul(4);
-        let mut best_guess: u64 = high_bound;
+
+        // 2. Calcul de la borne de recherche (logique spécifique au pool)
         let (in_reserve, out_reserve) = if *token_out_mint == self.mint_b { (self.reserve_a, self.reserve_b) } else { (self.reserve_b, self.reserve_a) };
+        let mut high_bound: u64 = amount_out.saturating_mul(4); // Borne par défaut
         if in_reserve > 0 && out_reserve > 0 {
             let initial_guess = (amount_out as u128 * in_reserve as u128 / out_reserve as u128) as u64;
             high_bound = initial_guess.saturating_mul(2);
         }
-        for _ in 0..32 {
-            if low_bound > high_bound { break; }
-            let guess_input = low_bound.saturating_add(high_bound) / 2;
-            if guess_input == 0 { low_bound = 1; continue; }
-            match self.get_quote(&token_in_mint, guess_input, current_timestamp) {
-                Ok(quote_output) if quote_output >= amount_out => {
-                    best_guess = guess_input;
-                    high_bound = guess_input.saturating_sub(1);
-                }
-                _ => { low_bound = guess_input.saturating_add(1); }
-            }
-        }
-        Ok(best_guess.saturating_add(1))
+
+        // 3. Création de la closure qui appelle la méthode `get_quote` de ce pool
+        let quote_fn = |guess_input: u64| {
+            self.get_quote(&token_in_mint, guess_input, current_timestamp)
+        };
+
+        // 4. Appel à l'utilitaire de recherche dynamique
+        find_input_by_binary_search(quote_fn, amount_out, high_bound)
     }
     fn create_swap_instruction(&self, token_in_mint: &Pubkey, amount_in: u64, min_amount_out: u64, user_accounts: &UserSwapAccounts) -> Result<Instruction> {
         let instruction_discriminator: [u8; 8] = [248, 198, 158, 145, 225, 117, 135, 200];

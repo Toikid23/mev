@@ -12,6 +12,7 @@ use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 use super::math;
+use crate::decoders::pool_operations::find_input_by_binary_search;
 
 construct_uint! { pub struct U256(4); }
 
@@ -71,7 +72,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraDammPo
         bail!("Invalid discriminator. Not a Meteora DAMM v2 Pool account.");
     }
     let data_slice = &data[8..];
-    let expected_size = std::mem::size_of::<onchain_layouts::Pool>();
+    let expected_size = size_of::<onchain_layouts::Pool>();
     if data_slice.len() < expected_size {
         bail!("DAMM v2 Pool data length mismatch. Expected at least {} bytes, got {}.", expected_size, data_slice.len());
     }
@@ -240,51 +241,32 @@ impl PoolOperations for DecodedMeteoraDammPool {
         amount_out: u64,
         current_timestamp: i64,
     ) -> Result<u64> {
+        // 1. Logique spécifique au pool
         if amount_out == 0 { return Ok(0); }
         if self.liquidity == 0 { return Err(anyhow!("Pool has no liquidity")); }
 
         let token_in_mint = if *token_out_mint == self.mint_a { self.mint_b } else { self.mint_a };
 
-        // 1. Définir une plage de recherche intelligente
-        let mut lower_bound: u64 = 0;
-        let mut upper_bound: u64 = amount_out.saturating_mul(4); // Estimation de départ large et sûre
-
+        // 2. Calcul de la borne de recherche
+        let mut high_bound: u64 = amount_out.saturating_mul(4); // Estimation large et sûre
         if self.sqrt_price > 0 {
+            // Utilise f64 pour une estimation rapide, ce n'est pas pour le calcul final.
             let price_ratio = (self.sqrt_price as f64 / (1u128 << 64) as f64).powi(2);
             let estimated_price = if token_in_mint == self.mint_a { 1.0 / price_ratio } else { price_ratio };
+            // Multiplie par 1.2 pour avoir une marge de sécurité sur les frais.
             let initial_guess = (amount_out as f64 * estimated_price * 1.2) as u64;
             if initial_guess > 0 {
-                upper_bound = initial_guess;
+                high_bound = initial_guess;
             }
         }
 
-        let mut best_guess: u64 = upper_bound;
-        let mut iterations = 0;
-        const MAX_ITERATIONS: u32 = 32; // Filet de sécurité
+        // 3. Création de la closure
+        let quote_fn = |guess_input: u64| {
+            self.get_quote(&token_in_mint, guess_input, current_timestamp)
+        };
 
-        // 2. Recherche binaire avec une condition d'arrêt dynamique
-        while lower_bound <= upper_bound && iterations < MAX_ITERATIONS {
-            let guess_input = lower_bound.saturating_add(upper_bound) / 2;
-            if guess_input == 0 {
-                lower_bound = 1;
-                iterations += 1;
-                continue;
-            }
-
-            match self.get_quote(&token_in_mint, guess_input, current_timestamp) {
-                Ok(quote_output) if quote_output >= amount_out => {
-                    best_guess = guess_input;
-                    upper_bound = guess_input.saturating_sub(1);
-                }
-                _ => {
-                    lower_bound = guess_input.saturating_add(1);
-                }
-            }
-            iterations += 1;
-        }
-
-        // 3. Ajouter une petite marge de sécurité
-        Ok(best_guess.saturating_add(2))
+        // 4. Appel à l'utilitaire de recherche dynamique
+        find_input_by_binary_search(quote_fn, amount_out, high_bound)
     }
 
 
