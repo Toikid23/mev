@@ -101,18 +101,26 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraDammPo
 }
 
 pub async fn hydrate(pool: &mut DecodedMeteoraDammPool, rpc_client: &RpcClient) -> Result<()> {
-    let (mint_a_res, mint_b_res) = tokio::join!(
-        rpc_client.get_account(&pool.mint_a),
-        rpc_client.get_account(&pool.mint_b)
-    );
+    // 1. Rassembler les clés publiques des deux mints.
+    let mint_keys = vec![pool.mint_a, pool.mint_b];
 
-    let mint_a_account = mint_a_res?;
+    // 2. Faire un seul appel RPC pour récupérer les deux comptes.
+    let mut accounts_data = rpc_client.get_multiple_accounts(&mint_keys).await?;
+
+    // 3. Traiter les résultats avec une gestion d'erreur robuste.
+    let mut accounts_iter = accounts_data.into_iter();
+
+    let mint_a_account = accounts_iter.next().flatten()
+        .ok_or_else(|| anyhow!("Compte mint A ({}) non trouvé", pool.mint_a))?;
+    let mint_b_account = accounts_iter.next().flatten()
+        .ok_or_else(|| anyhow!("Compte mint B ({}) non trouvé", pool.mint_b))?;
+
+    // 4. Décoder les données et mettre à jour le pool.
     let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_account.data)?;
     pool.mint_a_decimals = decoded_mint_a.decimals;
     pool.mint_a_transfer_fee_bps = decoded_mint_a.transfer_fee_basis_points;
     pool.mint_a_program = mint_a_account.owner;
 
-    let mint_b_account = mint_b_res?;
     let decoded_mint_b = spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_account.data)?;
     pool.mint_b_decimals = decoded_mint_b.decimals;
     pool.mint_b_transfer_fee_bps = decoded_mint_b.transfer_fee_basis_points;
@@ -120,7 +128,6 @@ pub async fn hydrate(pool: &mut DecodedMeteoraDammPool, rpc_client: &RpcClient) 
 
     Ok(())
 }
-
 #[async_trait]
 impl PoolOperations for DecodedMeteoraDammPool {
     fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
