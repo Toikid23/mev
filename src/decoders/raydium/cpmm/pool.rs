@@ -301,47 +301,67 @@ impl PoolOperations for DecodedCpmmPool {
     }
 }
 pub async fn hydrate(pool: &mut DecodedCpmmPool, rpc_client: &RpcClient) -> Result<()> {
-    // ... (votre `tokio::join!` existant est parfait et reste inchangé) ...
-    let (config_res, vault_a_res, vault_b_res, mint_a_res, mint_b_res) = tokio::join!(
-        rpc_client.get_account_data(&pool.amm_config),
-        rpc_client.get_account_data(&pool.token_0_vault),
-        rpc_client.get_account_data(&pool.token_1_vault),
-        rpc_client.get_account_data(&pool.token_0_mint),
-        rpc_client.get_account_data(&pool.token_1_mint)
-    );
+    // 1. Rassembler toutes les clés publiques nécessaires en un seul vecteur.
+    // On inclut l'adresse du pool lui-même pour récupérer le drapeau `enable_creator_fee`.
+    let accounts_to_fetch = vec![
+        pool.amm_config,
+        pool.token_0_vault,
+        pool.token_1_vault,
+        pool.token_0_mint,
+        pool.token_1_mint,
+        pool.address, // Pour re-fetcher le pool_state complet
+    ];
 
-    // ... (la logique pour `config_data`, `vault_a_data`, `vault_b_data` est inchangée) ...
-    let config_data = config_res?;
-    let decoded_config = config::decode_config(&config_data)?;
+    // 2. Faire un seul appel RPC groupé pour récupérer tous les comptes.
+    let mut accounts_data = rpc_client.get_multiple_accounts(&accounts_to_fetch).await?;
+    let mut accounts_iter = accounts_data.into_iter();
+
+    // 3. Traiter les résultats dans l'ordre, avec une gestion d'erreur robuste.
+    let config_account_data = accounts_iter.next().flatten()
+        .ok_or_else(|| anyhow!("Compte AmmConfig ({}) non trouvé", pool.amm_config))?.data;
+
+    let vault_a_data = accounts_iter.next().flatten()
+        .ok_or_else(|| anyhow!("Compte Vault A ({}) non trouvé", pool.token_0_vault))?.data;
+
+    let vault_b_data = accounts_iter.next().flatten()
+        .ok_or_else(|| anyhow!("Compte Vault B ({}) non trouvé", pool.token_1_vault))?.data;
+
+    let mint_a_data = accounts_iter.next().flatten()
+        .ok_or_else(|| anyhow!("Compte Mint A ({}) non trouvé", pool.token_0_mint))?.data;
+
+    let mint_b_data = accounts_iter.next().flatten()
+        .ok_or_else(|| anyhow!("Compte Mint B ({}) non trouvé", pool.token_1_mint))?.data;
+
+    let pool_account_data = accounts_iter.next().flatten()
+        .ok_or_else(|| anyhow!("Compte du Pool ({}) non trouvé lors de l'hydratation", pool.address))?.data;
+
+    // --- 4. Décodage et assignation des valeurs ---
+
+    // Décodage de la config pour les taux de frais
+    let decoded_config = config::decode_config(&config_account_data)?;
     pool.trade_fee_rate = decoded_config.trade_fee_rate;
     pool.creator_fee_rate = decoded_config.creator_fee_rate;
 
-    // --- LOGIQUE POUR RÉCUPÉRER `enable_creator_fee` ---
-    // Il faut re-fetcher le pool_state pour avoir la donnée on-chain complète
-    let pool_account_data = rpc_client.get_account_data(&pool.address).await?;
+    // Décodage du pool_state pour le drapeau `enable_creator_fee`
+    if pool_account_data.get(..8) != Some(&CPMM_POOL_STATE_DISCRIMINATOR) {
+        bail!("Discriminator de PoolState invalide lors de l'hydratation.");
+    }
     let data_slice = &pool_account_data[8..];
     let pool_struct: &CpmmPoolStateData = from_bytes(&data_slice[..std::mem::size_of::<CpmmPoolStateData>()]);
-    pool.enable_creator_fee = if pool_struct.enable_creator_fee == 1 { true } else { false };
-    // --- FIN ---
+    pool.enable_creator_fee = pool_struct.enable_creator_fee == 1;
 
-    let vault_a_data = vault_a_res?;
+    // Décodage des vaults pour les réserves
     pool.reserve_a = u64::from_le_bytes(vault_a_data[64..72].try_into()?);
-    let vault_b_data = vault_b_res?;
     pool.reserve_b = u64::from_le_bytes(vault_b_data[64..72].try_into()?);
 
-    // --- MISE À JOUR DE LA LOGIQUE D'HYDRATATION DES MINTS ---
-    let mint_a_data = mint_a_res?;
+    // Décodage des mints pour les frais de transfert et les décimales
     let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.token_0_mint, &mint_a_data)?;
     pool.mint_a_transfer_fee_bps = decoded_mint_a.transfer_fee_basis_points;
-    // AJOUTEZ CETTE LIGNE :
     pool.mint_0_decimals = decoded_mint_a.decimals;
 
-    let mint_b_data = mint_b_res?;
     let decoded_mint_b = spl_token_decoders::mint::decode_mint(&pool.token_1_mint, &mint_b_data)?;
     pool.mint_b_transfer_fee_bps = decoded_mint_b.transfer_fee_basis_points;
-    // AJOUTEZ CETTE LIGNE :
     pool.mint_1_decimals = decoded_mint_b.decimals;
-    // --- FIN DE LA MISE À JOUR ---
 
     Ok(())
 }
