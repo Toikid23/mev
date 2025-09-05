@@ -14,6 +14,7 @@ use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 use num_integer::Integer;
 use borsh::BorshDeserialize;
 use spl_stake_pool::state::StakePool;
+use solana_sdk::account::Account;
 
 // --- CONSTANTES ---
 pub const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB");
@@ -177,42 +178,90 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraSbpPoo
 
 
 pub async fn hydrate(pool: &mut DecodedMeteoraSbpPool, rpc_client: &RpcClient) -> Result<()> {
-    // La fonction est maintenant beaucoup plus simple, elle ne touche plus au prix virtuel.
-    let (vault_a_res, vault_b_res, pool_lp_a_res, pool_lp_b_res, mint_a_res, mint_b_res) = tokio::join!(
-        rpc_client.get_account_data(&pool.vault_a), rpc_client.get_account_data(&pool.vault_b),
-        rpc_client.get_account_data(&pool.a_vault_lp), rpc_client.get_account_data(&pool.b_vault_lp),
-        rpc_client.get_account_data(&pool.mint_a), rpc_client.get_account_data(&pool.mint_b)
-    );
-    let vault_a_data = vault_a_res?; let vault_b_data = vault_b_res?;
-    let expected_size = std::mem::size_of::<onchain_layouts::Vault>();
-    if vault_a_data.len() < 8 + expected_size || vault_b_data.len() < 8 + expected_size { bail!("Vault account data too short."); }
-    let data_slice_a = &vault_a_data[8..];
-    let vault_a_struct: &onchain_layouts::Vault = bytemuck::from_bytes(&data_slice_a[..expected_size]);
-    pool.vault_a_state = *vault_a_struct; pool.a_token_vault = vault_a_struct.token_vault; pool.a_vault_lp_mint = vault_a_struct.lp_mint;
-    let data_slice_b = &vault_b_data[8..];
-    let vault_b_struct: &onchain_layouts::Vault = bytemuck::from_bytes(&data_slice_b[..expected_size]);
-    pool.vault_b_state = *vault_b_struct; pool.b_token_vault = vault_b_struct.token_vault; pool.b_vault_lp_mint = vault_b_struct.lp_mint;
-    let (vault_a_lp_mint_res, vault_b_lp_mint_res) = tokio::join!(
-        rpc_client.get_account_data(&pool.a_vault_lp_mint), rpc_client.get_account_data(&pool.b_vault_lp_mint)
-    );
-    pool.mint_a_decimals = crate::decoders::spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_res?)?.decimals;
-    pool.mint_b_decimals = crate::decoders::spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_res?)?.decimals;
-    let pool_lp_a_account = SplTokenAccount::unpack(&pool_lp_a_res?)?;
+    // --- Étape 1 : Premier batch de requêtes groupées (inchangé, c'est correct) ---
+    let initial_keys = vec![
+        pool.vault_a,
+        pool.vault_b,
+        pool.a_vault_lp,
+        pool.b_vault_lp,
+        pool.mint_a,
+        pool.mint_b,
+    ];
+
+    let mut initial_accounts = rpc_client.get_multiple_accounts(&initial_keys).await?;
+    let mut accounts_iter = initial_accounts.into_iter();
+
+    let vault_a_account = accounts_iter.next().flatten().ok_or_else(|| anyhow!("Compte vault A ({}) non trouvé", pool.vault_a))?;
+    let vault_b_account = accounts_iter.next().flatten().ok_or_else(|| anyhow!("Compte vault B ({}) non trouvé", pool.vault_b))?;
+    let pool_lp_a_account_data = accounts_iter.next().flatten().ok_or_else(|| anyhow!("Compte pool LP A ({}) non trouvé", pool.a_vault_lp))?.data;
+    let pool_lp_b_account_data = accounts_iter.next().flatten().ok_or_else(|| anyhow!("Compte pool LP B ({}) non trouvé", pool.b_vault_lp))?.data;
+    let mint_a_data = accounts_iter.next().flatten().ok_or_else(|| anyhow!("Compte mint A ({}) non trouvé", pool.mint_a))?.data;
+    let mint_b_data = accounts_iter.next().flatten().ok_or_else(|| anyhow!("Compte mint B ({}) non trouvé", pool.mint_b))?.data;
+
+    // --- Étape 2 : Décodage partiel avec la CORRECTION de slicing ---
+    let expected_vault_size = std::mem::size_of::<onchain_layouts::Vault>();
+
+    // Vérification de sécurité pour des messages d'erreur clairs
+    if vault_a_account.data.len() < 8 + expected_vault_size || vault_b_account.data.len() < 8 + expected_vault_size {
+        bail!("Données de compte Vault trop courtes pour le décodage.");
+    }
+
+    // *** LA CORRECTION EST ICI ***
+    // On crée une tranche qui commence à l'offset 8 ET qui a la longueur exacte de la structure.
+    let vault_a_data_slice = &vault_a_account.data[8..(8 + expected_vault_size)];
+    let vault_a_struct: &onchain_layouts::Vault = bytemuck::from_bytes(vault_a_data_slice);
+    pool.vault_a_state = *vault_a_struct;
+    pool.a_token_vault = vault_a_struct.token_vault;
+    pool.a_vault_lp_mint = vault_a_struct.lp_mint;
+
+    let vault_b_data_slice = &vault_b_account.data[8..(8 + expected_vault_size)];
+    let vault_b_struct: &onchain_layouts::Vault = bytemuck::from_bytes(vault_b_data_slice);
+    pool.vault_b_state = *vault_b_struct;
+    pool.b_token_vault = vault_b_struct.token_vault;
+    pool.b_vault_lp_mint = vault_b_struct.lp_mint;
+    // *** FIN DE LA CORRECTION ***
+
+    // --- Étape 3 : Deuxième batch (inchangé, c'est correct) ---
+    let secondary_keys = vec![
+        pool.a_vault_lp_mint,
+        pool.b_vault_lp_mint,
+        solana_sdk::sysvar::clock::ID,
+    ];
+
+    let mut secondary_accounts = rpc_client.get_multiple_accounts(&secondary_keys).await?;
+    let mut secondary_iter = secondary_accounts.into_iter();
+
+    let vault_a_lp_mint_data = secondary_iter.next().flatten().ok_or_else(|| anyhow!("Compte LP mint A ({}) non trouvé", pool.a_vault_lp_mint))?.data;
+    let vault_b_lp_mint_data = secondary_iter.next().flatten().ok_or_else(|| anyhow!("Compte LP mint B ({}) non trouvé", pool.b_vault_lp_mint))?.data;
+    let clock_account_data = secondary_iter.next().flatten().ok_or_else(|| anyhow!("Compte Clock sysvar non trouvé"))?.data;
+
+    // --- Étape 4 : Décodage final et calcul des réserves (inchangé, c'est correct) ---
+    pool.mint_a_decimals = crate::decoders::spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_data)?.decimals;
+    pool.mint_b_decimals = crate::decoders::spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_data)?.decimals;
+
+    let pool_lp_a_account = SplTokenAccount::unpack(&pool_lp_a_account_data)?;
     pool.pool_a_vault_lp_amount = pool_lp_a_account.amount;
-    let pool_lp_b_account = SplTokenAccount::unpack(&pool_lp_b_res?)?;
+
+    let pool_lp_b_account = SplTokenAccount::unpack(&pool_lp_b_account_data)?;
     pool.pool_b_vault_lp_amount = pool_lp_b_account.amount;
-    let vault_a_lp_mint_account = SplMint::unpack(&vault_a_lp_mint_res?)?;
+
+    let vault_a_lp_mint_account = SplMint::unpack(&vault_a_lp_mint_data)?;
     pool.vault_a_lp_supply = vault_a_lp_mint_account.supply;
-    let vault_b_lp_mint_account = SplMint::unpack(&vault_b_lp_mint_res?)?;
+
+    let vault_b_lp_mint_account = SplMint::unpack(&vault_b_lp_mint_data)?;
     pool.vault_b_lp_supply = vault_b_lp_mint_account.supply;
-    let clock_account = rpc_client.get_account(&solana_sdk::sysvar::clock::ID).await?;
-    let clock: solana_sdk::sysvar::clock::Clock = bincode::deserialize(&clock_account.data)?;
+
+    let clock: solana_sdk::sysvar::clock::Clock = bincode::deserialize(&clock_account_data)?;
     let current_timestamp = clock.unix_timestamp;
 
     let unlocked_a = get_unlocked_amount(&pool.vault_a_state, current_timestamp);
     let unlocked_b = get_unlocked_amount(&pool.vault_b_state, current_timestamp);
-    if pool.vault_a_lp_supply > 0 { pool.reserve_a = get_tokens_for_lp(pool.pool_a_vault_lp_amount, unlocked_a, pool.vault_a_lp_supply); }
-    if pool.vault_b_lp_supply > 0 { pool.reserve_b = get_tokens_for_lp(pool.pool_b_vault_lp_amount, unlocked_b, pool.vault_b_lp_supply); }
+    if pool.vault_a_lp_supply > 0 {
+        pool.reserve_a = get_tokens_for_lp(pool.pool_a_vault_lp_amount, unlocked_a, pool.vault_a_lp_supply);
+    }
+    if pool.vault_b_lp_supply > 0 {
+        pool.reserve_b = get_tokens_for_lp(pool.pool_b_vault_lp_amount, unlocked_b, pool.vault_b_lp_supply);
+    }
 
     println!("✅ Prix Virtuel lu depuis le pool state: {}", pool.depeg_virtual_price);
 
@@ -252,9 +301,6 @@ impl PoolOperations for DecodedMeteoraSbpPool {
     fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<u64> {
         if !self.enabled || amount_in == 0 { return Ok(0); }
 
-        // --- LOGS DE DÉBOGAGE CONSERVÉS ---
-        println!("\n--- [DEBUG get_quote v2 - Precision] ---");
-        println!("-> Input: {} lamports de {}", amount_in, token_in_mint);
 
         let (in_reserve, out_reserve, in_vault_state, out_vault_state, in_vault_lp_supply, out_vault_lp_supply, in_pool_lp_amount, _out_pool_lp_amount) =
             if *token_in_mint == self.mint_a {
@@ -325,9 +371,7 @@ impl PoolOperations for DecodedMeteoraSbpPool {
         let unlocked_out_vault = get_unlocked_amount(&out_vault_state, current_timestamp);
         let out_lp_to_burn = get_lp_for_tokens(amount_out_gross, unlocked_out_vault, out_vault_lp_supply);
         let final_amount_out = get_tokens_for_lp(out_lp_to_burn, unlocked_out_vault, out_vault_lp_supply);
-
-        println!("-> Prédiction finale (précision améliorée): {}", final_amount_out);
-        println!("--- [FIN DEBUG get_quote v2] ---");
+        
 
         Ok(final_amount_out)
     }
