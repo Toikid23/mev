@@ -59,6 +59,16 @@ solana-sdk-ids = "2.2.1"
 
 
 
+# --- Dépendances pour le Client Geyser gRPC ---
+yellowstone-grpc-client = "9.0.0"
+yellowstone-grpc-proto = "9.0.0"
+tonic = "0.14.2"
+prost = "0.14.1"
+tokio-stream = "0.1.17"
+
+
+
+
 # --- Dépendances pour Jito --
 
 
@@ -72,3 +82,11 @@ path = "src/bin/filter_engine.rs"
 [[bin]]
 name = "execution_bot"
 path = "src/bin/execution_bot.rs"
+
+[[bin]]
+name = "census_runner"
+path = "src/bin/census_runner.rs"
+
+[[bin]]
+name = "filtering_bot"
+path = "src/bin/filtering_bot.rs"
