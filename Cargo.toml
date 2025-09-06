@@ -58,6 +58,13 @@ spl-stake-pool = "2.0.3"
 solana-sdk-ids = "2.2.1"
 
 
+
+# --- Dépendances pour Jito --
+
+
+
+
+
 [[bin]]
 name = "filter_engine"
 path = "src/bin/filter_engine.rs"
