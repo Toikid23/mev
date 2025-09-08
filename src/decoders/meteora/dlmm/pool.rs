@@ -405,20 +405,29 @@ pub async fn hydrate(pool: &mut DecodedDlmmPool, rpc_client: &ResilientRpcClient
     pool.mint_b_program = mint_b_account.owner;
 
 
-    // Étape 2: Hydratation "Look-Ahead" des BinArrays (version simplifiée)
+    // Étape 2: Collecter toutes les adresses, PUIS faire un seul appel groupé.
     let mut hydrated_bin_arrays = BTreeMap::new();
     let active_array_idx = get_bin_array_index_from_bin_id(pool.active_bin_id);
 
-    // On définit les 3 index que nous voulons charger
     let indices_to_fetch = [
         active_array_idx - 1,
         active_array_idx,
-        active_array_idx + 1
+        active_array_idx + 1,
     ];
 
-    for &index in &indices_to_fetch {
-        let address = get_bin_array_address(&pool.address, index, &pool.program_id);
-        if let Ok(account) = rpc_client.get_account(&address).await {
+    // 1. On prépare la liste d'adresses
+    let addresses_to_fetch: Vec<Pubkey> = indices_to_fetch
+        .iter()
+        .map(|&index| get_bin_array_address(&pool.address, index, &pool.program_id))
+        .collect();
+
+    // 2. On fait un seul appel RPC
+    let accounts_results = rpc_client.get_multiple_accounts(&addresses_to_fetch).await?;
+
+    // 3. On traite les résultats
+    for (i, account_opt) in accounts_results.into_iter().enumerate() {
+        if let Some(account) = account_opt {
+            let index = indices_to_fetch[i];
             if let Ok(decoded_array) = decode_bin_array(index, &account.data) {
                 hydrated_bin_arrays.insert(index, decoded_array);
             }
@@ -451,21 +460,27 @@ pub async fn hydrate_with_depth(pool: &mut DecodedDlmmPool, rpc_client: &Resilie
     pool.mint_b_transfer_fee_max = decoded_mint_b.max_transfer_fee;
     pool.mint_b_program = mint_b_account.owner;
 
-    // Étape 2: Hydratation "Look-Ahead" (version simple et fiable)
+    // --- OPTIMISATION ICI ---
+    // Étape 2: Collecter toutes les adresses, PUIS faire un seul appel groupé.
     let mut hydrated_bin_arrays = BTreeMap::new();
     let active_array_idx = get_bin_array_index_from_bin_id(pool.active_bin_id);
 
-    // On crée la liste des index à charger
     let mut indices_to_fetch = vec![active_array_idx];
     for i in 1..=depth {
         indices_to_fetch.push(active_array_idx - i as i64);
         indices_to_fetch.push(active_array_idx + i as i64);
     }
 
-    // On fait des appels séparés (plus simple et évite les erreurs de logique)
-    for &index in &indices_to_fetch {
-        let address = get_bin_array_address(&pool.address, index, &pool.program_id);
-        if let Ok(account) = rpc_client.get_account(&address).await {
+    let addresses_to_fetch: Vec<Pubkey> = indices_to_fetch
+        .iter()
+        .map(|&index| get_bin_array_address(&pool.address, index, &pool.program_id))
+        .collect();
+
+    let accounts_results = rpc_client.get_multiple_accounts(&addresses_to_fetch).await?;
+
+    for (i, account_opt) in accounts_results.into_iter().enumerate() {
+        if let Some(account) = account_opt {
+            let index = indices_to_fetch[i];
             if let Ok(decoded_array) = decode_bin_array(index, &account.data) {
                 hydrated_bin_arrays.insert(index, decoded_array);
             }
@@ -494,7 +509,7 @@ pub async fn rehydrate_for_escalation(
         *bin_arrays.keys().min().unwrap_or(&0)
     };
 
-    let mut new_indices_to_fetch = vec![];
+    let mut new_indices_to_fetch = Vec::new();
     for i in 1..=3 { // On va chercher les 3 suivants
         let next_index = if go_up {
             boundary_index + i
@@ -504,10 +519,20 @@ pub async fn rehydrate_for_escalation(
         new_indices_to_fetch.push(next_index);
     }
 
-    // On fait les appels RPC pour les nouveaux arrays
-    for &index in &new_indices_to_fetch {
-        let address = get_bin_array_address(&pool.address, index, &pool.program_id);
-        if let Ok(account) = rpc_client.get_account(&address).await {
+    // --- OPTIMISATION APPLIQUÉE ICI ---
+    // 1. Préparer la liste d'adresses
+    let addresses_to_fetch: Vec<Pubkey> = new_indices_to_fetch
+        .iter()
+        .map(|&index| get_bin_array_address(&pool.address, index, &pool.program_id))
+        .collect();
+
+    // 2. Faire un seul appel RPC groupé
+    let accounts_results = rpc_client.get_multiple_accounts(&addresses_to_fetch).await?;
+
+    // 3. Traiter les résultats rapidement
+    for (i, account_opt) in accounts_results.into_iter().enumerate() {
+        if let Some(account) = account_opt {
+            let index = new_indices_to_fetch[i]; // Retrouver l'index original
             if let Ok(decoded_array) = decode_bin_array(index, &account.data) {
                 // On ajoute les nouveaux arrays au BTreeMap existant
                 bin_arrays.insert(index, decoded_array);
