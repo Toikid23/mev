@@ -9,9 +9,9 @@ use mev::config::Config;
 use mev::rpc::ResilientRpcClient; // <-- AJOUTÉ
 use mev::decoders::{
     meteora::{damm_v1, damm_v2, dlmm},
-    orca::{amm_v1, amm_v2, whirlpool},
+    orca::whirlpool,
     pump::amm,
-    raydium::{amm_v4, clmm, cpmm, launchpad, stable_swap},
+    raydium::{amm_v4, clmm, cpmm},
 };
 
 // La signature de la fonction change pour accepter notre client
@@ -45,14 +45,10 @@ async fn main() -> Result<()> {
         if let Err(e) = amm_v4::test::test_ammv4_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! AMMv4 a échoué: {}", e); }
         if let Err(e) = cpmm::test::test_cpmm_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! CPMM a échoué: {}", e); }
         if let Err(e) = clmm::test::test_clmm(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! CLMM a échoué: {}", e); }
-        if let Err(e) = launchpad::test::test_launchpad(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! Launchpad a échoué: {}", e); }
-        if let Err(e) = stable_swap::test::test_stable_swap(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! Stable Swap a échoué: {}", e); }
         if let Err(e) = damm_v1::test::test_damm_v1_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! Meteora DAMM v1 a échoué: {}", e); }
         if let Err(e) = damm_v2::test::test_damm_v2_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! Meteora DAMM v2 a échoué: {}", e); }
         if let Err(e) = dlmm::test::test_dlmm_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! DLMM a échoué: {}", e); }
         if let Err(e) = whirlpool::test::test_whirlpool_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! Whirlpool a échoué: {}", e); }
-        if let Err(e) = amm_v2::test::test_orca_amm_v2(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! Orca AMM V2 a échoué: {}", e); }
-        if let Err(e) = amm_v1::test::test_orca_amm_v1(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! Orca AMM V1 a échoué: {}", e); }
         if let Err(e) = amm::test::test_amm_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! pump.fun AMM a échoué: {}", e); }
 
     } else {
@@ -62,14 +58,10 @@ async fn main() -> Result<()> {
                 "amm_v4" => amm_v4::test::test_ammv4_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await,
                 "cpmm" => cpmm::test::test_cpmm_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await,
                 "clmm" => clmm::test::test_clmm(&rpc_client, &payer_keypair, current_timestamp).await,
-                "launchpad" => launchpad::test::test_launchpad(&rpc_client, &payer_keypair, current_timestamp).await,
-                "stable_swap" => stable_swap::test::test_stable_swap(&rpc_client, &payer_keypair, current_timestamp).await,
                 "damm_v1" => damm_v1::test::test_damm_v1_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await,
                 "damm_v2" => damm_v2::test::test_damm_v2_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await,
                 "dlmm" => dlmm::test::test_dlmm_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await,
                 "whirlpool" => whirlpool::test::test_whirlpool_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await,
-                "orca_amm_v2" => amm_v2::test::test_orca_amm_v2(&rpc_client, &payer_keypair, current_timestamp).await,
-                "orca_amm_v1" => amm_v1::test::test_orca_amm_v1(&rpc_client, &payer_keypair, current_timestamp).await,
                 "pump_amm" => amm::test::test_amm_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await,
                 _ => {
                     println!("!! Test inconnu: '{}'", test_name);

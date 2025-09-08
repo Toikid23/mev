@@ -76,10 +76,6 @@ tokio-stream = "0.1.17"
 
 
 [[bin]]
-name = "filter_engine"
-path = "src/bin/filter_engine.rs"
-
-[[bin]]
 name = "execution_bot"
 path = "src/bin/execution_bot.rs"
 

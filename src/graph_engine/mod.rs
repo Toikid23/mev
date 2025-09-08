@@ -43,11 +43,6 @@ impl Graph {
                 raydium::clmm::hydrate(&mut p, rpc_client).await?;
                 Ok(Pool::RaydiumClmm(p))
             }
-            Pool::RaydiumLaunchpad(mut p) => {
-                println!("Hydrating Raydium Launchpad: {}", p.address);
-                raydium::launchpad::hydrate(&mut p, rpc_client).await?;
-                Ok(Pool::RaydiumLaunchpad(p))
-            }
 
             // --- Meteora ---
             // CORRECTION: On utilise le nouveau nom MeteoraDammV1 que vous aviez défini
@@ -73,16 +68,6 @@ impl Graph {
                 orca::whirlpool::hydrate(&mut p, rpc_client).await?;
                 Ok(Pool::OrcaWhirlpool(p))
             }
-            Pool::OrcaAmmV1(mut p) => {
-                println!("Hydrating Orca AMM V1: {}", p.address);
-                orca::amm_v1::hydrate(&mut p, rpc_client).await?;
-                Ok(Pool::OrcaAmmV1(p))
-            }
-            Pool::OrcaAmmV2(mut p) => {
-                println!("Hydrating Orca AMM V2: {}", p.address);
-                orca::amm_v2::hydrate(&mut p, rpc_client).await?;
-                Ok(Pool::OrcaAmmV2(p))
-            }
 
             // --- Pump.fun ---
             Pool::PumpAmm(mut p) => {
@@ -90,9 +75,6 @@ impl Graph {
                 pump::amm::hydrate(&mut p, rpc_client).await?;
                 Ok(Pool::PumpAmm(p))
             }
-
-            // Pour les pools qui n'ont pas de logique d'hydratation (comme Stable Swap pour l'instant)
-            _ => Ok(pool),
         }
     }
 
@@ -105,14 +87,10 @@ impl Graph {
             Pool::RaydiumAmmV4(p) => p.address,
             Pool::RaydiumCpmm(p) => p.address,
             Pool::RaydiumClmm(p) => p.address,
-            Pool::RaydiumLaunchpad(p) => p.address,
-            Pool::RaydiumStableSwap(p) => p.address,
-            Pool::MeteoraDammV1(p) => p.address, // <-- CORRECTION
+            Pool::MeteoraDammV1(p) => p.address,
             Pool::MeteoraDammV2(p) => p.address,
             Pool::MeteoraDlmm(p) => p.address,
             Pool::OrcaWhirlpool(p) => p.address,
-            Pool::OrcaAmmV2(p) => p.address,
-            Pool::OrcaAmmV1(p) => p.address,
             Pool::PumpAmm(p) => p.address,
         };
 

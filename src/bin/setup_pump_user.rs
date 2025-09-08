@@ -3,7 +3,6 @@
 use anyhow::Result;
 use mev::{
     config::Config,
-    // --- CHEMIN CORRIGÉ ---
     decoders::pump::amm::PUMP_PROGRAM_ID,
 };
 use solana_client::nonblocking::rpc_client::RpcClient;
@@ -11,9 +10,9 @@ use solana_sdk::{
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
     signer::{keypair::Keypair, Signer},
-    system_program,
     transaction::Transaction,
 };
+use solana_sdk_ids::system_program;
 
 // Cette fonction est une copie de celle dans pump/amm/pool.rs pour créer l'instruction
 fn create_init_user_volume_accumulator_instruction(user_owner: &Pubkey) -> Result<Instruction> {
