@@ -3,7 +3,7 @@
 use crate::decoders::spl_token_decoders;
 use anyhow::{anyhow, bail, Result};
 use bytemuck::{Pod, Zeroable};
-use solana_client::nonblocking::rpc_client::RpcClient;
+use crate::rpc::ResilientRpcClient;
 use solana_sdk::pubkey::Pubkey;
 use uint::construct_uint;
 use solana_sdk::instruction::{Instruction, AccountMeta};
@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 use super::math;
 use crate::decoders::pool_operations::find_input_by_binary_search;
+
 
 construct_uint! { pub struct U256(4); }
 
@@ -99,7 +100,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraDammPo
     })
 }
 
-pub async fn hydrate(pool: &mut DecodedMeteoraDammPool, rpc_client: &RpcClient) -> Result<()> {
+pub async fn hydrate(pool: &mut DecodedMeteoraDammPool, rpc_client: &ResilientRpcClient) -> Result<()> {
     // 1. Rassembler les clés publiques des deux mints.
     let mint_keys = vec![pool.mint_a, pool.mint_b];
 

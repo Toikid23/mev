@@ -1,9 +1,6 @@
-// src/decoders/raydium_decoders/pool
-
 use crate::decoders::pool_operations::PoolOperations;
 use bytemuck::{from_bytes, Pod, Zeroable};
 use anyhow::{bail, Result, anyhow};
-use solana_client::nonblocking::rpc_client::RpcClient;
 use super::config;
 use super::math;
 use crate::decoders::spl_token_decoders;
@@ -15,6 +12,7 @@ use solana_sdk::{
     pubkey::Pubkey,
 };
 use std::str::FromStr;
+use crate::rpc::ResilientRpcClient;
 // --- STRUCTURES PUBLIQUES ---
 
 /// Énumère les types de courbes de prix possibles pour un pool Launchpad.
@@ -235,7 +233,7 @@ impl PoolOperations for DecodedLaunchpadPool {
     }
 }
 
-pub async fn hydrate(pool: &mut DecodedLaunchpadPool, rpc_client: &RpcClient) -> Result<()> {
+pub async fn hydrate(pool: &mut DecodedLaunchpadPool, rpc_client: &ResilientRpcClient) -> Result<()> {
     // --- ON LANCE TOUS LES APPELS EN PARALLÈLE ---
     let (config_res, mint_a_res, mint_b_res) = tokio::join!(
         rpc_client.get_account_data(&pool.global_config),

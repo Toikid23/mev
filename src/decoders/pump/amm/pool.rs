@@ -1,7 +1,6 @@
 use bytemuck::{Pod, Zeroable};
 use solana_sdk::pubkey::Pubkey;
 use anyhow::{anyhow, bail, Result};
-use solana_client::nonblocking::rpc_client::RpcClient;
 use crate::decoders::spl_token_decoders;
 use solana_sdk::instruction::{Instruction, AccountMeta};
 use solana_sdk_ids::system_program;
@@ -12,6 +11,7 @@ use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 use std::str::FromStr;
 use borsh::{BorshDeserialize, BorshSerialize};
 use crate::decoders::spl_token_decoders::mint::DecodedMint;
+use crate::rpc::ResilientRpcClient;
 
 // --- CONSTANTES ---
 pub const PUMP_PROGRAM_ID: Pubkey = solana_sdk::pubkey!("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA");
@@ -102,7 +102,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedPumpAmmPool> 
     })
 }
 
-pub async fn hydrate(pool: &mut DecodedPumpAmmPool, rpc_client: &RpcClient) -> Result<()> {
+pub async fn hydrate(pool: &mut DecodedPumpAmmPool, rpc_client: &ResilientRpcClient) -> Result<()> {
     let (global_config_address, _) = Pubkey::find_program_address(&[b"global_config"], &PUMP_PROGRAM_ID);
     let (fee_config_address, _) = Pubkey::find_program_address(&[b"fee_config", PUMP_PROGRAM_ID.as_ref()], &PUMP_FEE_PROGRAM_ID);
 

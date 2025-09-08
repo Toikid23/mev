@@ -1,13 +1,13 @@
 use crate::decoders::spl_token_decoders;
 use anyhow::{anyhow, bail, Result};
 use bytemuck::{from_bytes, Pod, Zeroable};
-use solana_client::nonblocking::rpc_client::RpcClient;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 use solana_sdk::instruction::{AccountMeta, Instruction};
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
+use crate::rpc::ResilientRpcClient;
 
 
 
@@ -111,7 +111,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedOrcaAmmPool> 
 }
 
 // ... (la fonction `hydrate` et l'implémentation de `PoolOperations` ne changent pas)
-pub async fn hydrate(pool: &mut DecodedOrcaAmmPool, rpc_client: &RpcClient) -> Result<()> {
+pub async fn hydrate(pool: &mut DecodedOrcaAmmPool, rpc_client: &ResilientRpcClient) -> Result<()> {
     let vaults_to_fetch = [pool.vault_a, pool.vault_b];
     let (vault_accounts_res, mint_a_res, mint_b_res) = tokio::join!(
         rpc_client.get_multiple_accounts(&vaults_to_fetch),

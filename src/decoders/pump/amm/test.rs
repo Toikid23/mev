@@ -1,28 +1,26 @@
-// DANS src/decoders/pump/amm/test.rs
-// REMPLACEZ L'INTÉGRALITÉ DU FICHIER
-
 use anyhow::{anyhow, bail};
-use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
     pubkey::Pubkey,
     signature::Keypair,
     signer::Signer,
-    transaction::Transaction,
+    transaction::VersionedTransaction,
+    message::VersionedMessage,
 };
 use std::str::FromStr;
 use crate::decoders::pool_operations::UserSwapAccounts;
 use spl_associated_token_account::get_associated_token_address_with_program_id;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use crate::rpc::ResilientRpcClient;
 
 use crate::decoders::PoolOperations;
 use crate::decoders::pump::amm::{
     decode_pool,
     hydrate,
-    events::{PumpBuyEvent}, // Importer la structure de l'événement complet
+    events::{PumpBuyEvent},
 };
 use borsh::BorshDeserialize;
 
-pub async fn test_amm_with_simulation(rpc_client: &RpcClient, payer_keypair: &Keypair, current_timestamp: i64) -> anyhow::Result<()> {
+pub async fn test_amm_with_simulation(rpc_client: &ResilientRpcClient, payer_keypair: &Keypair, current_timestamp: i64) -> anyhow::Result<()> {
     const POOL_ADDRESS: &str = "CLYFHhJfJjNPSMQv7byFeAsZ8x1EXQyYkGTPrNc2vc78";
     const DESIRED_OUTPUT_AMOUNT_UI: f64 = 30000.0;
 
@@ -70,12 +68,16 @@ pub async fn test_amm_with_simulation(rpc_client: &RpcClient, payer_keypair: &Ke
     instructions.push(swap_ix);
 
     let recent_blockhash = rpc_client.get_latest_blockhash().await?;
-    let transaction = Transaction::new_signed_with_payer(
-        &instructions,
-        Some(&payer_keypair.pubkey()),
+    // --- MODIFICATION ICI ---
+    let transaction = VersionedTransaction::try_new(
+        VersionedMessage::V0(solana_sdk::message::v0::Message::try_compile(
+            &payer_keypair.pubkey(),
+            &instructions,
+            &[], // Pas de LUT
+            recent_blockhash,
+        )?),
         &[payer_keypair],
-        recent_blockhash
-    );
+    )?;
 
     println!("\n[3/3] Exécution de la simulation...");
     let sim_result = rpc_client.simulate_transaction(&transaction).await?.value;

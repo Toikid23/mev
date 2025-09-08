@@ -2,7 +2,7 @@
 // VERSION FINALE CORRIGÉE
 
 use anyhow::Result;
-use solana_client::nonblocking::rpc_client::RpcClient;
+use crate::rpc::ResilientRpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
 
@@ -25,8 +25,7 @@ impl Graph {
 
     /// Prend un pool "brut", fait les appels RPC nécessaires,
     /// et retourne une version "hydratée" prête pour le graphe.
-    pub async fn hydrate_pool(&self, pool: Pool, rpc_client: &RpcClient) -> Result<Pool> {
-        // Le `match` utilise maintenant les chemins complets et corrigés pour appeler `hydrate`
+    pub async fn hydrate_pool(&self, pool: Pool, rpc_client: &ResilientRpcClient) -> Result<Pool> {
         match pool {
             // --- Raydium ---
             Pool::RaydiumAmmV4(mut p) => {

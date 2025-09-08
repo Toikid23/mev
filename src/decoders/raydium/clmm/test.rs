@@ -1,12 +1,10 @@
-// src/decoders/raydium/clmm/test.rs
-
 use anyhow::{anyhow, bail, Result};
-use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
     pubkey::Pubkey,
     signature::Keypair,
     signer::Signer,
-    transaction::Transaction,
+    transaction::{VersionedTransaction},
+    message::VersionedMessage,
 };
 use std::str::FromStr;
 use spl_associated_token_account::get_associated_token_address;
@@ -17,9 +15,10 @@ use crate::decoders::raydium::clmm::{
 };
 use crate::decoders::PoolOperations;
 use crate::decoders::pool_operations::UserSwapAccounts;
+use crate::rpc::ResilientRpcClient;
 
 // Renommée pour la cohérence
-pub async fn test_clmm(rpc_client: &RpcClient, payer: &Keypair, current_timestamp: i64) -> Result<()> {
+pub async fn test_clmm(rpc_client: &ResilientRpcClient, payer: &Keypair, current_timestamp: i64) -> Result<()> {
     const POOL_ADDRESS: &str = "YrrUStgPugDp8BbfosqDeFssen6sA75ZS1QJvgnHtmY";
     const PROGRAM_ID: &str = "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK";
     const INPUT_MINT_STR: &str = "So11111111111111111111111111111111111111112";
@@ -89,8 +88,18 @@ pub async fn test_clmm(rpc_client: &RpcClient, payer: &Keypair, current_timestam
         &user_accounts,
     )?;
 
-    let mut transaction = Transaction::new_with_payer(&[swap_ix], Some(&payer.pubkey()));
-    transaction.sign(&[payer], rpc_client.get_latest_blockhash().await?);
+    let recent_blockhash = rpc_client.get_latest_blockhash().await?;
+    // --- MODIFICATION ICI ---
+    let transaction = VersionedTransaction::try_new(
+        VersionedMessage::V0(solana_sdk::message::v0::Message::try_compile(
+            &payer.pubkey(),
+            &[swap_ix],
+            &[], // Pas de LUT
+            recent_blockhash,
+        )?),
+        &[payer],
+    )?;
+
 
     println!("\n[3/3] Exécution de la simulation standard...");
     let sim_result = rpc_client.simulate_transaction(&transaction).await?.value;

@@ -2,7 +2,6 @@
 
 use super::math;
 use bytemuck::{Pod, Zeroable};
-use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::program_pack::Pack;
 use solana_sdk::pubkey::Pubkey;
 use spl_token::state::{Account as SplTokenAccount, Mint as SplMint};
@@ -12,6 +11,7 @@ use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 use crate::decoders::pool_operations::find_input_by_binary_search;
+use crate::rpc::ResilientRpcClient;
 
 // --- CONSTANTES ---
 pub const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB");
@@ -139,7 +139,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraSbpPoo
 }
 
 
-pub async fn hydrate(pool: &mut DecodedMeteoraSbpPool, rpc_client: &RpcClient) -> Result<()> {
+pub async fn hydrate(pool: &mut DecodedMeteoraSbpPool, rpc_client: &ResilientRpcClient) -> Result<()> {
     // --- Étape 1 : Premier batch de requêtes groupées (inchangé, c'est correct) ---
     let initial_keys = vec![
         pool.vault_a,

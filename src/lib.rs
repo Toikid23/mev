@@ -10,3 +10,4 @@ pub mod graph_engine;
 pub mod state;
 pub mod strategies;
 pub mod filtering;
+pub mod rpc;

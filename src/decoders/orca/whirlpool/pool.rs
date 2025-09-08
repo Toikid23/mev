@@ -1,10 +1,7 @@
-// DANS: src/decoders/orca_decoders/pool
-
 use bytemuck::{Pod, Zeroable, from_bytes};
 use solana_sdk::pubkey::Pubkey;
 use anyhow::{anyhow, Result, bail};
 use std::collections::BTreeMap;
-use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey;
 use serde::{Serialize, Deserialize};
 use crate::decoders::spl_token_decoders;
@@ -15,6 +12,7 @@ use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 use solana_sdk::instruction::{Instruction, AccountMeta};
 use spl_associated_token_account::get_associated_token_address;
+use crate::rpc::ResilientRpcClient;
 
 // --- STRUCTURE DE TRAVAIL "PROPRE" (MODIFIÉE) ---
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,7 +106,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedWhirlpoolPool
     })
 }
 
-pub async fn hydrate(pool: &mut DecodedWhirlpoolPool, rpc_client: &RpcClient) -> Result<()> {
+pub async fn hydrate(pool: &mut DecodedWhirlpoolPool, rpc_client: &ResilientRpcClient) -> Result<()> {
     // --- Étape 1: Hydrater les mints (logique inchangée et correcte) ---
     let (mint_a_res, mint_b_res) = tokio::join!(
         rpc_client.get_account(&pool.mint_a),
@@ -159,7 +157,7 @@ pub async fn hydrate(pool: &mut DecodedWhirlpoolPool, rpc_client: &RpcClient) ->
     Ok(())
 }
 
-pub async fn hydrate_with_depth(pool: &mut DecodedWhirlpoolPool, rpc_client: &RpcClient, depth: usize) -> Result<()> {
+pub async fn hydrate_with_depth(pool: &mut DecodedWhirlpoolPool, rpc_client: &ResilientRpcClient, depth: usize) -> Result<()> {
     // Étape 1: Hydrater les mints (inchangé)
     let (mint_a_res, mint_b_res) = tokio::join!(
         rpc_client.get_account(&pool.mint_a),
@@ -211,8 +209,8 @@ pub async fn hydrate_with_depth(pool: &mut DecodedWhirlpoolPool, rpc_client: &Rp
 
 pub async fn rehydrate_for_escalation(
     pool: &mut DecodedWhirlpoolPool,
-    rpc_client: &RpcClient,
-    go_up: bool, // true si on a besoin d'index de tick plus élevés
+    rpc_client: &ResilientRpcClient,
+    go_up: bool,
 ) -> Result<()> {
     if pool.tick_arrays.is_none() {
         // Fallback au cas où le pool n'aurait pas été hydraté du tout

@@ -1,5 +1,3 @@
-// src/decoders/raydium_decoders/pool
-
 use bytemuck::{from_bytes, Pod, Zeroable};
 use solana_sdk::pubkey::Pubkey;
 use anyhow::{bail, Result, anyhow};

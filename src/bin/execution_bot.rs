@@ -6,7 +6,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use solana_address_lookup_table_program::state::AddressLookupTable;
 use solana_account_decoder::{UiAccountEncoding, UiAccountData};
 use solana_client::{
-    nonblocking::{pubsub_client::PubsubClient, rpc_client::RpcClient},
+    nonblocking::{pubsub_client::PubsubClient},
     rpc_config::RpcAccountInfoConfig,
 };
 use solana_program_pack::Pack;
@@ -17,13 +17,14 @@ use solana_sdk::{
 use solana_sdk::message::AddressLookupTableAccount as SdkAddressLookupTableAccount;
 use spl_token::state::Account as SplTokenAccount;
 use std::{collections::{HashMap, HashSet}, fs, io::Read, sync::Arc};
-use tokio::{sync::{mpsc, Mutex}, task::JoinHandle, time};
+use tokio::{sync::{mpsc, Mutex}};
 use mev::decoders::PoolOperations;
 
 use mev::{
     config::Config,
     decoders::Pool,
     graph_engine::Graph,
+    rpc::ResilientRpcClient,
     strategies::spatial::{find_spatial_arbitrage, ArbitrageOpportunity},
     execution::{
         transaction_builder,
@@ -96,7 +97,7 @@ const ADDRESS_LOOKUP_TABLE_ADDRESS: Pubkey = solana_sdk::pubkey!("E5h798UBdK8V1L
 async fn process_opportunity(
     opportunity: ArbitrageOpportunity,
     graph: Arc<Mutex<Graph>>,
-    rpc_client: Arc<RpcClient>,
+    rpc_client: Arc<ResilientRpcClient>,
     payer: Keypair,
 ) -> Result<()> {
     // Phase 0 : Charger la LUT (inchangé)
@@ -197,17 +198,17 @@ async fn main() -> Result<()> {
 
     let config = Config::load()?;
     let payer = Keypair::from_base58_string(&config.payer_private_key);
-    let rpc_client = Arc::new(RpcClient::new(config.solana_rpc_url.clone()));
+    let rpc_client = Arc::new(ResilientRpcClient::new(config.solana_rpc_url.clone(), 3, 500));
     let main_graph = Arc::new(load_main_graph_from_cache()?);
     let hot_graph = Arc::new(Mutex::new(Graph::new()));
     let wss_url = config.solana_rpc_url.replace("http", "ws");
     let pubsub_client = Arc::new(PubsubClient::new(&wss_url).await?);
     let (update_sender, mut update_receiver) = mpsc::channel::<(Pubkey, u64)>(100);
 
-    let hot_graph_clone_for_task1 = Arc::clone(&hot_graph);
-    let main_graph_clone_for_task1 = Arc::clone(&main_graph);
-    let pubsub_client_clone_for_task1 = Arc::clone(&pubsub_client);
-    let update_sender_clone_for_task1 = update_sender.clone();
+    let _hot_graph_clone_for_task1 = Arc::clone(&hot_graph);
+    let _main_graph_clone_for_task1 = Arc::clone(&main_graph);
+    let _pubsub_client_clone_for_task1 = Arc::clone(&pubsub_client);
+    let _update_sender_clone_for_task1 = update_sender.clone();
     let currently_processing = Arc::new(Mutex::new(HashSet::<String>::new()));
 
     tokio::spawn(async move {

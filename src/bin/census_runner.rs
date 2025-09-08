@@ -1,16 +1,16 @@
 // DANS : src/bin/census_runner.rs
 
 use anyhow::Result;
-use mev::{config::Config, filtering::census};
-use solana_client::rpc_client::RpcClient;
+use mev::{config::Config, filtering::census, rpc::ResilientRpcClient}; // <-- MODIFIÉ
 
-fn main() -> Result<()> {
-    // 1. Charger la configuration (URL du RPC, etc.)
+#[tokio::main]
+async fn main() -> Result<()> {
+    // 1. Charger la configuration et créer notre client résilient
     let config = Config::load()?;
-    let rpc_client = RpcClient::new(config.solana_rpc_url);
+    let rpc_client = ResilientRpcClient::new(config.solana_rpc_url, 3, 500);
 
-    // 2. Lancer la fonction principale du recensement
-    census::run_census(&rpc_client)?;
+    // 2. Lancer la fonction principale du recensement (maintenant avec await)
+    census::run_census(&rpc_client).await?;
 
     println!("\n✅ Recensement terminé. Le fichier 'pools_universe.json' a été créé ou mis à jour.");
 

@@ -6,7 +6,6 @@ use crate::{
     graph_engine::Graph,
 };
 use anyhow::{Context, Result};
-use solana_client::nonblocking::rpc_client::RpcClient; // On passe au client non-bloquant
 use solana_sdk::pubkey::Pubkey;
 use std::{
     collections::{HashMap, HashSet},
@@ -15,14 +14,16 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::mpsc;
+use crate::rpc::ResilientRpcClient;
 
 const HOTLIST_FILE_NAME: &str = "hotlist.json";
 const HOTLIST_SIZE: usize = 20;
 const ACTIVITY_WINDOW_SECS: u64 = 300;
 
-#[derive(Clone)] // Clone est plus simple à gérer ici
+#[derive(Clone)]
 pub struct FilteringEngine {
-    rpc_client: Arc<RpcClient>, // Utiliser un Arc pour le partage asynchrone
+    // --- Le type change ici ---
+    rpc_client: Arc<ResilientRpcClient>,
     graph_engine: Graph,
     hotlist: Arc<RwLock<HashMap<Pubkey, Instant>>>,
 }
@@ -30,7 +31,8 @@ pub struct FilteringEngine {
 impl FilteringEngine {
     pub fn new(rpc_url: String) -> Self {
         Self {
-            rpc_client: Arc::new(RpcClient::new(rpc_url)),
+            // --- L'instanciation change ici ---
+            rpc_client: Arc::new(ResilientRpcClient::new(rpc_url, 3, 500)),
             graph_engine: Graph::new(),
             hotlist: Arc::new(RwLock::new(HashMap::new())),
         }

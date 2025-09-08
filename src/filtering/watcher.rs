@@ -15,7 +15,6 @@ use yellowstone_grpc_proto::{
         subscribe_update::UpdateOneof, CommitmentLevel, SubscribeRequest,
         SubscribeRequestFilterTransactions,
     },
-    tonic::transport::Channel,
 };
 
 /// Le Guetteur est responsable de la connexion au stream Geyser

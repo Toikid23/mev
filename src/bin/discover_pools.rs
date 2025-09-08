@@ -1,7 +1,4 @@
-// src/bin/discover_pools.rs
-
 use anyhow::{Result, anyhow};
-use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::io::Write;
 use std::str::FromStr;
@@ -11,6 +8,7 @@ use mev::{
     data_pipeline::manual_pools::get_manual_pool_list,
     decoders::{Pool, raydium, orca, meteora, pump},
     graph_engine::Graph,
+    rpc::ResilientRpcClient,
 };
 
 
@@ -18,7 +16,7 @@ use mev::{
 async fn main() -> Result<()> {
     println!("--- Lancement du Constructeur de Cache (Mode Manuel) ---");
     let config = Config::load()?;
-    let rpc_client = RpcClient::new(config.solana_rpc_url);
+    let rpc_client = ResilientRpcClient::new(config.solana_rpc_url, 3, 500);
 
     let manual_pool_addresses_str = get_manual_pool_list();
     if manual_pool_addresses_str.is_empty() {
@@ -33,7 +31,11 @@ async fn main() -> Result<()> {
         .collect::<Result<_, _>>()?;
 
     println!("[2/4] Récupération des données des comptes on-chain...");
-    let accounts_data = rpc_client.get_multiple_accounts(&pool_pubkeys).await?;
+    // L'appel `get_multiple_accounts` utilisera maintenant notre wrapper
+    let accounts_data_with_opts = rpc_client.get_multiple_accounts(&pool_pubkeys).await?;
+    // On doit juste adapter un peu la logique car notre wrapper retourne Vec<Option<Account>>
+    // et non pas Vec<Option<solana_sdk::rpc_response::RpcAccountJson>>
+    let accounts_data: Vec<Option<solana_sdk::account::Account>> = accounts_data_with_opts;
 
     println!("[3/4] Identification et décodage des pools...");
     // --- LA LIGNE CORRIGÉE EST ICI ---

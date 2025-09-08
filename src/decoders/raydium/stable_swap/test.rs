@@ -1,20 +1,21 @@
 use anyhow::{bail, Result};
-use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
     pubkey::Pubkey,
     signature::Keypair,
     signer::Signer,
-    transaction::Transaction,
+    transaction::{VersionedTransaction},
+    message::VersionedMessage,
 };
 use std::str::FromStr;
 use spl_associated_token_account::get_associated_token_address;
+use crate::rpc::ResilientRpcClient;
 
 // Imports nécessaires pour le test
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 use crate::decoders::raydium::stable_swap::{decode_pool_info, decode_model_data, DecodedStableSwapPool};
 
 // --- Remplacer toute la fonction de test placeholder ---
-pub async fn test_stable_swap(rpc_client: &RpcClient, payer: &Keypair, _current_timestamp: i64) -> Result<()> {
+pub async fn test_stable_swap(rpc_client: &ResilientRpcClient, payer: &Keypair, _current_timestamp: i64) -> Result<()> {
     const POOL_ADDRESS: &str = "58Yvj55wLMA8sMD4oZ2f2K1sC3t25a1grGH2sNqt7WfL"; // USDC-USDT
     println!("\n--- Test et Simulation Raydium Stable Swap ({}) ---", POOL_ADDRESS);
 
@@ -58,9 +59,17 @@ pub async fn test_stable_swap(rpc_client: &RpcClient, payer: &Keypair, _current_
 
     let swap_ix = pool.create_swap_instruction(&input_mint, amount_in, 0, &user_accounts)?;
 
-    let transaction = Transaction::new_signed_with_payer(
-        &[swap_ix], Some(&payer.pubkey()), &[payer], rpc_client.get_latest_blockhash().await?,
-    );
+    let recent_blockhash = rpc_client.get_latest_blockhash().await?;
+
+    let transaction = VersionedTransaction::try_new(
+        VersionedMessage::V0(solana_sdk::message::v0::Message::try_compile(
+            &payer.pubkey(),
+            &[swap_ix],
+            &[], // Pas de LUT
+            recent_blockhash,
+        )?),
+        &[payer],
+    )?;
 
     println!("[2/2] Exécution de la simulation...");
     let sim_result = rpc_client.simulate_transaction(&transaction).await?;

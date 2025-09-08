@@ -3,7 +3,6 @@ use crate::decoders::spl_token_decoders;
 use super::math::{self, FEE_PRECISION};
 use anyhow::{anyhow, bail, Result};
 use bytemuck::{pod_read_unaligned, Pod, Zeroable};
-use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::BTreeMap;
 use std::mem;
@@ -13,6 +12,7 @@ use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 use crate::decoders::pool_operations::find_input_by_binary_search;
+use crate::rpc::ResilientRpcClient;
 
 // --- CONSTANTES ---
 pub const PROGRAM_ID: Pubkey = pubkey!("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo");
@@ -68,7 +68,7 @@ impl DecodedDlmmPool {
         amount_in: u64,
         swap_for_y: bool,
         current_timestamp: i64,
-        rpc_client: &RpcClient,
+        rpc_client: &ResilientRpcClient
     ) -> Result<u64> {
         // On s'assure que le pool est hydraté au minimum
         if self.hydrated_bin_arrays.is_none() {
@@ -383,7 +383,7 @@ pub fn decode_lb_pair(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Res
     })
 }
 
-pub async fn hydrate(pool: &mut DecodedDlmmPool, rpc_client: &RpcClient) -> Result<()> {
+pub async fn hydrate(pool: &mut DecodedDlmmPool, rpc_client: &ResilientRpcClient) -> Result<()> {
     // Étape 1: Hydrater les mints (inchangé)
     let (mint_a_res, mint_b_res) = tokio::join!(
         rpc_client.get_account(&pool.mint_a),
@@ -431,7 +431,7 @@ pub async fn hydrate(pool: &mut DecodedDlmmPool, rpc_client: &RpcClient) -> Resu
 }
 
 // NOUVELLE FONCTION D'HYDRATATION PARAMÉTRABLE
-pub async fn hydrate_with_depth(pool: &mut DecodedDlmmPool, rpc_client: &RpcClient, depth: usize) -> Result<()> {
+pub async fn hydrate_with_depth(pool: &mut DecodedDlmmPool, rpc_client: &ResilientRpcClient, depth: usize) -> Result<()> {
     // Étape 1: Hydrater les mints (inchangé)
     let (mint_a_res, mint_b_res) = tokio::join!(
         rpc_client.get_account(&pool.mint_a),
@@ -478,7 +478,7 @@ pub async fn hydrate_with_depth(pool: &mut DecodedDlmmPool, rpc_client: &RpcClie
 
 pub async fn rehydrate_for_escalation(
     pool: &mut DecodedDlmmPool,
-    rpc_client: &RpcClient,
+    rpc_client: &ResilientRpcClient,
     go_up: bool, // true si on a besoin d'index plus élevés, false sinon
 ) -> Result<()> {
     if pool.hydrated_bin_arrays.is_none() {

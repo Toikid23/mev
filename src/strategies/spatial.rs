@@ -1,15 +1,12 @@
 use crate::decoders::{Pool, PoolOperations};
 use crate::graph_engine::Graph;
-use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-
-// Imports nécessaires pour la logique d'escalade.
-// On importe les modules pour utiliser leurs fonctions qualifiées (ex: whirlpool::rehydrate_...)
 use crate::decoders::meteora::dlmm;
 use crate::decoders::orca::whirlpool;
+use crate::rpc::ResilientRpcClient;
 
 // --- Structs de Données ---
 
@@ -33,7 +30,7 @@ pub enum OptimizationResult {
 
 pub async fn find_spatial_arbitrage(
     graph: Arc<Mutex<Graph>>,
-    rpc_client: Arc<RpcClient>,
+    rpc_client: Arc<ResilientRpcClient>,
 ) -> Vec<ArbitrageOpportunity> {
     const MINIMUM_PROFIT_LAMPS: u64 = 100_000;
 

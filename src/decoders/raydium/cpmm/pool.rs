@@ -1,9 +1,8 @@
 // src/decoders/raydium_decoders/pool
-
+use crate::rpc::ResilientRpcClient;
 use crate::decoders::pool_operations::PoolOperations; // On importe le contrat
 use bytemuck::{from_bytes, Pod, Zeroable};
 use anyhow::{bail, Result, anyhow};
-use solana_client::nonblocking::rpc_client::RpcClient;
 use super::config;
 use crate::decoders::spl_token_decoders;
 use serde::{Serialize, Deserialize};
@@ -299,7 +298,7 @@ impl PoolOperations for DecodedCpmmPool {
         })
     }
 }
-pub async fn hydrate(pool: &mut DecodedCpmmPool, rpc_client: &RpcClient) -> Result<()> {
+pub async fn hydrate(pool: &mut DecodedCpmmPool, rpc_client: &ResilientRpcClient) -> Result<()> {
     // 1. Rassembler toutes les clés publiques nécessaires en un seul vecteur.
     // On inclut l'adresse du pool lui-même pour récupérer le drapeau `enable_creator_fee`.
     let accounts_to_fetch = vec![

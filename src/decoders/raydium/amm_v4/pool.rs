@@ -1,11 +1,6 @@
-// DANS: src/decoders/raydium_decoders/pool
-// VERSION AVEC create_swap_instruction DANS L'IMPL
-
-
 use bytemuck::{from_bytes, Pod, Zeroable, cast};
 use solana_sdk::pubkey::Pubkey;
 use anyhow::{bail, Result, anyhow};
-use solana_client::nonblocking::rpc_client::RpcClient;
 use crate::decoders::spl_token_decoders;
 use solana_sdk::{instruction::{AccountMeta, Instruction}, pubkey};
 use crate::decoders::raydium::amm_v4::openbook_market::{OrderBook};
@@ -13,6 +8,7 @@ use openbook_dex::state::MarketState;
 use std::mem::size_of;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
+use crate::rpc::ResilientRpcClient;
 
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 
@@ -77,7 +73,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedAmmPool> {
     })
 }
 
-pub async fn hydrate(pool: &mut DecodedAmmPool, rpc_client: &RpcClient) -> Result<()> {
+pub async fn hydrate(pool: &mut DecodedAmmPool, rpc_client: &ResilientRpcClient) -> Result<()> {
     let accounts_to_fetch = vec![pool.vault_a, pool.vault_b, pool.mint_a, pool.mint_b, pool.market];
     let mut accounts = rpc_client.get_multiple_accounts(&accounts_to_fetch).await?;
 

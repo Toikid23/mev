@@ -3,7 +3,6 @@
 use crate::decoders::spl_token_decoders;
 use anyhow::{anyhow, bail, Result};
 use bytemuck::{from_bytes, Pod, Zeroable};
-use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::instruction::{Instruction, AccountMeta};
 use std::collections::{BTreeMap, HashSet};
@@ -18,6 +17,7 @@ use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 use crate::decoders::raydium::clmm::full_math::MulDiv;
 use crate::decoders::spl_token_decoders::mint::{calculate_transfer_fee, calculate_gross_amount_before_transfer_fee};
 use crate::decoders::orca::whirlpool::math::U256;
+use crate::rpc::ResilientRpcClient;
 
 // --- STRUCTURES (Inchangées) ---
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,7 +231,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Result
         last_swap_timestamp: 0,
     })
 }
-pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &RpcClient) -> Result<()> {
+pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &ResilientRpcClient) -> Result<()> {
     let bitmap_ext_address = tickarray_bitmap_extension::get_bitmap_extension_address(&pool.address, &pool.program_id);
 
     let (config_res, mint_a_res, mint_b_res, pool_state_res, bitmap_ext_res) = tokio::join!(

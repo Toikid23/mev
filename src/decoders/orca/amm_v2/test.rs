@@ -1,24 +1,18 @@
-// Fichier : src/decoders/orca/amm_v2/test.rs (Version Complète)
-
 use anyhow::{bail, Result};
-use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
     pubkey::Pubkey,
     signature::Keypair,
     signer::Signer,
-    transaction::Transaction,
+    transaction::VersionedTransaction,
+    message::VersionedMessage,
 };
 use std::str::FromStr;
 use spl_associated_token_account::get_associated_token_address;
-
-// Imports nécessaires pour le test
+use crate::rpc::ResilientRpcClient;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 use crate::decoders::orca::amm_v2::{decode_pool, hydrate};
 
-// --- Supprimer l'ancienne fonction print_quote_result ---
-
-// --- Remplacer toute la fonction de test ---
-pub async fn test_orca_amm_v2(rpc_client: &RpcClient, payer: &Keypair, _current_timestamp: i64) -> Result<()> {
+pub async fn test_orca_amm_v2(rpc_client: &ResilientRpcClient, payer: &Keypair, _current_timestamp: i64) -> Result<()> {
     const POOL_ADDRESS: &str = "EGZ7tiLeH62TPV1gL8WwbXGzEPa9zmcpVnnkPKKnrE2U"; // SOL/USDC
     println!("\n--- Test et Simulation Orca AMM V2 ({}) ---", POOL_ADDRESS);
 
@@ -44,9 +38,17 @@ pub async fn test_orca_amm_v2(rpc_client: &RpcClient, payer: &Keypair, _current_
 
     let swap_ix = pool.create_swap_instruction(&input_mint, amount_in_sol, 0, &user_accounts)?;
 
-    let transaction = Transaction::new_signed_with_payer(
-        &[swap_ix], Some(&payer.pubkey()), &[payer], rpc_client.get_latest_blockhash().await?,
-    );
+    let recent_blockhash = rpc_client.get_latest_blockhash().await?;
+    // --- MODIFICATION ICI ---
+    let transaction = VersionedTransaction::try_new(
+        VersionedMessage::V0(solana_sdk::message::v0::Message::try_compile(
+            &payer.pubkey(),
+            &[swap_ix],
+            &[], // Pas de LUT
+            recent_blockhash,
+        )?),
+        &[payer],
+    )?;
 
     let sim_result = rpc_client.simulate_transaction(&transaction).await?;
 

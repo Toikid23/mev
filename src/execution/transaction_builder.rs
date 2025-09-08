@@ -1,7 +1,4 @@
-// DANS: src/execution/transaction_builder.rs
-
 use anyhow::Result;
-use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::message::AddressLookupTableAccount;
 use solana_sdk::{
     instruction::{Instruction, AccountMeta},
@@ -22,6 +19,7 @@ use crate::{
     graph_engine::Graph,
     strategies::spatial::ArbitrageOpportunity,
     decoders::pool_operations::UserSwapAccounts,
+    rpc::ResilientRpcClient,
 };
 
 // NOTE: Ces constantes doivent être accessibles ici.
@@ -44,7 +42,7 @@ pub struct ExecuteRouteIxArgs {
 pub async fn build_arbitrage_transaction(
     opportunity: &ArbitrageOpportunity,
     graph: Arc<Mutex<Graph>>,
-    rpc_client: &RpcClient,
+    rpc_client: &ResilientRpcClient,
     payer: &Keypair,
     lookup_table_account: &AddressLookupTableAccount,
     protections: Option<&SwapProtections>,

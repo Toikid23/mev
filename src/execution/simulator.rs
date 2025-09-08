@@ -2,13 +2,13 @@
 
 use anyhow::{anyhow, Result};
 use solana_client::{
-    nonblocking::rpc_client::RpcClient,
     rpc_config::RpcSimulateTransactionConfig,
     rpc_response::RpcPrioritizationFee,
 };
 use solana_sdk::{pubkey::Pubkey, transaction::VersionedTransaction};
 use solana_transaction_status::UiTransactionEncoding;
 use std::sync::Arc;
+use crate::rpc::ResilientRpcClient;
 
 // NOUVEAU : On définit une structure pour un retour propre
 pub struct SimulationResult {
@@ -30,7 +30,7 @@ fn parse_profit_from_logs(logs: &[String]) -> Option<u64> {
 
 /// Lance les simulations et la récupération des frais en parallèle.
 pub async fn run_simulations(
-    rpc_client: Arc<RpcClient>,
+    rpc_client: Arc<ResilientRpcClient>,
     transaction: &VersionedTransaction,
     accounts_for_fees: Vec<Pubkey>,
 ) -> Result<SimulationResult> {

@@ -1,10 +1,10 @@
 use anyhow::{anyhow, bail};
-use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
     pubkey::Pubkey,
     signature::Keypair,
     signer::Signer,
-    transaction::Transaction,
+    transaction::VersionedTransaction,
+    message::VersionedMessage,
 };
 use std::str::FromStr;
 use spl_associated_token_account::get_associated_token_address;
@@ -21,9 +21,10 @@ use crate::decoders::raydium::amm_v4::{
 use crate::decoders::PoolOperations;
 use crate::decoders::pool_operations::UserSwapAccounts;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use crate::rpc::ResilientRpcClient;
 
 
-pub async fn test_ammv4_with_simulation(rpc_client: &RpcClient, payer_keypair: &Keypair, current_timestamp: i64) -> anyhow::Result<()> {
+pub async fn test_ammv4_with_simulation(rpc_client: &ResilientRpcClient, payer_keypair: &Keypair, current_timestamp: i64) -> anyhow::Result<()> {
     const POOL_ADDRESS: &str = "58oQChx4yWmvKdwLLZzBi4ChoCc2fqCUWBkwMihLYQo2"; // WSOL-USDC
     const INPUT_MINT_STR: &str = "So11111111111111111111111111111111111111112"; // WSOL
     const INPUT_AMOUNT_UI: f64 = 0.05;
@@ -155,17 +156,23 @@ pub async fn test_ammv4_with_simulation(rpc_client: &RpcClient, payer_keypair: &
     instructions.push(swap_ix);
 
     let recent_blockhash = rpc_client.get_latest_blockhash().await?;
-    let transaction = Transaction::new_signed_with_payer(
-        &instructions, Some(&payer_pubkey), &[payer_keypair], recent_blockhash,
-    );
+    let transaction = VersionedTransaction::try_new(
+        VersionedMessage::V0(solana_sdk::message::v0::Message::try_compile(
+            &payer_pubkey,
+            &instructions,
+            &[], // Pas de LUT pour ce simple test
+            recent_blockhash,
+        )?),
+        &[payer_keypair],
+    )?;
 
     // --- 3. Simulation et Analyse par Lecture de Compte ---
     println!("\n[3/3] Exécution de la simulation avec lecture de compte...");
 
     // On récupère la balance du compte de destination AVANT la simulation.
-    let initial_destination_balance = match rpc_client.get_token_account(&user_destination_ata).await {
-        Ok(Some(acc)) => acc.token_amount.amount.parse::<u64>().unwrap_or(0),
-        _ => 0, // Le compte n'existe pas ou erreur, la balance est 0.
+    let initial_destination_balance = match rpc_client.get_account(&user_destination_ata).await {
+        Ok(acc) => SplTokenAccount::unpack(&acc.data)?.amount,
+        Err(_) => 0,
     };
     println!("-> Balance initiale du compte de destination: {}", initial_destination_balance);
 
