@@ -22,7 +22,7 @@ const CPMM_POOL_STATE_DISCRIMINATOR: [u8; 8] = [247, 237, 227, 245, 215, 195, 22
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecodedCpmmPool {
     pub address: Pubkey,
-    pub amm_config: Pubkey, // Pour aller chercher les frais plus tard
+    pub amm_config: Pubkey,
     pub observation_key: Pubkey,
     pub token_0_mint: Pubkey,
     pub token_1_mint: Pubkey,
@@ -30,15 +30,15 @@ pub struct DecodedCpmmPool {
     pub token_1_vault: Pubkey,
     pub mint_a_transfer_fee_bps: u16,
     pub mint_b_transfer_fee_bps: u16,
-    pub token_0_program: Pubkey, // <--- AJOUTER
+    pub token_0_program: Pubkey,
     pub token_1_program: Pubkey,
     pub status: u8,
     pub mint_0_decimals: u8,
     pub mint_1_decimals: u8,
-    // Les champs "intelligents"
     pub trade_fee_rate: u64,
     pub creator_fee_rate: u64,
     pub enable_creator_fee: bool,
+    pub creator_fee_on: u8, // <-- AJOUTEZ CE CHAMP MANQUANT
     pub reserve_a: u64,
     pub reserve_b: u64,
     pub last_swap_timestamp: i64,
@@ -78,7 +78,7 @@ struct CpmmPoolStateData {
     pub open_time: u64,
     pub recent_epoch: u64,
     pub creator_fee_on: u8,
-    pub enable_creator_fee: u8, // bool est 1 byte en Rust
+    pub enable_creator_fee: u8,
     pub padding1: [u8; 6],
     pub creator_fees_token_0: u64,
     pub creator_fees_token_1: u64,
@@ -87,28 +87,17 @@ struct CpmmPoolStateData {
 
 /// Tente de décoder les données brutes d'un compte Raydium CPMM PoolState.
 pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedCpmmPool> {
-    // Étape 1: Vérifier le discriminateur. C'est le seul moyen fiable d'identifier un PoolState.
     if data.get(..8) != Some(&CPMM_POOL_STATE_DISCRIMINATOR) {
-        bail!("Invalid discriminator. Not a Raydium CPMM PoolState account.");
+        bail!("Invalid discriminator.");
     }
-
     let data_slice = &data[8..];
-
-    // Étape 2: Vérifier que les données sont AU MOINS assez longues.
-    // Cela nous protège contre les données corrompues et permet les futures mises à jour du programme.
-    if data_slice.len() < size_of::<CpmmPoolStateData>() {
-        bail!(
-            "CPMM PoolState data length mismatch. Expected at least {}, got {}.",
-            size_of::<CpmmPoolStateData>(),
-            data_slice.len()
-        );
+    if data_slice.len() < std::mem::size_of::<CpmmPoolStateData>() {
+        bail!("CPMM PoolState data length mismatch.");
     }
 
-    // Étape 3: "Caster" les données en utilisant la taille de notre struct.
-    // On ignore les octets supplémentaires s'il y en a.
-    let pool_struct: &CpmmPoolStateData = from_bytes(&data_slice[..size_of::<CpmmPoolStateData>()]);
+    // On utilise `from_bytes` pour un décodage instantané et zéro-copie
+    let pool_struct: &CpmmPoolStateData = from_bytes(&data_slice[..std::mem::size_of::<CpmmPoolStateData>()]);
 
-    // Étape 4: Créer la sortie propre et unifiée
     Ok(DecodedCpmmPool {
         address: *address,
         amm_config: pool_struct.amm_config,
@@ -120,17 +109,55 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedCpmmPool> {
         token_0_program: pool_struct.token_0_program,
         token_1_program: pool_struct.token_1_program,
         status: pool_struct.status,
+        creator_fee_on: pool_struct.creator_fee_on,
+        enable_creator_fee: pool_struct.enable_creator_fee == 1,
+        // Les champs suivants seront remplis par `hydrate`
         mint_a_transfer_fee_bps: 0,
         mint_b_transfer_fee_bps: 0,
         mint_0_decimals: 0,
         mint_1_decimals: 0,
         trade_fee_rate: 0,
         creator_fee_rate: 0,
-        enable_creator_fee: false,
         reserve_a: 0,
         reserve_b: 0,
         last_swap_timestamp: 0,
     })
+}
+
+pub async fn hydrate(pool: &mut DecodedCpmmPool, rpc_client: &ResilientRpcClient) -> Result<()> {
+    // ... (votre fonction hydrate précédente était correcte, nous la gardons)
+    let accounts_to_fetch = vec![
+        pool.amm_config,
+        pool.token_0_vault,
+        pool.token_1_vault,
+        pool.token_0_mint,
+        pool.token_1_mint,
+    ];
+    let accounts_data = rpc_client.get_multiple_accounts(&accounts_to_fetch).await?;
+    let mut accounts_iter = accounts_data.into_iter();
+
+    let config_account_data = accounts_iter.next().flatten().ok_or_else(|| anyhow!("Config account not found"))?.data;
+    let vault_a_data = accounts_iter.next().flatten().ok_or_else(|| anyhow!("Vault A not found"))?.data;
+    let vault_b_data = accounts_iter.next().flatten().ok_or_else(|| anyhow!("Vault B not found"))?.data;
+    let mint_a_data = accounts_iter.next().flatten().ok_or_else(|| anyhow!("Mint A not found"))?.data;
+    let mint_b_data = accounts_iter.next().flatten().ok_or_else(|| anyhow!("Mint B not found"))?.data;
+
+    let decoded_config = config::decode_config(&config_account_data)?;
+    pool.trade_fee_rate = decoded_config.trade_fee_rate;
+    pool.creator_fee_rate = decoded_config.creator_fee_rate;
+
+    pool.reserve_a = u64::from_le_bytes(vault_a_data[64..72].try_into()?);
+    pool.reserve_b = u64::from_le_bytes(vault_b_data[64..72].try_into()?);
+
+    let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.token_0_mint, &mint_a_data)?;
+    pool.mint_a_transfer_fee_bps = decoded_mint_a.transfer_fee_basis_points;
+    pool.mint_0_decimals = decoded_mint_a.decimals;
+
+    let decoded_mint_b = spl_token_decoders::mint::decode_mint(&pool.token_1_mint, &mint_b_data)?;
+    pool.mint_b_transfer_fee_bps = decoded_mint_b.transfer_fee_basis_points;
+    pool.mint_1_decimals = decoded_mint_b.decimals;
+
+    Ok(())
 }
 
 #[async_trait]
@@ -297,69 +324,4 @@ impl PoolOperations for DecodedCpmmPool {
             data: instruction_data,
         })
     }
-}
-pub async fn hydrate(pool: &mut DecodedCpmmPool, rpc_client: &ResilientRpcClient) -> Result<()> {
-    // 1. Rassembler toutes les clés publiques nécessaires en un seul vecteur.
-    // On inclut l'adresse du pool lui-même pour récupérer le drapeau `enable_creator_fee`.
-    let accounts_to_fetch = vec![
-        pool.amm_config,
-        pool.token_0_vault,
-        pool.token_1_vault,
-        pool.token_0_mint,
-        pool.token_1_mint,
-        pool.address, // Pour re-fetcher le pool_state complet
-    ];
-
-    // 2. Faire un seul appel RPC groupé pour récupérer tous les comptes.
-    let accounts_data = rpc_client.get_multiple_accounts(&accounts_to_fetch).await?;
-    let mut accounts_iter = accounts_data.into_iter();
-
-    // 3. Traiter les résultats dans l'ordre, avec une gestion d'erreur robuste.
-    let config_account_data = accounts_iter.next().flatten()
-        .ok_or_else(|| anyhow!("Compte AmmConfig ({}) non trouvé", pool.amm_config))?.data;
-
-    let vault_a_data = accounts_iter.next().flatten()
-        .ok_or_else(|| anyhow!("Compte Vault A ({}) non trouvé", pool.token_0_vault))?.data;
-
-    let vault_b_data = accounts_iter.next().flatten()
-        .ok_or_else(|| anyhow!("Compte Vault B ({}) non trouvé", pool.token_1_vault))?.data;
-
-    let mint_a_data = accounts_iter.next().flatten()
-        .ok_or_else(|| anyhow!("Compte Mint A ({}) non trouvé", pool.token_0_mint))?.data;
-
-    let mint_b_data = accounts_iter.next().flatten()
-        .ok_or_else(|| anyhow!("Compte Mint B ({}) non trouvé", pool.token_1_mint))?.data;
-
-    let pool_account_data = accounts_iter.next().flatten()
-        .ok_or_else(|| anyhow!("Compte du Pool ({}) non trouvé lors de l'hydratation", pool.address))?.data;
-
-    // --- 4. Décodage et assignation des valeurs ---
-
-    // Décodage de la config pour les taux de frais
-    let decoded_config = config::decode_config(&config_account_data)?;
-    pool.trade_fee_rate = decoded_config.trade_fee_rate;
-    pool.creator_fee_rate = decoded_config.creator_fee_rate;
-
-    // Décodage du pool_state pour le drapeau `enable_creator_fee`
-    if pool_account_data.get(..8) != Some(&CPMM_POOL_STATE_DISCRIMINATOR) {
-        bail!("Discriminator de PoolState invalide lors de l'hydratation.");
-    }
-    let data_slice = &pool_account_data[8..];
-    let pool_struct: &CpmmPoolStateData = from_bytes(&data_slice[..size_of::<CpmmPoolStateData>()]);
-    pool.enable_creator_fee = pool_struct.enable_creator_fee == 1;
-
-    // Décodage des vaults pour les réserves
-    pool.reserve_a = u64::from_le_bytes(vault_a_data[64..72].try_into()?);
-    pool.reserve_b = u64::from_le_bytes(vault_b_data[64..72].try_into()?);
-
-    // Décodage des mints pour les frais de transfert et les décimales
-    let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.token_0_mint, &mint_a_data)?;
-    pool.mint_a_transfer_fee_bps = decoded_mint_a.transfer_fee_basis_points;
-    pool.mint_0_decimals = decoded_mint_a.decimals;
-
-    let decoded_mint_b = spl_token_decoders::mint::decode_mint(&pool.token_1_mint, &mint_b_data)?;
-    pool.mint_b_transfer_fee_bps = decoded_mint_b.transfer_fee_basis_points;
-    pool.mint_1_decimals = decoded_mint_b.decimals;
-
-    Ok(())
 }
