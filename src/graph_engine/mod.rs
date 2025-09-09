@@ -5,6 +5,7 @@ use anyhow::Result;
 use crate::rpc::ResilientRpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 // --- Imports principaux ---
 // On importe le trait PoolOperations et l'enum unifié Pool
@@ -14,7 +15,7 @@ use crate::decoders::{meteora, orca, pump, raydium};
 
 #[derive(Clone, Default)]
 pub struct Graph {
-    pub pools: HashMap<Pubkey, Pool>,
+    pub pools: HashMap<Pubkey, Arc<Pool>>,
     pub account_to_pool_map: HashMap<Pubkey, Pubkey>,
 }
 
@@ -96,6 +97,6 @@ impl Graph {
 
         self.account_to_pool_map.insert(vault_a, pool_address);
         self.account_to_pool_map.insert(vault_b, pool_address);
-        self.pools.insert(pool_address, pool);
+        self.pools.insert(pool_address, Arc::new(pool));
     }
 }

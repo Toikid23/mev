@@ -28,6 +28,7 @@ pub enum OptimizationResult {
 
 // --- Fonction Principale (Chef d'Orchestre) ---
 
+
 pub async fn find_spatial_arbitrage(
     graph: Arc<Mutex<Graph>>,
     rpc_client: Arc<ResilientRpcClient>,
@@ -35,18 +36,21 @@ pub async fn find_spatial_arbitrage(
     const MINIMUM_PROFIT_LAMPS: u64 = 100_000;
 
     let mut opportunities = Vec::new();
-    let mut pools_map_clone: HashMap<Pubkey, Pool>;
-    {
-        let graph_guard = graph.lock().await;
-        pools_map_clone = graph_guard.pools.clone();
-    }
 
+    // --- DÉBUT DE LA MODIFICATION MAJEURE ---
+    // On ne clone plus toute la map. On prend un verrou et on travaille sur des références.
+    // C'est beaucoup plus rapide et consomme moins de mémoire.
+    let graph_guard = graph.lock().await;
+    let pools_map_ref: &HashMap<Pubkey, Arc<Pool>> = &graph_guard.pools;
+
+    // `pools_map_clone` n'existe plus, on utilise `pools_map_ref`.
     let mut pools_by_pair: HashMap<(Pubkey, Pubkey), Vec<Pubkey>> = HashMap::new();
-    for (pool_key, pool) in &pools_map_clone {
-        let (mut mint_a, mut mint_b) = pool.get_mints();
+    for (pool_key, pool_arc) in pools_map_ref {
+        let (mut mint_a, mut mint_b) = pool_arc.get_mints();
         if mint_a > mint_b { std::mem::swap(&mut mint_a, &mut mint_b); }
         pools_by_pair.entry((mint_a, mint_b)).or_default().push(*pool_key);
     }
+    // --- FIN DE LA MODIFICATION MAJEURE ---
 
     for ((mint_a, mint_b), pool_keys) in pools_by_pair.iter() {
         if pool_keys.len() < 2 { continue; }
@@ -56,8 +60,16 @@ pub async fn find_spatial_arbitrage(
                 let key1 = pool_keys[i];
                 let key2 = pool_keys[j];
 
-                let pool1 = pools_map_clone.get(&key1).unwrap().clone();
-                let pool2 = pools_map_clone.get(&key2).unwrap().clone();
+                // --- MODIFICATION ---
+                // On obtient des pointeurs Arc (très rapide) au lieu de cloner depuis une map clonée.
+                let pool1_arc = pools_map_ref.get(&key1).unwrap();
+                let pool2_arc = pools_map_ref.get(&key2).unwrap();
+
+                // On clone localement les deux pools dont on a besoin. C'est une petite copie, pas une grosse.
+                // On déréférence le Arc (`**pool_arc`) pour accéder au `Pool` et appeler `.clone()`.
+                let pool1 = (**pool1_arc).clone();
+                let pool2 = (**pool2_arc).clone();
+                // --- FIN DE LA MODIFICATION ---
 
                 let quote1_res = pool1.get_quote(mint_a, 1_000_000, 0);
                 let quote2_res = pool2.get_quote(mint_a, 1_000_000, 0);
@@ -74,14 +86,14 @@ pub async fn find_spatial_arbitrage(
                     let initial_result = find_optimal_arbitrage(&mut pool_buy_from, &mut pool_sell_to, *mint_a, *mint_b);
 
                     if let Some(optimization_result) = initial_result {
-                        // --- CORRECTION DE L'ERREUR DE TYPE [E0308] ---
-                        // On déplace la logique de push et de filtrage après le `match`
-                        // pour que toutes les branches retournent une `ArbitrageOpportunity`.
                         let final_opportunity = match optimization_result {
                             OptimizationResult::Optimal(opp) => opp,
                             OptimizationResult::HitTheWall(partial_opp) => {
-                                let mut rehydrated_pool = pools_map_clone.get_mut(&buy_key).unwrap().clone();
+                                // --- MODIFICATION ---
+                                // On récupère le Arc du pool à réhydrater et on le clone.
+                                let mut rehydrated_pool = (**pools_map_ref.get(&buy_key).unwrap()).clone();
                                 let mut rehydrated_ok = false;
+                                // --- FIN DE LA MODIFICATION ---
 
                                 let (pool_mint_a, _) = rehydrated_pool.get_mints();
                                 let go_up = pool_mint_a == *mint_a;
@@ -119,7 +131,6 @@ pub async fn find_spatial_arbitrage(
                                 }
                             }
                         };
-                        // --- FIN DE LA CORRECTION ---
 
                         if final_opportunity.profit_in_lamports >= MINIMUM_PROFIT_LAMPS {
                             println!(
@@ -164,7 +175,15 @@ fn find_optimal_arbitrage(
     let mut max_profit: i128 = 0;
     let mut hit_the_wall = false;
 
+    // --- AMÉLIORATION ICI ---
+    let mut consecutive_no_improvement = 0;
+    const EARLY_EXIT_THRESHOLD: u8 = 5; // On sort si le profit ne s'améliore pas pendant 5 itérations
+
     for _ in 0..32 {
+        if low_bound > high_bound { // Condition de fin naturelle
+            break;
+        }
+
         let mid_amount_intermediate = low_bound.saturating_add(high_bound) / 2;
         if mid_amount_intermediate == 0 { break; }
 
@@ -174,21 +193,38 @@ fn find_optimal_arbitrage(
         if let (Ok(cost), Ok(revenue)) = (cost_res, revenue_res) {
             let profit = revenue as i128 - cost as i128;
 
+            let previous_max_profit = max_profit;
+
             if profit > max_profit {
                 max_profit = profit;
                 best_amount_intermediate = mid_amount_intermediate;
             }
+
             if profit > 0 {
-                low_bound = mid_amount_intermediate;
+                low_bound = mid_amount_intermediate.saturating_add(1);
             } else {
-                high_bound = mid_amount_intermediate;
+                high_bound = mid_amount_intermediate.saturating_sub(1);
             }
+
+            // Logique de sortie anticipée
+            if max_profit > previous_max_profit {
+                consecutive_no_improvement = 0; // Le profit a augmenté, on réinitialise le compteur
+            } else {
+                consecutive_no_improvement += 1;
+            }
+
+            if consecutive_no_improvement >= EARLY_EXIT_THRESHOLD {
+                // println!("[Optimizer] Sortie anticipée après {} itérations sans amélioration.", EARLY_EXIT_THRESHOLD);
+                break;
+            }
+
         } else {
             hit_the_wall = true;
-            high_bound = mid_amount_intermediate;
+            high_bound = mid_amount_intermediate.saturating_sub(1);
         }
     }
 
+    // Le reste de la fonction est inchangé
     if max_profit > 0 {
         if best_amount_intermediate.saturating_add(1) >= high_bound {
             hit_the_wall = true;

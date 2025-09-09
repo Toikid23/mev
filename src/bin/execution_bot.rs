@@ -39,9 +39,21 @@ fn load_main_graph_from_cache() -> Result<Graph> {
     let mut file = std::fs::File::open("graph_cache.bin")?;
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer)?;
-    let pools: HashMap<Pubkey, Pool> = bincode::deserialize(&buffer)?;
-    Ok(Graph { pools, account_to_pool_map: HashMap::new() })
+
+    let decoded_pools: HashMap<Pubkey, Pool> = bincode::deserialize(&buffer)?;
+
+    // On convertit les Pool en Arc<Pool>
+    let pools_with_arc: HashMap<Pubkey, Arc<Pool>> = decoded_pools
+        .into_iter()
+        .map(|(key, pool)| (key, Arc::new(pool)))
+        .collect();
+
+    Ok(Graph {
+        pools: pools_with_arc,
+        account_to_pool_map: HashMap::new(),
+    })
 }
+
 
 fn read_hotlist() -> Result<HashSet<Pubkey>> {
     let data = fs::read_to_string("hotlist.json")?;
@@ -71,22 +83,49 @@ async fn subscribe_to_hot_vault(
 }
 
 fn update_hot_graph_reserve(graph: &Arc<Mutex<Graph>>, vault_address: &Pubkey, new_balance: u64) {
-    if let Ok(mut graph_guard) = graph.try_lock() {
-        let mut temp_map = HashMap::new();
-        for (pool_addr, pool) in &graph_guard.pools {
-            let (v_a, v_b) = pool.get_vaults();
-            temp_map.insert(v_a, *pool_addr);
-            temp_map.insert(v_b, *pool_addr);
-        }
-        if let Some(pool_address) = temp_map.get(vault_address) {
-            if let Some(pool) = graph_guard.pools.get_mut(pool_address) {
-                let (vault_a, _) = pool.get_vaults();
-                match pool {
-                    Pool::RaydiumAmmV4(p) => { if vault_address == &vault_a { p.reserve_a = new_balance } else { p.reserve_b = new_balance }; },
-                    Pool::RaydiumCpmm(p) => { if vault_address == &vault_a { p.reserve_a = new_balance } else { p.reserve_b = new_balance }; },
-                    Pool::PumpAmm(p) => { if vault_address == &vault_a { p.reserve_a = new_balance } else { p.reserve_b = new_balance }; },
-                    _ => {}
-                }
+    let mut graph_guard = match graph.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => return, // Si le graphe est déjà verrouillé, on abandonne pour ne pas bloquer.
+    };
+
+    // On a besoin d'une copie de la map pour trouver le pool_address sans garder un &graph_guard.pools
+    let mut temp_map = HashMap::new();
+    for (pool_addr, pool_arc) in &graph_guard.pools {
+        let (v_a, v_b) = pool_arc.get_vaults();
+        temp_map.insert(v_a, *pool_addr);
+        temp_map.insert(v_b, *pool_addr);
+    }
+
+    if let Some(pool_address) = temp_map.get(vault_address) {
+        // 1. On récupère le Arc<Pool> existant.
+        if let Some(pool_arc) = graph_guard.pools.get(pool_address) {
+
+            // 2. On clone les données du Pool pour obtenir une instance mutable.
+            let mut pool_clone = (**pool_arc).clone();
+
+            // 3. On modifie notre clone local.
+            let (vault_a, _) = pool_clone.get_vaults();
+            let is_vault_a = vault_address == &vault_a;
+
+            let updated = match &mut pool_clone {
+                Pool::RaydiumAmmV4(p) => {
+                    if is_vault_a { p.reserve_a = new_balance } else { p.reserve_b = new_balance };
+                    true
+                },
+                Pool::RaydiumCpmm(p) => {
+                    if is_vault_a { p.reserve_a = new_balance } else { p.reserve_b = new_balance };
+                    true
+                },
+                Pool::PumpAmm(p) => {
+                    if is_vault_a { p.reserve_a = new_balance } else { p.reserve_b = new_balance };
+                    true
+                },
+                _ => false // Ne rien faire pour les autres types de pools pour l'instant
+            };
+
+            // 4. Si une mise à jour a eu lieu, on remplace l'ancien Arc par un nouveau dans le graphe.
+            if updated {
+                graph_guard.pools.insert(*pool_address, Arc::new(pool_clone));
             }
         }
     }
@@ -114,7 +153,11 @@ async fn process_opportunity(
     let protections = {
         let pool_sell_to = {
             let graph_guard = graph.lock().await;
-            graph_guard.pools.get(&opportunity.pool_sell_to_key).unwrap().clone()
+            // 1. .get() retourne un &Arc<Pool>
+            // 2. Le premier `*` déréférence en Arc<Pool>
+            // 3. Le deuxième `*` déréférence en Pool
+            // 4. .clone() copie la donnée Pool elle-même.
+            (**graph_guard.pools.get(&opportunity.pool_sell_to_key).unwrap()).clone()
         };
         // On utilise le profit de l'opportunité, qui est le résultat de l'optimisation locale
         match protections::calculate_slippage_protections(
