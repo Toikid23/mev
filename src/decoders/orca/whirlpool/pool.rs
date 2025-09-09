@@ -13,6 +13,9 @@ use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
 use solana_sdk::instruction::{Instruction, AccountMeta};
 use spl_associated_token_account::get_associated_token_address;
 use crate::rpc::ResilientRpcClient;
+use super::config as whirlpool_config;
+use crate::state::global_cache::{CacheableData, GLOBAL_CACHE};
+use anyhow::Context;
 
 // --- STRUCTURE DE TRAVAIL "PROPRE" (MODIFIÉE) ---
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,12 +110,39 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedWhirlpoolPool
 }
 
 pub async fn hydrate(pool: &mut DecodedWhirlpoolPool, rpc_client: &ResilientRpcClient) -> Result<()> {
-    // --- Étape 1: Hydrater les mints (logique inchangée et correcte) ---
+    // --- DÉBUT DE LA LOGIQUE DE CACHE POUR WHIRLPOOL CONFIG ---
+    let cached_config = GLOBAL_CACHE.get(&pool.whirlpools_config);
+
+    if cached_config.is_none() {
+        println!("[Cache] MISS pour Orca WhirlpoolsConfig: {}. Fetching via RPC...", pool.whirlpools_config);
+        let config_account_data = rpc_client
+            .get_account_data(&pool.whirlpools_config)
+            .await
+            .context("Échec de la récupération du WhirlpoolsConfig pour Orca")?;
+
+        let new_config = whirlpool_config::decode_config(&config_account_data)?;
+
+        GLOBAL_CACHE.put(
+            pool.whirlpools_config,
+            CacheableData::OrcaWhirlpoolsConfig(new_config),
+        );
+    } else {
+        println!("[Cache] HIT pour Orca WhirlpoolsConfig: {}", pool.whirlpools_config);
+    }
+    // Note: Pour l'instant, nous ne stockons pas la config dans la struct du pool car
+    // elle n'est pas utilisée par la logique de quote. Le simple fait de la mettre en
+    // cache est déjà une optimisation.
+
+    // --- FIN DE LA LOGIQUE DE CACHE ---
+
+
+    // --- Le reste de la fonction reste identique ---
     let (mint_a_res, mint_b_res) = tokio::join!(
         rpc_client.get_account(&pool.mint_a),
         rpc_client.get_account(&pool.mint_b)
     );
-
+    // ... (la logique d'hydratation des mints et des tick arrays ne change pas)
+    // ...
     let mint_a_account = mint_a_res?;
     pool.mint_a_program = mint_a_account.owner;
     let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_account.data)?;
@@ -125,22 +155,18 @@ pub async fn hydrate(pool: &mut DecodedWhirlpoolPool, rpc_client: &ResilientRpcC
     pool.mint_b_decimals = decoded_mint_b.decimals;
     pool.mint_b_transfer_fee_bps = decoded_mint_b.transfer_fee_basis_points;
 
-    // --- Étape 2: Hydratation "Look-Ahead" des TickArrays ---
     let mut tick_arrays_to_fetch = std::collections::HashSet::new();
     let tick_spacing_i32 = pool.tick_spacing as i32;
     let ticks_in_one_array = tick_array::TICK_ARRAY_SIZE as i32 * tick_spacing_i32;
 
-    // On calcule l'index de l'array actuel, celui d'avant, et celui d'après.
     let current_array_start_index = tick_array::get_start_tick_index(pool.tick_current_index, pool.tick_spacing);
     let prev_array_start_index = current_array_start_index - ticks_in_one_array;
     let next_array_start_index = current_array_start_index + ticks_in_one_array;
 
-    // On ajoute leurs adresses à la liste des comptes à récupérer.
     tick_arrays_to_fetch.insert(tick_array::get_tick_array_address(&pool.address, prev_array_start_index, &pool.program_id));
     tick_arrays_to_fetch.insert(tick_array::get_tick_array_address(&pool.address, current_array_start_index, &pool.program_id));
     tick_arrays_to_fetch.insert(tick_array::get_tick_array_address(&pool.address, next_array_start_index, &pool.program_id));
 
-    // On fait UN SEUL appel RPC groupé pour récupérer les 3 comptes. C'est très efficace.
     let accounts_results = rpc_client.get_multiple_accounts(&tick_arrays_to_fetch.into_iter().collect::<Vec<_>>()).await?;
 
     let mut hydrated_tick_arrays = BTreeMap::new();

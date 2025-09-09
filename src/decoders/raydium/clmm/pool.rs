@@ -18,6 +18,8 @@ use crate::decoders::raydium::clmm::full_math::MulDiv;
 use crate::decoders::spl_token_decoders::mint::{calculate_transfer_fee, calculate_gross_amount_before_transfer_fee};
 use crate::decoders::orca::whirlpool::math::U256;
 use crate::rpc::ResilientRpcClient;
+use crate::state::global_cache::{CacheableData, GLOBAL_CACHE};
+use anyhow::Context;
 
 // --- STRUCTURES (Inchangées) ---
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,21 +234,51 @@ pub fn decode_pool(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Result
     })
 }
 pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &ResilientRpcClient) -> Result<()> {
+    // --- DÉBUT DE LA NOUVELLE LOGIQUE DE CACHE ---
+
+    // 1. Tenter de récupérer la config CLMM depuis le cache.
+    let cached_config = GLOBAL_CACHE.get(&pool.amm_config);
+
+    let decoded_config = if let Some(CacheableData::RaydiumClmmAmmConfig(config)) = cached_config {
+        println!("[Cache] HIT pour Raydium CLMM Config: {}", pool.amm_config);
+        config
+    } else {
+        println!("[Cache] MISS pour Raydium CLMM Config: {}. Fetching via RPC...", pool.amm_config);
+        // 2. Cache MISS: Faire l'appel RPC uniquement pour la config.
+        let config_account_data = rpc_client
+            .get_account_data(&pool.amm_config)
+            .await
+            .context("Échec de la récupération du AmmConfig pour Raydium CLMM")?;
+
+        let new_config = config::decode_config(&config_account_data)?;
+
+        // 3. Mettre à jour le cache.
+        GLOBAL_CACHE.put(
+            pool.amm_config,
+            CacheableData::RaydiumClmmAmmConfig(new_config.clone()),
+        );
+        new_config
+    };
+
+    // Assigner la config (du cache ou du RPC) au pool.
+    pool.tick_spacing = decoded_config.tick_spacing;
+    pool.trade_fee_rate = decoded_config.trade_fee_rate;
+
+    // --- FIN DE LA LOGIQUE DE CACHE ---
+
+
+    // Le tokio::join! est maintenant allégé : on ne récupère plus la config.
     let bitmap_ext_address = tickarray_bitmap_extension::get_bitmap_extension_address(&pool.address, &pool.program_id);
 
-    let (config_res, mint_a_res, mint_b_res, pool_state_res, bitmap_ext_res) = tokio::join!(
-        rpc_client.get_account_data(&pool.amm_config),
+    let (mint_a_res, mint_b_res, pool_state_res, bitmap_ext_res) = tokio::join!(
+        // L'appel à config_res a été retiré !
         rpc_client.get_account_data(&pool.mint_a),
         rpc_client.get_account_data(&pool.mint_b),
         rpc_client.get_account_data(&pool.address),
         rpc_client.get_account(&bitmap_ext_address)
     );
 
-    let config_account_data = config_res?;
-    let decoded_config = config::decode_config(&config_account_data)?;
-    pool.tick_spacing = decoded_config.tick_spacing;
-    pool.trade_fee_rate = decoded_config.trade_fee_rate;
-
+    // Le reste de la fonction est presque identique, il suffit de supprimer le code lié à la config.
     let mint_a_data = mint_a_res?;
     let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_data)?;
     pool.mint_a_decimals = decoded_mint_a.decimals;
@@ -273,6 +305,7 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &ResilientRpcClient
         Vec::new()
     };
 
+    // ... Le reste de la fonction pour l'hydratation des tick arrays ne change pas ...
     let mut addresses_to_fetch = HashSet::new();
     let multiplier = (TICK_ARRAY_SIZE as i32) * (pool.tick_spacing as i32);
     let ticks_in_one_bitmap = 512 * multiplier;
@@ -328,6 +361,7 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &ResilientRpcClient
         }
     }
     pool.tick_arrays = Some(tick_arrays);
+
     Ok(())
 }
 

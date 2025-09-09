@@ -3,6 +3,8 @@
 use crate::decoders::{
     pump::amm::pool::onchain_layouts as pump_layouts,
     raydium::cpmm::config::DecodedAmmConfig as CpmmDecodedConfig,
+    raydium::clmm::config::DecodedClmmConfig as ClmmDecodedConfig,
+    orca::whirlpool::config::DecodedWhirlpoolsConfig,
 };
 use solana_sdk::pubkey::Pubkey;
 use std::{
@@ -36,6 +38,8 @@ impl<T> CacheEntry<T> {
 pub enum CacheableData {
     PumpAmmGlobalConfig(pump_layouts::GlobalConfig),
     RaydiumCpmmAmmConfig(CpmmDecodedConfig),
+    RaydiumClmmAmmConfig(ClmmDecodedConfig),
+    OrcaWhirlpoolsConfig(DecodedWhirlpoolsConfig),
     // Nous pourrons ajouter d'autres types de config ici à l'avenir.
 }
 
