@@ -21,30 +21,26 @@ const POOL_STATE_DISCRIMINATOR: [u8; 8] = [241, 154, 109, 4, 17, 177, 109, 188];
 // --- MODULE POUR LES STRUCTURES ON-CHAIN ---
 pub mod onchain_layouts {
     use super::*;
-    #[repr(C, packed)]
-    #[derive(Clone, Copy, Pod, Zeroable, Debug, Default, Serialize, Deserialize)]
+
+    // Les structs internes restent les mêmes
+    #[repr(C, packed)] #[derive(Clone, Copy, Pod, Zeroable, Debug, Default, Serialize, Deserialize)]
     pub struct VaultBumps { pub vault_bump: u8, pub token_vault_bump: u8 }
-    #[repr(C, packed)]
-    #[derive(Clone, Copy, Pod, Zeroable, Debug, Default, Serialize, Deserialize)]
+    #[repr(C, packed)] #[derive(Clone, Copy, Pod, Zeroable, Debug, Default, Serialize, Deserialize)]
     pub struct LockedProfitTracker { pub last_updated_locked_profit: u64, pub last_report: u64, pub locked_profit_degradation: u64 }
-    #[repr(C, packed)]
-    #[derive(Clone, Copy, Pod, Zeroable, Debug, Default, Serialize, Deserialize)]
+    #[repr(C, packed)] #[derive(Clone, Copy, Pod, Zeroable, Debug, Default, Serialize, Deserialize)]
     pub struct Vault {
         pub enabled: u8, pub bumps: VaultBumps, pub total_amount: u64, pub token_vault: Pubkey,
         pub fee_vault: Pubkey, pub token_mint: Pubkey, pub lp_mint: Pubkey, pub strategies: [Pubkey; 30],
         pub base: Pubkey, pub admin: Pubkey, pub operator: Pubkey, pub locked_profit_tracker: LockedProfitTracker,
     }
-    #[repr(C, packed)]
-    #[derive(Clone, Copy, Pod, Zeroable, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+    #[repr(C, packed)] #[derive(Clone, Copy, Pod, Zeroable, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
     pub struct TokenMultiplier { pub token_a_multiplier: u64, pub token_b_multiplier: u64, pub precision_factor: u8 }
-    #[repr(C, packed)]
-    #[derive(Clone, Copy, Pod, Zeroable, Debug, Default, Serialize, Deserialize)]
+    #[repr(C, packed)] #[derive(Clone, Copy, Pod, Zeroable, Debug, Default, Serialize, Deserialize)]
     pub struct PoolFees {
         pub trade_fee_numerator: u64, pub trade_fee_denominator: u64,
         pub protocol_trade_fee_numerator: u64, pub protocol_trade_fee_denominator: u64
     }
-    #[repr(C, packed)]
-    #[derive(Clone, Copy, Pod, Zeroable, Debug, Default)]
+    #[repr(C, packed)] #[derive(Clone, Copy, Pod, Zeroable, Debug, Default)]
     pub struct Pool {
         pub lp_mint: Pubkey, pub token_a_mint: Pubkey, pub token_b_mint: Pubkey, pub a_vault: Pubkey,
         pub b_vault: Pubkey, pub a_vault_lp: Pubkey, pub b_vault_lp: Pubkey, pub a_vault_lp_bump: u8,
@@ -52,7 +48,42 @@ pub mod onchain_layouts {
         pub fee_last_updated_at: u64, pub _padding0: [u8; 24], pub fees: PoolFees, pub pool_type: u8,
         pub stake: Pubkey,
     }
+
+    // --- DÉBUT DES NOUVELLES STRUCTURES POUR LE ZÉRO-COPIE ---
+    #[repr(C, packed)] #[derive(Clone, Copy, Pod, Zeroable, Debug, Default, Serialize, Deserialize)]
+    pub struct Depeg {
+        pub base_virtual_price: u64,
+        pub base_cache_updated: u64,
+        pub depeg_type: u8,
+        _padding: [u8; 7],
+    }
+
+    #[repr(C, packed)] #[derive(Clone, Copy, Pod, Zeroable, Debug, Default)]
+    pub struct StableCurveParams {
+        pub amp: u64,
+        pub token_multiplier: TokenMultiplier,
+        pub depeg: Depeg,
+    }
+
+    /// La "super-structure" qui représente la totalité de la disposition mémoire du compte.
+    // --- MODIFICATION ICI : On retire `Pod` et `Zeroable` du `derive` ---
+    #[repr(C, packed)]
+    #[derive(Clone, Copy)] // On garde Clone et Copy
+    pub struct FullPoolLayout {
+        pub base_pool: Pool,
+        pub _padding_to_curve: [u8; 866 - size_of::<Pool>()],
+        pub curve_kind: u8,
+        pub stable_params: StableCurveParams,
+    }
+
+    // --- AJOUT DE CE BLOC ---
+    // On dit manuellement au compilateur que notre structure est sûre.
+    // C'est sans danger car elle est `repr(C, packed)` et ne contient que des types qui sont eux-mêmes `Pod`.
+    unsafe impl Zeroable for FullPoolLayout {}
+    unsafe impl Pod for FullPoolLayout {}
+    // --- FIN DE L'AJOUT ---
 }
+
 
 // --- STRUCTURES DE TRAVAIL "PROPRES" ---
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,52 +119,71 @@ fn read_pod<T: Pod>(data: &[u8], offset: usize) -> Result<T> {
 }
 
 pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraSbpPool> {
-    if data.get(..8) != Some(&POOL_STATE_DISCRIMINATOR) { bail!("Invalid discriminator."); }
-    let data_slice = &data[8..];
-    let pool_struct: &onchain_layouts::Pool = bytemuck::from_bytes(&data_slice[..size_of::<onchain_layouts::Pool>()]);
-
-    const CURVE_TYPE_OFFSET: usize = 866;
-    let curve_kind: u8 = read_pod(data_slice, CURVE_TYPE_OFFSET)?;
-
-    let curve_type = match curve_kind {
-        0 => MeteoraCurveType::ConstantProduct,
-        1 => {
-            const STABLE_PARAMS_OFFSET: usize = CURVE_TYPE_OFFSET + 1;
-            let amp: u64 = read_pod(data_slice, STABLE_PARAMS_OFFSET)?;
-            let token_multiplier: onchain_layouts::TokenMultiplier = read_pod(data_slice, STABLE_PARAMS_OFFSET + 8)?;
-
-            // **CORRECTION** : Nous lisons le depeg_virtual_price directement depuis le pool state ici.
-            const DEPEG_OFFSET: usize = STABLE_PARAMS_OFFSET + 8 + size_of::<onchain_layouts::TokenMultiplier>();
-            let _depeg_struct: Depeg = read_pod(data_slice, DEPEG_OFFSET)?;
-
-            MeteoraCurveType::Stable { amp, token_multiplier }
-        }
-        _ => bail!("Unsupported curve type: {}", curve_kind),
-    };
-
-    // **CORRECTION** : Récupérer le prix virtuel directement lors du décodage initial
-    let mut depeg_virtual_price = 0;
-    if let MeteoraCurveType::Stable { .. } = curve_type {
-        const DEPEG_OFFSET: usize = 866 + 1 + 8 + size_of::<onchain_layouts::TokenMultiplier>();
-        if data_slice.len() >= DEPEG_OFFSET + size_of::<Depeg>() {
-            let depeg_struct: Depeg = read_pod(data_slice, DEPEG_OFFSET)?;
-            // Le SDK utilise une précision de 10^6. Le prix stocké peut avoir une autre précision.
-            // Pour l'instant, on l'utilise tel quel, mais c'est un point de vigilance.
-            // D'après le SDK TS, il n'y a pas de conversion, donc on prend la valeur brute.
-            depeg_virtual_price = depeg_struct.base_virtual_price as u128;
-        }
+    if data.get(..8) != Some(&POOL_STATE_DISCRIMINATOR) {
+        bail!("Invalid discriminator.");
     }
 
+    let data_slice = &data[8..];
+
+    // On s'assure que les données sont au moins assez longues pour la plus petite variante (ConstantProduct)
+    // La taille minimale est l'offset du `curve_kind` + 1 octet pour le kind lui-même.
+    const MIN_LAYOUT_SIZE: usize = 866 + 1;
+    if data_slice.len() < MIN_LAYOUT_SIZE {
+        bail!("Data slice too short for Meteora DAMM V1 pool.");
+    }
+
+    // 1. On fait UN SEUL appel pour créer une référence zéro-copie sur les données.
+    let full_layout: &onchain_layouts::FullPoolLayout = bytemuck::from_bytes(&data_slice[..size_of::<onchain_layouts::FullPoolLayout>()]);
+    let pool_struct = &full_layout.base_pool;
+
+    // 2. On décode le type de courbe en lisant directement le champ de notre référence.
+    let curve_type = match full_layout.curve_kind {
+        0 => MeteoraCurveType::ConstantProduct,
+        1 => {
+            MeteoraCurveType::Stable {
+                amp: full_layout.stable_params.amp,
+                token_multiplier: full_layout.stable_params.token_multiplier
+            }
+        }
+        _ => bail!("Unsupported curve type: {}", full_layout.curve_kind),
+    };
+
+    // 3. On lit le prix virtuel directement depuis la référence si c'est une courbe stable.
+    let depeg_virtual_price = if let MeteoraCurveType::Stable { .. } = curve_type {
+        full_layout.stable_params.depeg.base_virtual_price as u128
+    } else {
+        0
+    };
+
+    // 4. On construit notre structure de travail propre. Le code est plus clair.
     Ok(DecodedMeteoraSbpPool {
-        address: *address, mint_a: pool_struct.token_a_mint, mint_b: pool_struct.token_b_mint,
-        vault_a: pool_struct.a_vault, vault_b: pool_struct.b_vault, a_vault_lp: pool_struct.a_vault_lp,
-        b_vault_lp: pool_struct.b_vault_lp, stake: pool_struct.stake, enabled: pool_struct.enabled == 1,
-        fees: pool_struct.fees, curve_type, a_token_vault: Pubkey::default(), b_token_vault: Pubkey::default(),
-        a_vault_lp_mint: Pubkey::default(), b_vault_lp_mint: Pubkey::default(), reserve_a: 0, reserve_b: 0,
-        mint_a_decimals: 0, mint_b_decimals: 0, vault_a_state: onchain_layouts::Vault::default(),
-        vault_b_state: onchain_layouts::Vault::default(), vault_a_lp_supply: 0, vault_b_lp_supply: 0,
-        pool_a_vault_lp_amount: 0, pool_b_vault_lp_amount: 0,
-        depeg_virtual_price, // Initialisé ici !
+        address: *address,
+        mint_a: pool_struct.token_a_mint,
+        mint_b: pool_struct.token_b_mint,
+        vault_a: pool_struct.a_vault,
+        vault_b: pool_struct.b_vault,
+        a_vault_lp: pool_struct.a_vault_lp,
+        b_vault_lp: pool_struct.b_vault_lp,
+        stake: pool_struct.stake,
+        enabled: pool_struct.enabled == 1,
+        fees: pool_struct.fees,
+        curve_type,
+        depeg_virtual_price,
+        // Les champs suivants sont des placeholders qui seront remplis par `hydrate`.
+        a_token_vault: Pubkey::default(),
+        b_token_vault: Pubkey::default(),
+        a_vault_lp_mint: Pubkey::default(),
+        b_vault_lp_mint: Pubkey::default(),
+        reserve_a: 0,
+        reserve_b: 0,
+        mint_a_decimals: 0,
+        mint_b_decimals: 0,
+        vault_a_state: onchain_layouts::Vault::default(),
+        vault_b_state: onchain_layouts::Vault::default(),
+        vault_a_lp_supply: 0,
+        vault_b_lp_supply: 0,
+        pool_a_vault_lp_amount: 0,
+        pool_b_vault_lp_amount: 0,
         last_swap_timestamp: 0,
     })
 }
