@@ -2,7 +2,6 @@
 use crate::rpc::ResilientRpcClient;
 use crate::decoders::pool_operations::PoolOperations; // On importe le contrat
 use bytemuck::{from_bytes, Pod, Zeroable};
-use anyhow::{bail, Result, anyhow};
 use super::config;
 use crate::decoders::spl_token_decoders;
 use serde::{Serialize, Deserialize};
@@ -12,6 +11,8 @@ use solana_sdk::{
     instruction::{AccountMeta, Instruction}, // <-- On importe les types ici
     pubkey::Pubkey,
 };
+use anyhow::{bail, Result, anyhow, Context};
+use crate::state::global_cache::{CacheableData, GLOBAL_CACHE};
 
 // Discriminator pour les comptes PoolState du programme CPMM
 const CPMM_POOL_STATE_DISCRIMINATOR: [u8; 8] = [247, 237, 227, 245, 215, 195, 222, 70];
@@ -125,9 +126,41 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedCpmmPool> {
 }
 
 pub async fn hydrate(pool: &mut DecodedCpmmPool, rpc_client: &ResilientRpcClient) -> Result<()> {
-    // ... (votre fonction hydrate précédente était correcte, nous la gardons)
+    // --- DÉBUT DE LA NOUVELLE LOGIQUE DE CACHE ---
+
+    // 1. Tenter de récupérer la configuration depuis le cache global.
+    let cached_config = GLOBAL_CACHE.get(&pool.amm_config);
+
+    let decoded_config = if let Some(CacheableData::RaydiumCpmmAmmConfig(config)) = cached_config {
+        println!("[Cache] HIT pour Raydium CPMM Config: {}", pool.amm_config); // Décommenter pour débugger
+        config
+    } else {
+        println!("[Cache] MISS pour Raydium CPMM Config: {}. Fetching via RPC...", pool.amm_config); // Décommenter pour débugger
+        // 2. Si le cache est vide ou expiré, faire l'appel RPC.
+        let config_account_data = rpc_client
+            .get_account_data(&pool.amm_config)
+            .await
+            .context("Échec de la récupération du compte AmmConfig pour Raydium CPMM")?;
+
+        let new_config = config::decode_config(&config_account_data)?;
+
+        // 3. Mettre à jour le cache avec les nouvelles données.
+        GLOBAL_CACHE.put(
+            pool.amm_config,
+            CacheableData::RaydiumCpmmAmmConfig(new_config.clone()),
+        );
+        new_config
+    };
+
+    // Maintenant, `decoded_config` contient la configuration, qu'elle vienne du cache ou du RPC.
+    pool.trade_fee_rate = decoded_config.trade_fee_rate;
+    pool.creator_fee_rate = decoded_config.creator_fee_rate;
+
+    // --- FIN DE LA NOUVELLE LOGIQUE DE CACHE ---
+
+    // Le reste de la fonction `hydrate` ne change pas. On ne récupère plus
+    // que les comptes qui changent fréquemment (vaults et mints).
     let accounts_to_fetch = vec![
-        pool.amm_config,
         pool.token_0_vault,
         pool.token_1_vault,
         pool.token_0_mint,
@@ -136,18 +169,14 @@ pub async fn hydrate(pool: &mut DecodedCpmmPool, rpc_client: &ResilientRpcClient
     let accounts_data = rpc_client.get_multiple_accounts(&accounts_to_fetch).await?;
     let mut accounts_iter = accounts_data.into_iter();
 
-    let config_account_data = accounts_iter.next().flatten().ok_or_else(|| anyhow!("Config account not found"))?.data;
+    // On retire la récupération et le décodage de la config qui sont maintenant gérés par le cache.
     let vault_a_data = accounts_iter.next().flatten().ok_or_else(|| anyhow!("Vault A not found"))?.data;
     let vault_b_data = accounts_iter.next().flatten().ok_or_else(|| anyhow!("Vault B not found"))?.data;
     let mint_a_data = accounts_iter.next().flatten().ok_or_else(|| anyhow!("Mint A not found"))?.data;
     let mint_b_data = accounts_iter.next().flatten().ok_or_else(|| anyhow!("Mint B not found"))?.data;
 
-    let decoded_config = config::decode_config(&config_account_data)?;
-    pool.trade_fee_rate = decoded_config.trade_fee_rate;
-    pool.creator_fee_rate = decoded_config.creator_fee_rate;
-
-    pool.reserve_a = u64::from_le_bytes(vault_a_data[64..72].try_into()?);
-    pool.reserve_b = u64::from_le_bytes(vault_b_data[64..72].try_into()?);
+    pool.reserve_a = u64::from_le_bytes(vault_a_data[64..72].try_into()?) ;
+    pool.reserve_b = u64::from_le_bytes(vault_b_data[64..72].try_into()?) ;
 
     let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.token_0_mint, &mint_a_data)?;
     pool.mint_a_transfer_fee_bps = decoded_mint_a.transfer_fee_basis_points;

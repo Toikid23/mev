@@ -2598,6 +2598,7 @@ dependencies = [
  "futures",
  "futures-util",
  "hex",
+ "lazy_static",
  "num-integer",
  "openbook_dex",
  "prost",
