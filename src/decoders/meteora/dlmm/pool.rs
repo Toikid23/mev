@@ -351,11 +351,14 @@ pub fn decode_lb_pair(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Res
         bail!("Invalid LbPair discriminator");
     }
     let data_slice = &data[8..];
-    let pool_struct: &onchain_layouts::LbPairData = bytemuck::try_from_bytes(data_slice)
-        .map_err(|e| anyhow!("LbPairData size mismatch or alignment error: {}", e))?;
+    if data_slice.len() < size_of::<onchain_layouts::LbPairData>() {
+        bail!("LbPairData data length mismatch.");
+    }
 
-    let base_fee_rate =
-        (pool_struct.parameters.base_factor as u64).saturating_mul(pool_struct.bin_step as u64);
+    // --- L'OPTIMISATION EST ICI ---
+    let pool_struct: &onchain_layouts::LbPairData = bytemuck::from_bytes(&data_slice[..size_of::<onchain_layouts::LbPairData>()]);
+
+    let base_fee_rate = (pool_struct.parameters.base_factor as u64).saturating_mul(pool_struct.bin_step as u64);
 
     Ok(DecodedDlmmPool {
         address: *address,
@@ -364,20 +367,21 @@ pub fn decode_lb_pair(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Res
         mint_b: pool_struct.token_y_mint,
         vault_a: pool_struct.reserve_x,
         vault_b: pool_struct.reserve_y,
-        oracle: pool_struct.oracle, // <-- Initialisation du nouveau champ
+        oracle: pool_struct.oracle,
         active_bin_id: pool_struct.active_id,
         bin_step: pool_struct.bin_step,
         base_fee_rate,
+        parameters: pool_struct.parameters,
+        v_parameters: pool_struct.v_parameters,
+        // Placeholders
         mint_a_decimals: 0,
         mint_b_decimals: 0,
         mint_a_transfer_fee_bps: 0,
         mint_b_transfer_fee_bps: 0,
         mint_a_transfer_fee_max: 0,
         mint_b_transfer_fee_max: 0,
-        mint_a_program: spl_token::id(), // Valeur par défaut, sera hydratée
-        mint_b_program: spl_token::id(), // Valeur par défaut, sera hydratée
-        parameters: pool_struct.parameters,
-        v_parameters: pool_struct.v_parameters,
+        mint_a_program: spl_token::id(),
+        mint_b_program: spl_token::id(),
         hydrated_bin_arrays: None,
         last_swap_timestamp: 0,
     })

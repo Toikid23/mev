@@ -66,11 +66,12 @@ pub mod onchain_layouts {
     }
 
     /// La "super-structure" qui représente la totalité de la disposition mémoire du compte.
-    // --- MODIFICATION ICI : On retire `Pod` et `Zeroable` du `derive` ---
+    // --- MODIFICATION ICI : On retire `Pod` et `Zeroable` du `derive` car Rust ne peut pas les dériver automatiquement pour un type qui contient des `padding` non alignés
     #[repr(C, packed)]
     #[derive(Clone, Copy)] // On garde Clone et Copy
     pub struct FullPoolLayout {
         pub base_pool: Pool,
+        // Ce padding est calculé pour atteindre exactement l'octet où le type de courbe est défini
         pub _padding_to_curve: [u8; 866 - size_of::<Pool>()],
         pub curve_kind: u8,
         pub stable_params: StableCurveParams,
@@ -140,6 +141,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraSbpPoo
     let curve_type = match full_layout.curve_kind {
         0 => MeteoraCurveType::ConstantProduct,
         1 => {
+            // On lit les paramètres stables directement depuis la référence
             MeteoraCurveType::Stable {
                 amp: full_layout.stable_params.amp,
                 token_multiplier: full_layout.stable_params.token_multiplier
@@ -346,7 +348,7 @@ impl PoolOperations for DecodedMeteoraSbpPool {
         let amount_out_gross = match &self.curve_type {
             MeteoraCurveType::ConstantProduct => {
                 let numerator = (net_amount_in_for_curve as u128).saturating_mul(out_reserve as u128);
-                let denominator = (in_reserve as u128).saturating_add(actual_amount_in as u128);
+                let denominator = (in_reserve as u128).saturating_add(net_amount_in_for_curve as u128);
                 let result_value = if denominator == 0 { 0 } else { (numerator / denominator) as u64 };
                 Ok(result_value) as Result<u64>
             }
@@ -387,30 +389,44 @@ impl PoolOperations for DecodedMeteoraSbpPool {
         Ok(final_amount_out)
     }
 
-    // ... (get_required_input et create_swap_instruction inchangés)
     fn get_required_input(&mut self, token_out_mint: &Pubkey, amount_out: u64, current_timestamp: i64) -> Result<u64> {
-        // 1. Logique spécifique au pool (vérifications, détermination des variables)
         if amount_out == 0 { return Ok(0); }
         if !self.enabled { return Err(anyhow!("Pool disabled")); }
 
         let token_in_mint = if *token_out_mint == self.mint_a { self.mint_b } else { self.mint_a };
 
-        // 2. Calcul de la borne de recherche (logique spécifique au pool)
-        let (in_reserve, out_reserve) = if *token_out_mint == self.mint_b { (self.reserve_a, self.reserve_b) } else { (self.reserve_b, self.reserve_a) };
-        let mut high_bound: u64 = amount_out.saturating_mul(4); // Borne par défaut
-        if in_reserve > 0 && out_reserve > 0 {
-            let initial_guess = (amount_out as u128 * in_reserve as u128 / out_reserve as u128) as u64;
-            high_bound = initial_guess.saturating_mul(2);
+        let (in_reserve, out_reserve) = if *token_out_mint == self.mint_b {
+            (self.reserve_a, self.reserve_b)
+        } else {
+            (self.reserve_b, self.reserve_a)
+        };
+
+        // --- HEURISTIQUE DE BORNE SUPÉRIEURE SIMPLE ET LARGE ---
+        let mut high_bound: u64;
+        if out_reserve > amount_out {
+            // Estimation de base très grossière
+            let base_estimate = (amount_out as u128 * in_reserve as u128 / (out_reserve - amount_out) as u128) as u64;
+            // On prend une marge de sécurité très large (ex: 4x) pour être absolument sûr de couvrir tous les frais et effets de vault.
+            high_bound = base_estimate.saturating_mul(4);
+        } else {
+            // Si on demande plus que la réserve, l'input est potentiellement énorme.
+            // On prend une borne très élevée mais pas u64::MAX pour éviter les overflows.
+            high_bound = in_reserve.saturating_mul(10);
         }
 
-        // 3. Création de la closure qui appelle la méthode `get_quote` de ce pool
+        // Sécurité supplémentaire : si la borne est toujours 0, on met une valeur par défaut.
+        if high_bound == 0 {
+            high_bound = amount_out.saturating_mul(10);
+        }
+
+
         let quote_fn = |guess_input: u64| {
             self.get_quote(&token_in_mint, guess_input, current_timestamp)
         };
 
-        // 4. Appel à l'utilitaire de recherche dynamique
         find_input_by_binary_search(quote_fn, amount_out, high_bound)
     }
+
     fn create_swap_instruction(&self, token_in_mint: &Pubkey, amount_in: u64, min_amount_out: u64, user_accounts: &UserSwapAccounts) -> Result<Instruction> {
         let instruction_discriminator: [u8; 8] = [248, 198, 158, 145, 225, 117, 135, 200];
         let mut instruction_data = Vec::with_capacity(8 + 8 + 8);

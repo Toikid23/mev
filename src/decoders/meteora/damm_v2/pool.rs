@@ -77,7 +77,8 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraDammPo
     if data_slice.len() < expected_size {
         bail!("DAMM v2 Pool data length mismatch. Expected at least {} bytes, got {}.", expected_size, data_slice.len());
     }
-    let pool_struct: onchain_layouts::Pool = bytemuck::pod_read_unaligned(&data_slice[..expected_size]);
+    // --- L'OPTIMISATION EST ICI ---
+    let pool_struct: &onchain_layouts::Pool = bytemuck::from_bytes(&data_slice[..expected_size]);
 
     Ok(DecodedMeteoraDammPool {
         address: *address,
@@ -92,6 +93,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraDammPo
         collect_fee_mode: pool_struct.collect_fee_mode,
         pool_fees: pool_struct.pool_fees,
         activation_point: pool_struct.activation_point,
+        // Placeholders pour hydrate
         mint_a_decimals: 0, mint_b_decimals: 0,
         mint_a_transfer_fee_bps: 0, mint_b_transfer_fee_bps: 0,
         mint_a_program: spl_token::id(),
