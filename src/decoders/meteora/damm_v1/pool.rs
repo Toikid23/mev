@@ -111,14 +111,6 @@ pub struct DecodedMeteoraSbpPool {
     pub enabled: bool, pub stake: Pubkey, pub depeg_virtual_price: u128, pub last_swap_timestamp: i64,
 }
 
-
-fn read_pod<T: Pod>(data: &[u8], offset: usize) -> Result<T> {
-    let size = size_of::<T>();
-    let end = offset.checked_add(size).ok_or_else(|| anyhow!("Offset overflow"))?;
-    if end > data.len() { bail!("Buffer underflow reading at offset {}", offset); }
-    Ok(bytemuck::pod_read_unaligned(&data[offset..end]))
-}
-
 pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraSbpPool> {
     if data.get(..8) != Some(&POOL_STATE_DISCRIMINATOR) {
         bail!("Invalid discriminator.");
