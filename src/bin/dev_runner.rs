@@ -13,14 +13,12 @@ use mev::decoders::{
     pump::amm,
     raydium::{amm_v4, clmm, cpmm},
 };
+use mev::state::global_cache::get_cached_clock;
 
-// La signature de la fonction change pour accepter notre client
+// --- 2. REMPLACEZ L'ANCIENNE FONCTION get_timestamp ---
 async fn get_timestamp(rpc_client: &ResilientRpcClient) -> Result<i64> {
-    // L'appel interne ne change pas grâce à notre wrapper !
-    let clock_account = rpc_client
-        .get_account(&solana_sdk::sysvar::clock::ID)
-        .await?;
-    let clock: Clock = deserialize(&clock_account.data)?;
+    // La fonction devient une simple passe-plat vers notre logique de cache.
+    let clock = get_cached_clock(rpc_client).await?;
     Ok(clock.unix_timestamp)
 }
 
@@ -28,12 +26,12 @@ async fn get_timestamp(rpc_client: &ResilientRpcClient) -> Result<i64> {
 async fn main() -> Result<()> {
     println!("--- Lancement du Banc d'Essai des Décodeurs ---");
     let config = Config::load()?;
-    // On crée notre client résilient !
     let rpc_client = ResilientRpcClient::new(config.solana_rpc_url, 3, 500);
 
     let payer_keypair = Keypair::from_base58_string(&config.payer_private_key);
     println!("-> Utilisation du portefeuille payeur : {}", payer_keypair.pubkey());
 
+    // Cet appel va maintenant utiliser le cache !
     let current_timestamp = get_timestamp(&rpc_client).await?;
     println!("-> Timestamp du cluster utilisé pour tous les tests: {}", current_timestamp);
 

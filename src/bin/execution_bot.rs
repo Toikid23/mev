@@ -1,5 +1,3 @@
-// DANS : src/bin/execution_bot.rs (Version Définitive)
-
 use anyhow::Result;
 use futures_util::StreamExt;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -19,7 +17,6 @@ use spl_token::state::Account as SplTokenAccount;
 use std::{collections::{HashMap, HashSet}, fs, io::Read, sync::Arc};
 use tokio::{sync::{mpsc, Mutex}};
 use mev::decoders::PoolOperations;
-
 use mev::{
     config::Config,
     decoders::Pool,
@@ -30,8 +27,8 @@ use mev::{
         transaction_builder,
         simulator,
         protections,
-        // sender, // Gardé en commentaire
     },
+    state::slot_tracker::SlotTracker,
 };
 
 fn load_main_graph_from_cache() -> Result<Graph> {
@@ -39,21 +36,16 @@ fn load_main_graph_from_cache() -> Result<Graph> {
     let mut file = std::fs::File::open("graph_cache.bin")?;
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer)?;
-
     let decoded_pools: HashMap<Pubkey, Pool> = bincode::deserialize(&buffer)?;
-
-    // On convertit les Pool en Arc<Pool>
     let pools_with_arc: HashMap<Pubkey, Arc<Pool>> = decoded_pools
         .into_iter()
         .map(|(key, pool)| (key, Arc::new(pool)))
         .collect();
-
     Ok(Graph {
         pools: pools_with_arc,
         account_to_pool_map: HashMap::new(),
     })
 }
-
 
 fn read_hotlist() -> Result<HashSet<Pubkey>> {
     let data = fs::read_to_string("hotlist.json")?;
@@ -85,45 +77,25 @@ async fn subscribe_to_hot_vault(
 fn update_hot_graph_reserve(graph: &Arc<Mutex<Graph>>, vault_address: &Pubkey, new_balance: u64) {
     let mut graph_guard = match graph.try_lock() {
         Ok(guard) => guard,
-        Err(_) => return, // Si le graphe est déjà verrouillé, on abandonne pour ne pas bloquer.
+        Err(_) => return,
     };
-
-    // On a besoin d'une copie de la map pour trouver le pool_address sans garder un &graph_guard.pools
     let mut temp_map = HashMap::new();
     for (pool_addr, pool_arc) in &graph_guard.pools {
         let (v_a, v_b) = pool_arc.get_vaults();
         temp_map.insert(v_a, *pool_addr);
         temp_map.insert(v_b, *pool_addr);
     }
-
     if let Some(pool_address) = temp_map.get(vault_address) {
-        // 1. On récupère le Arc<Pool> existant.
         if let Some(pool_arc) = graph_guard.pools.get(pool_address) {
-
-            // 2. On clone les données du Pool pour obtenir une instance mutable.
             let mut pool_clone = (**pool_arc).clone();
-
-            // 3. On modifie notre clone local.
             let (vault_a, _) = pool_clone.get_vaults();
             let is_vault_a = vault_address == &vault_a;
-
             let updated = match &mut pool_clone {
-                Pool::RaydiumAmmV4(p) => {
-                    if is_vault_a { p.reserve_a = new_balance } else { p.reserve_b = new_balance };
-                    true
-                },
-                Pool::RaydiumCpmm(p) => {
-                    if is_vault_a { p.reserve_a = new_balance } else { p.reserve_b = new_balance };
-                    true
-                },
-                Pool::PumpAmm(p) => {
-                    if is_vault_a { p.reserve_a = new_balance } else { p.reserve_b = new_balance };
-                    true
-                },
-                _ => false // Ne rien faire pour les autres types de pools pour l'instant
+                Pool::RaydiumAmmV4(p) => { if is_vault_a { p.reserve_a = new_balance } else { p.reserve_b = new_balance }; true },
+                Pool::RaydiumCpmm(p) => { if is_vault_a { p.reserve_a = new_balance } else { p.reserve_b = new_balance }; true },
+                Pool::PumpAmm(p) => { if is_vault_a { p.reserve_a = new_balance } else { p.reserve_b = new_balance }; true },
+                _ => false
             };
-
-            // 4. Si une mise à jour a eu lieu, on remplace l'ancien Arc par un nouveau dans le graphe.
             if updated {
                 graph_guard.pools.insert(*pool_address, Arc::new(pool_clone));
             }
@@ -138,8 +110,8 @@ async fn process_opportunity(
     graph: Arc<Mutex<Graph>>,
     rpc_client: Arc<ResilientRpcClient>,
     payer: Keypair,
+    current_timestamp: i64,
 ) -> Result<()> {
-    // Phase 0 : Charger la LUT (inchangé)
     let lookup_table_account_data = rpc_client.get_account_data(&ADDRESS_LOOKUP_TABLE_ADDRESS).await?;
     let lookup_table_ref = AddressLookupTable::deserialize(&lookup_table_account_data)?;
     let owned_lookup_table = SdkAddressLookupTableAccount {
@@ -147,24 +119,17 @@ async fn process_opportunity(
         addresses: lookup_table_ref.addresses.to_vec(),
     };
 
-    // --- NOUVEAU FLUX OPTIMISÉ ---
-
-    // Phase 1 : Calcul des protections basé sur le profit THÉORIQUE de l'optimiseur
     let protections = {
         let pool_sell_to = {
             let graph_guard = graph.lock().await;
-            // 1. .get() retourne un &Arc<Pool>
-            // 2. Le premier `*` déréférence en Arc<Pool>
-            // 3. Le deuxième `*` déréférence en Pool
-            // 4. .clone() copie la donnée Pool elle-même.
             (**graph_guard.pools.get(&opportunity.pool_sell_to_key).unwrap()).clone()
         };
-        // On utilise le profit de l'opportunité, qui est le résultat de l'optimisation locale
         match protections::calculate_slippage_protections(
             opportunity.amount_in,
-            opportunity.profit_in_lamports, // <-- Utilise le profit théorique
+            opportunity.profit_in_lamports,
             pool_sell_to,
             &opportunity.token_intermediate_mint,
+            current_timestamp,
         ) {
             Ok(p) => p,
             Err(e) => {
@@ -174,53 +139,33 @@ async fn process_opportunity(
         }
     };
 
-    // Phase 2 : Construction de la transaction candidate UNIQUE et FINALE
     let (final_arbitrage_tx, _final_execute_route_ix) = match transaction_builder::build_arbitrage_transaction(
-        &opportunity,
-        graph.clone(),
-        &rpc_client,
-        &payer,
-        &owned_lookup_table,
-        Some(&protections), // On passe directement les protections
+        &opportunity, graph.clone(), &rpc_client, &payer, &owned_lookup_table, Some(&protections),
     ).await {
         Ok(res) => res,
-        Err(e) => {
-            println!("[Phase 2 ERREUR] Échec construction tx finale : {}", e);
-            return Ok(());
-        }
+        Err(e) => { println!("[Phase 2 ERREUR] Échec construction tx finale : {}", e); return Ok(()) }
     };
 
-    // Phase 3 : La simulation parallèle UNIQUE (Validation + Découverte)
     let accounts_for_fees = vec![opportunity.pool_buy_from_key, opportunity.pool_sell_to_key];
     let sim_data = match simulator::run_simulations(rpc_client.clone(), &final_arbitrage_tx, accounts_for_fees).await {
         Ok(data) => data,
-        Err(e) => {
-            // Si cette simulation échoue, cela signifie que le marché a bougé et que
-            // notre transaction protégée n'est plus viable. C'est notre validation.
-            println!("[Phase 3 VALIDATION ÉCHOUÉE] La transaction n'est plus viable : {}", e);
-            return Ok(());
-        }
+        Err(e) => { println!("[Phase 3 VALIDATION ÉCHOUÉE] La transaction n'est plus viable : {}", e); return Ok(()) }
     };
     println!("  -> Validation et Découverte RÉUSSIES !");
 
-    // On a maintenant les données finales et fiables
     let profit_brut_reel = sim_data.profit_brut_reel;
     let compute_units = sim_data.compute_units;
     let priority_fees = sim_data.priority_fees;
 
-    // Phase 4 : Calculs finaux et décision d'envoi
     println!("\n--- [Phase 4] Calculs finaux et décision d'envoi ---");
     let mut recent_fees: Vec<u64> = priority_fees.iter().map(|f| f.prioritization_fee).collect();
     recent_fees.sort_unstable();
     let percentile_index = (recent_fees.len() as f64 * 0.8).floor() as usize;
     let dynamic_priority_fee_price_per_cu = *recent_fees.get(percentile_index).unwrap_or(&1000);
-
     let total_frais_normaux = 5000 + (compute_units * dynamic_priority_fee_price_per_cu) / 1_000_000;
     let profit_net_final = profit_brut_reel.saturating_sub(total_frais_normaux);
-
     println!("     -> Profit Net FINAL Calculé : {} lamports", profit_net_final);
 
-    // Phase 5 : Envoi (Mode Simulation)
     if profit_net_final > 0 {
         println!("  -> DÉCISION: ENVOYER LA TRANSACTION NORMALE");
     } else {
@@ -237,7 +182,7 @@ async fn process_opportunity(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("--- Lancement de l'Execution Bot (Version de Développement) ---");
+    println!("--- Lancement de l'Execution Bot (Avec SlotTracker) ---");
 
     let config = Config::load()?;
     let payer = Keypair::from_base58_string(&config.payer_private_key);
@@ -248,6 +193,9 @@ async fn main() -> Result<()> {
     let pubsub_client = Arc::new(PubsubClient::new(&wss_url).await?);
     let (update_sender, mut update_receiver) = mpsc::channel::<(Pubkey, u64)>(100);
 
+    let slot_tracker: Arc<SlotTracker> = Arc::new(SlotTracker::new(&rpc_client).await?);
+    slot_tracker.start(rpc_client.clone(), pubsub_client.clone());
+
     let _hot_graph_clone_for_task1 = Arc::clone(&hot_graph);
     let _main_graph_clone_for_task1 = Arc::clone(&main_graph);
     let _pubsub_client_clone_for_task1 = Arc::clone(&pubsub_client);
@@ -255,7 +203,7 @@ async fn main() -> Result<()> {
     let currently_processing = Arc::new(Mutex::new(HashSet::<String>::new()));
 
     tokio::spawn(async move {
-        // ... (la logique de surveillance de la hotlist reste inchangée)
+        // ... (logique de surveillance hotlist, inchangée)
     });
 
     println!("[Bot] Prêt. En attente d'opportunités d'arbitrage...");
@@ -265,11 +213,14 @@ async fn main() -> Result<()> {
 
             let graph_clone = Arc::clone(&hot_graph);
             let client_clone = Arc::clone(&rpc_client);
-            // CORRECTION: Utilisation de la méthode moderne et gestion de l'erreur
             let payer_clone_task = Keypair::try_from(payer.to_bytes().as_slice())?;
             let processing_clone = Arc::clone(&currently_processing);
+            let tracker_clone: Arc<SlotTracker> = Arc::clone(&slot_tracker);
 
             tokio::spawn(async move {
+                let clock_snapshot = tracker_clone.current();
+                let current_timestamp = clock_snapshot.unix_timestamp;
+
                 let opportunities = find_spatial_arbitrage(graph_clone.clone(), client_clone.clone()).await;
 
                 if let Some(opp) = opportunities.into_iter().next() {
@@ -284,7 +235,7 @@ async fn main() -> Result<()> {
 
                     if !is_already_processing {
                         println!("\n>>> 1 opportunité(s) détectée(s) ! Lancement du traitement...");
-                        if let Err(e) = process_opportunity(opp, graph_clone, client_clone, payer_clone_task).await {
+                        if let Err(e) = process_opportunity(opp, graph_clone, client_clone, payer_clone_task, current_timestamp).await {
                             println!("[Erreur Traitement] {}", e);
                         }
                         let mut processing_guard = processing_clone.lock().await;

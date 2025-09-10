@@ -1,24 +1,27 @@
 // DANS : src/state/global_cache.rs
 
 use crate::decoders::{
-    pump::amm::pool::onchain_layouts as pump_layouts,
-    raydium::cpmm::config::DecodedAmmConfig as CpmmDecodedConfig,
-    raydium::clmm::config::DecodedClmmConfig as ClmmDecodedConfig,
     orca::whirlpool::config::DecodedWhirlpoolsConfig,
+    pump::amm::pool::onchain_layouts as pump_layouts,
+    raydium::clmm::config::DecodedClmmConfig,
+    raydium::cpmm::config::DecodedAmmConfig as CpmmDecodedConfig,
 };
-use solana_sdk::pubkey::Pubkey;
+use crate::rpc::ResilientRpcClient;
+use anyhow::{Context, Result};
+use lazy_static::lazy_static;
+use solana_sdk::{
+    pubkey::Pubkey,
+    sysvar::clock::{self, Clock},
+};
 use std::{
     collections::HashMap,
     sync::RwLock,
     time::{Duration, Instant},
 };
-use lazy_static::lazy_static;
 
-// Durée de vie d' une entrée dans le cache avant qu'elle soit considérée comme expirée.
-const CACHE_TTL_SECONDS: u64 = 300; // 5 minutes
+const CONFIG_CACHE_TTL_SECONDS: u64 = 300; // 5 minutes
+const CLOCK_CACHE_TTL_MILLIS: u64 = 500; // 500 millisecondes, juste un peu plus qu'un slot
 
-// Une entrée générique pour notre cache.
-// Elle contient la donnée (T) et le moment où elle a été insérée.
 #[derive(Debug, Clone)]
 struct CacheEntry<T> {
     data: T,
@@ -26,51 +29,46 @@ struct CacheEntry<T> {
 }
 
 impl<T> CacheEntry<T> {
-    // Vérifie si l'entrée est toujours valide.
-    fn is_valid(&self) -> bool {
-        self.inserted_at.elapsed() < Duration::from_secs(CACHE_TTL_SECONDS)
+    fn is_valid(&self, custom_ttl: Duration) -> bool {
+        self.inserted_at.elapsed() < custom_ttl
     }
 }
 
-// L'énumération de toutes les données que nous pouvons mettre en cache.
-// C'est plus propre et plus sûr que d'utiliser des types génériques partout.
 #[derive(Debug, Clone)]
 pub enum CacheableData {
     PumpAmmGlobalConfig(pump_layouts::GlobalConfig),
     RaydiumCpmmAmmConfig(CpmmDecodedConfig),
-    RaydiumClmmAmmConfig(ClmmDecodedConfig),
+    RaydiumClmmAmmConfig(DecodedClmmConfig),
     OrcaWhirlpoolsConfig(DecodedWhirlpoolsConfig),
-    // Nous pourrons ajouter d'autres types de config ici à l'avenir.
+    SysvarClock(Clock),
 }
 
-// La structure principale de notre cache.
-// Elle est conçue pour être utilisée dans un contexte multi-thread.
 pub struct GlobalCache {
-    // La clé est l'adresse du compte de configuration.
     cache: RwLock<HashMap<Pubkey, CacheEntry<CacheableData>>>,
 }
 
 impl GlobalCache {
-    // Crée une nouvelle instance vide du cache.
     pub fn new() -> Self {
         Self {
             cache: RwLock::new(HashMap::new()),
         }
     }
 
-    // Tente de récupérer une donnée depuis le cache.
     pub fn get(&self, key: &Pubkey) -> Option<CacheableData> {
         let reader = self.cache.read().unwrap();
         reader.get(key).and_then(|entry| {
-            if entry.is_valid() {
-                Some(entry.data.clone()) // On retourne une copie de la donnée.
+            let ttl = match entry.data {
+                CacheableData::SysvarClock(_) => Duration::from_millis(CLOCK_CACHE_TTL_MILLIS),
+                _ => Duration::from_secs(CONFIG_CACHE_TTL_SECONDS),
+            };
+            if entry.is_valid(ttl) {
+                Some(entry.data.clone())
             } else {
-                None // L'entrée a expiré.
+                None
             }
         })
     }
 
-    // Insère ou met à jour une donnée dans le cache.
     pub fn put(&self, key: Pubkey, data: CacheableData) {
         let mut writer = self.cache.write().unwrap();
         let entry = CacheEntry {
@@ -81,8 +79,29 @@ impl GlobalCache {
     }
 }
 
-// Déclaration de notre instance de cache globale et unique.
-// Elle sera initialisée de manière "paresseuse" (lazy) et thread-safe.
 lazy_static! {
     pub static ref GLOBAL_CACHE: GlobalCache = GlobalCache::new();
+}
+
+/// Récupère le sysvar Clock, en utilisant le cache global.
+/// Fait un appel RPC uniquement si le cache est vide ou a expiré.
+pub async fn get_cached_clock(rpc_client: &ResilientRpcClient) -> Result<Clock> {
+    let clock_address = clock::ID;
+
+    if let Some(CacheableData::SysvarClock(clock)) = GLOBAL_CACHE.get(&clock_address) {
+        println!("[Cache] HIT pour SysvarClock.");
+        return Ok(clock);
+    }
+
+    println!("[Cache] MISS pour SysvarClock. Fetching via RPC...");
+    let clock_account = rpc_client
+        .get_account(&clock_address)
+        .await
+        .context("Échec de la récupération du compte Sysvar Clock")?;
+
+    let clock: Clock = bincode::deserialize(&clock_account.data)?;
+
+    GLOBAL_CACHE.put(clock_address, CacheableData::SysvarClock(clock.clone()));
+
+    Ok(clock)
 }
