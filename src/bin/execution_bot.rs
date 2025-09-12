@@ -10,6 +10,9 @@ use mev::{
     state::slot_tracker::SlotTracker,
     strategies::spatial::{find_spatial_arbitrage, ArbitrageOpportunity},
 };
+use spl_associated_token_account::instruction::create_associated_token_account;
+use solana_sdk::transaction::VersionedTransaction;
+use solana_sdk::transaction::Transaction;
 use solana_address_lookup_table_program::state::AddressLookupTable;
 use solana_client::nonblocking::pubsub_client::PubsubClient;
 use solana_sdk::{
@@ -30,9 +33,127 @@ use yellowstone_grpc_proto::prelude::{
     subscribe_update::UpdateOneof, CommitmentLevel, SubscribeRequest,
     SubscribeRequestFilterTransactions,
 };
+use solana_sdk::signer::Signer;
 
 // CORRECTION E0425 : La constante de la LUT est maintenant définie ici.
 const ADDRESS_LOOKUP_TABLE_ADDRESS: Pubkey = solana_sdk::pubkey!("E5h798UBdK8V1L7MvRfi1ppr2vitPUUUUCVqvTyDgKXN");
+
+
+
+/// Vérifie l'existence des ATAs pour les deux mints d'un pool et les crée si nécessaire.
+async fn ensure_atas_exist_for_pool(
+    rpc_client: &Arc<ResilientRpcClient>,
+    payer: &Keypair,
+    pool: &Pool, // On prend une référence au pool
+) -> Result<()> {
+    // 1. Obtenir les informations des mints et de leurs programmes token respectifs
+    let (mint_a, mint_b) = pool.get_mints();
+    let (mint_a_program, mint_b_program) = match pool {
+        Pool::RaydiumClmm(p) => (p.mint_a_program, p.mint_b_program),
+        Pool::OrcaWhirlpool(p) => (p.mint_a_program, p.mint_b_program),
+        Pool::MeteoraDlmm(p) => (p.mint_a_program, p.mint_b_program),
+        Pool::MeteoraDammV2(p) => (p.mint_a_program, p.mint_b_program),
+        Pool::RaydiumCpmm(p) => (p.token_0_program, p.token_1_program),
+        Pool::PumpAmm(p) => (p.mint_a_program, p.mint_b_program),
+        // Pour les pools plus anciens, on assume le programme SPL Token standard
+        _ => (spl_token::id(), spl_token::id()),
+    };
+
+    // 2. Calculer les adresses des ATAs
+    let ata_a_address = spl_associated_token_account::get_associated_token_address_with_program_id(&payer.pubkey(), &mint_a, &mint_a_program);
+    let ata_b_address = spl_associated_token_account::get_associated_token_address_with_program_id(&payer.pubkey(), &mint_b, &mint_b_program);
+
+    // 3. Vérifier leur existence en un seul appel RPC groupé
+    let accounts_to_check = vec![ata_a_address, ata_b_address];
+    let results = rpc_client.get_multiple_accounts(&accounts_to_check).await?;
+
+    let mut instructions_to_execute = Vec::new();
+
+    // 4. Créer les instructions uniquement pour les ATAs manquants
+    if results[0].is_none() {
+        println!("[Admission] ATA manquant pour le mint {}. Préparation de la création...", mint_a);
+        instructions_to_execute.push(create_associated_token_account(
+            &payer.pubkey(),
+            &payer.pubkey(),
+            &mint_a,
+            &mint_a_program,
+        ));
+    }
+    if results[1].is_none() {
+        println!("[Admission] ATA manquant pour le mint {}. Préparation de la création...", mint_b);
+        instructions_to_execute.push(create_associated_token_account(
+            &payer.pubkey(),
+            &payer.pubkey(),
+            &mint_b,
+            &mint_b_program,
+        ));
+    }
+
+    // 5. Envoyer la transaction si nécessaire
+    if !instructions_to_execute.is_empty() {
+        println!("[Admission] Envoi de la transaction pour créer {} ATA(s)...", instructions_to_execute.len());
+        let recent_blockhash = rpc_client.get_latest_blockhash().await?;
+        let transaction = Transaction::new_signed_with_payer(
+            &instructions_to_execute,
+            Some(&payer.pubkey()),
+            &[payer],
+            recent_blockhash,
+        );
+        let versioned_tx = VersionedTransaction::from(transaction);
+        let signature = rpc_client.send_and_confirm_transaction(&versioned_tx).await?;
+        println!("[Admission] ✅ ATA(s) créé(s) avec succès. Signature : {}", signature);
+    }
+
+    Ok(())
+}
+
+
+
+/// Vérifie si le compte de volume pump.fun de l'utilisateur existe, et le crée si ce n'est pas le cas.
+async fn ensure_pump_user_account_exists(
+    rpc_client: &Arc<ResilientRpcClient>,
+    payer: &Keypair,
+) -> Result<()> {
+    println!("\n[Pré-vérification] Vérification du compte de volume utilisateur pump.fun...");
+
+    // 1. Calculer l'adresse du PDA que nous devons vérifier
+    let (pda, _) = Pubkey::find_program_address(
+        &[b"user_volume_accumulator", payer.pubkey().as_ref()],
+        &mev::decoders::pump::amm::PUMP_PROGRAM_ID,
+    );
+
+    // 2. Tenter de récupérer le compte. Si ça échoue, il n'existe probablement pas.
+    if rpc_client.get_account(&pda).await.is_err() {
+        println!("  -> Compte de volume non trouvé (adresse: {}). Création en cours...", pda);
+
+        // 3. Créer l'instruction en utilisant notre fonction centralisée
+        let init_ix =
+            mev::decoders::pump::amm::pool::create_init_user_volume_accumulator_instruction(&payer.pubkey())?;
+
+        // 4. Construire, signer et envoyer la transaction de création
+        let recent_blockhash = rpc_client.get_latest_blockhash().await?;
+        // Construire la transaction legacy...
+        let transaction = Transaction::new_signed_with_payer(
+            &[init_ix],
+            Some(&payer.pubkey()),
+            &[payer], // On signe directement ici
+            recent_blockhash,
+        );
+
+        // ...puis la convertir en VersionedTransaction avant de l'envoyer.
+        let versioned_tx = VersionedTransaction::from(transaction);
+
+        // On envoie maintenant le bon type de transaction.
+        let signature = rpc_client.send_and_confirm_transaction(&versioned_tx).await?;
+
+        println!("  -> ✅ SUCCÈS ! Compte de volume créé. Signature : {}", signature);
+    } else {
+        println!("  -> Compte de volume déjà existant. Aucune action requise.");
+    }
+
+    Ok(())
+}
+
 
 
 /// Lit le fichier `hotlist.json` et retourne la liste des adresses de pools.
@@ -327,6 +448,9 @@ async fn main() -> Result<()> {
     let rpc_client = Arc::new(ResilientRpcClient::new(config.solana_rpc_url.clone(), 3, 500));
     let geyser_url = env::var("GEYSER_GRPC_URL").context("GEYSER_GRPC_URL doit être défini dans le fichier .env")?;
 
+    // On s'assure que le portefeuille est prêt pour les trades pump.fun avant de continuer.
+    ensure_pump_user_account_exists(&rpc_client, &payer).await?;
+
     let main_graph = load_main_graph_from_cache()?;
     let hot_graph = Arc::new(Graph::new());
 
@@ -347,6 +471,9 @@ async fn main() -> Result<()> {
     let hot_graph_clone_for_onboarding = Arc::clone(&hot_graph);
     let main_graph_clone_for_onboarding = Arc::clone(&main_graph);
     let rpc_client_clone_for_onboarding = Arc::clone(&rpc_client);
+
+    let payer_clone_for_onboarding = Keypair::try_from(payer.to_bytes().as_slice())?;
+
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         loop {
@@ -370,6 +497,13 @@ async fn main() -> Result<()> {
                         (*pool_guard).clone()
                     };
                     if let Ok(hydrated_pool) = hot_graph_clone_for_onboarding.hydrate_pool(unhydrated_pool, &rpc_client_clone_for_onboarding).await {
+
+                        // Avant d'ajouter le pool au graphe, on s'assure d'être prêt à trader avec.
+                        if let Err(e) = ensure_atas_exist_for_pool(&rpc_client_clone_for_onboarding, &payer_clone_for_onboarding, &hydrated_pool).await {
+                            eprintln!("[Admission ERREUR] Impossible de créer les ATAs pour le pool {}: {}. On ignore ce pool pour le moment.", pool_address, e);
+                            continue; // On passe au pool suivant
+                        }
+
                         hot_graph_clone_for_onboarding.add_pool_to_graph(hydrated_pool).await;
                         println!("[Admission] Nouveau pool {} ajouté au hot graph.", pool_address);
                     }

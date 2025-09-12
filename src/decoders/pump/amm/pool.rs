@@ -359,3 +359,26 @@ impl PoolOperations for DecodedPumpAmmPool {
         })
     }
 }
+
+/// Construit l'instruction pour initialiser le compte de volume d'un utilisateur pour le programme pump.fun.
+/// Ce compte est un prérequis pour que le programme accepte les transactions de l'utilisateur.
+pub fn create_init_user_volume_accumulator_instruction(user_owner: &Pubkey) -> Result<Instruction> {
+    let discriminator: [u8; 8] = [94, 6, 202, 115, 255, 96, 232, 183];
+    let (user_volume_accumulator, _) = Pubkey::find_program_address(&[b"user_volume_accumulator", user_owner.as_ref()], &PUMP_PROGRAM_ID);
+    let (event_authority, _) = Pubkey::find_program_address(&[b"__event_authority"], &PUMP_PROGRAM_ID);
+
+    let accounts = vec![
+        AccountMeta::new(*user_owner, true),
+        AccountMeta::new_readonly(*user_owner, false),
+        AccountMeta::new(user_volume_accumulator, false),
+        AccountMeta::new_readonly(system_program::id(), false),
+        AccountMeta::new_readonly(event_authority, false),
+        AccountMeta::new_readonly(PUMP_PROGRAM_ID, false),
+    ];
+
+    Ok(Instruction {
+        program_id: PUMP_PROGRAM_ID,
+        accounts,
+        data: discriminator.to_vec(),
+    })
+}

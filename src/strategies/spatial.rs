@@ -76,7 +76,7 @@ pub async fn find_spatial_arbitrage(
         }
 
         // Si on a trouvé un acheteur et un vendeur, et que le prix de vente est inférieur au prix d'achat
-        if let (Some((sell_price, sell_key)), Some((buy_price, buy_key))) = (best_seller, best_buyer) {
+        if let (Some((_sell_price, sell_key)), Some((buy_price, buy_key))) = (best_seller, best_buyer) {
             if sell_key != buy_key && buy_price > PRICE_CHECK_AMOUNT {
                 // Opportunité détectée ! On lance maintenant l'optimiseur de profit.
                 let (mut pool_buy_from, mut pool_sell_to) = {

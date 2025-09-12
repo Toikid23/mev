@@ -46,6 +46,8 @@ pub struct DecodedClmmPool {
     pub min_tick: i32,
     pub max_tick: i32,
     pub tick_arrays: Option<BTreeMap<i32, TickArrayState>>,
+    pub mint_a_program: Pubkey,
+    pub mint_b_program: Pubkey,
     pub last_swap_timestamp: i64,
 }
 
@@ -230,6 +232,8 @@ pub fn decode_pool(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Result
         mint_b_max_transfer_fee: 0,
         trade_fee_rate: 0, min_tick: -443636, max_tick: 443636,
         tick_arrays: None,
+        mint_a_program: spl_token::id(), // Valeur par défaut
+        mint_b_program: spl_token::id(),
         last_swap_timestamp: 0,
     })
 }
@@ -271,25 +275,26 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &ResilientRpcClient
     let bitmap_ext_address = tickarray_bitmap_extension::get_bitmap_extension_address(&pool.address, &pool.program_id);
 
     let (mint_a_res, mint_b_res, pool_state_res, bitmap_ext_res) = tokio::join!(
-        // L'appel à config_res a été retiré !
-        rpc_client.get_account_data(&pool.mint_a),
-        rpc_client.get_account_data(&pool.mint_b),
+        rpc_client.get_account(&pool.mint_a), // On récupère le compte complet au lieu de juste les data
+        rpc_client.get_account(&pool.mint_b), // Idem ici
         rpc_client.get_account_data(&pool.address),
         rpc_client.get_account(&bitmap_ext_address)
     );
 
-    // Le reste de la fonction est presque identique, il suffit de supprimer le code lié à la config.
-    let mint_a_data = mint_a_res?;
-    let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_data)?;
+
+    let mint_a_account = mint_a_res?;
+    let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_account.data)?;
     pool.mint_a_decimals = decoded_mint_a.decimals;
     pool.mint_a_transfer_fee_bps = decoded_mint_a.transfer_fee_basis_points;
     pool.mint_a_max_transfer_fee = decoded_mint_a.max_transfer_fee;
+    pool.mint_a_program = mint_a_account.owner; // <-- On remplit la vraie valeur ici
 
-    let mint_b_data = mint_b_res?;
-    let decoded_mint_b = spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_data)?;
+    let mint_b_account = mint_b_res?;
+    let decoded_mint_b = spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_account.data)?;
     pool.mint_b_decimals = decoded_mint_b.decimals;
     pool.mint_b_transfer_fee_bps = decoded_mint_b.transfer_fee_basis_points;
     pool.mint_b_max_transfer_fee = decoded_mint_b.max_transfer_fee;
+    pool.mint_b_program = mint_b_account.owner; // <-- Et ici
 
     let pool_state_data = pool_state_res?;
     const POOL_STATE_DISCRIMINATOR: [u8; 8] = [247, 237, 227, 245, 215, 195, 222, 70];
