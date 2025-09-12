@@ -6,6 +6,7 @@ use crate::rpc::ResilientRpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 // --- Imports principaux ---
 // On importe le trait PoolOperations et l'enum unifié Pool
@@ -13,10 +14,12 @@ use crate::decoders::{Pool, PoolOperations};
 // On importe les modules de premier niveau pour chaque protocole
 use crate::decoders::{meteora, orca, pump, raydium};
 
-#[derive(Clone, Default)]
+#[derive(Default, Debug)]
 pub struct Graph {
-    pub pools: HashMap<Pubkey, Arc<Pool>>,
-    pub account_to_pool_map: HashMap<Pubkey, Pubkey>,
+    // La map des pools est protégée par un RwLock pour permettre des lectures parallèles.
+    // Chaque Pool est aussi dans un RwLock pour des mises à jour individuelles.
+    pub pools: RwLock<HashMap<Pubkey, Arc<RwLock<Pool>>>>,
+    pub account_to_pool_map: RwLock<HashMap<Pubkey, Pubkey>>,
 }
 
 impl Graph {
@@ -79,24 +82,13 @@ impl Graph {
         }
     }
 
-    /// Ajoute un pool hydraté au graphe.
-    pub fn add_pool_to_graph(&mut self, pool: Pool) {
+    pub async fn add_pool_to_graph(&self, pool: Pool) {
         let (vault_a, vault_b) = pool.get_vaults();
-
-        // Ce match a aussi été mis à jour pour utiliser les bons noms de variants
-        let pool_address = match &pool {
-            Pool::RaydiumAmmV4(p) => p.address,
-            Pool::RaydiumCpmm(p) => p.address,
-            Pool::RaydiumClmm(p) => p.address,
-            Pool::MeteoraDammV1(p) => p.address,
-            Pool::MeteoraDammV2(p) => p.address,
-            Pool::MeteoraDlmm(p) => p.address,
-            Pool::OrcaWhirlpool(p) => p.address,
-            Pool::PumpAmm(p) => p.address,
-        };
-
-        self.account_to_pool_map.insert(vault_a, pool_address);
-        self.account_to_pool_map.insert(vault_b, pool_address);
-        self.pools.insert(pool_address, Arc::new(pool));
+        let pool_address = pool.address();
+        let mut pools_writer = self.pools.write().await;
+        let mut map_writer = self.account_to_pool_map.write().await;
+        map_writer.insert(vault_a, pool_address);
+        map_writer.insert(vault_b, pool_address);
+        pools_writer.insert(pool_address, Arc::new(RwLock::new(pool)));
     }
 }

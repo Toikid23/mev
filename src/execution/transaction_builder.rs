@@ -1,3 +1,5 @@
+// DANS : src/execution/transaction_builder.rs
+
 use anyhow::Result;
 use solana_sdk::message::AddressLookupTableAccount;
 use solana_sdk::{
@@ -10,20 +12,20 @@ use solana_sdk::{
 };
 use spl_associated_token_account::get_associated_token_address;
 use anchor_lang::{prelude::*, AnchorSerialize};
-use tokio::sync::Mutex;
+// MODIFIÉ : On retire Mutex car il n'est plus utilisé ici.
 use std::sync::Arc;
 use crate::execution::protections::SwapProtections;
 
 use crate::{
     decoders::{PoolOperations},
-    graph_engine::Graph,
+    graph_engine::Graph, // On importe bien notre nouvelle structure Graph
     strategies::spatial::ArbitrageOpportunity,
     decoders::pool_operations::UserSwapAccounts,
     rpc::ResilientRpcClient,
 };
 
 // NOTE: Ces constantes doivent être accessibles ici.
-const ATOMIC_ARB_EXECUTOR_PROGRAM_ID: Pubkey = pubkey!("3gHUHkQD8TjeQntEsygDnm4TRo3xKQRTbDTaFxgQdXe1");
+const ATOMIC_ARB_EXECUTOR_PROGRAM_ID: Pubkey = solana_sdk::pubkey!("3gHUHkQD8TjeQntEsygDnm4TRo3xKQRTbDTaFxgQdXe1");
 
 #[derive(AnchorSerialize, Clone, Debug)]
 pub struct ProgramSwapStep {
@@ -41,7 +43,7 @@ pub struct ExecuteRouteIxArgs {
 // C'est votre fonction originale, maintenant dans son propre module.
 pub async fn build_arbitrage_transaction(
     opportunity: &ArbitrageOpportunity,
-    graph: Arc<Mutex<Graph>>,
+    graph: Arc<Graph>, // MODIFIÉ : On reçoit le nouveau Arc<Graph>
     rpc_client: &ResilientRpcClient,
     payer: &Keypair,
     lookup_table_account: &AddressLookupTableAccount,
@@ -49,11 +51,26 @@ pub async fn build_arbitrage_transaction(
 ) -> Result<(VersionedTransaction, Instruction)> {
     println!("\n--- [Phase 1] Construction de la Transaction V0 (avec LUT) ---");
 
-    let graph_guard = graph.lock().await;
-    let pool_buy_from = graph_guard.pools.get(&opportunity.pool_buy_from_key).unwrap().clone();
-    let pool_sell_to = graph_guard.pools.get(&opportunity.pool_sell_to_key).unwrap().clone();
-    drop(graph_guard);
+    // --- LA CORRECTION EST ICI ---
+    // On remplace le verrou Mutex par des verrous fins RwLock en lecture.
+    let (pool_buy_from, pool_sell_to) = {
+        // 1. On prend un verrou en lecture sur la map des pools
+        let pools_reader = graph.pools.read().await;
 
+        // 2. On récupère les Arcs vers les pools individuels
+        let buy_from_arc_rwlock = pools_reader.get(&opportunity.pool_buy_from_key).unwrap().clone();
+        let sell_to_arc_rwlock = pools_reader.get(&opportunity.pool_sell_to_key).unwrap().clone();
+
+        // On peut relâcher le verrou de la map maintenant.
+        drop(pools_reader);
+
+        // 3. On prend les verrous en lecture sur les pools individuels et on clone leurs données.
+        let (buy_guard, sell_guard) = tokio::join!(buy_from_arc_rwlock.read(), sell_to_arc_rwlock.read());
+        (buy_guard.clone(), sell_guard.clone())
+    }; // Tous les verrous sont relâchés ici.
+    // --- FIN DE LA CORRECTION ---
+
+    // Le reste de la fonction est absolument identique.
     let predicted_intermediate_out = pool_buy_from.get_quote(
         &opportunity.token_in_mint,
         opportunity.amount_in,
@@ -74,20 +91,19 @@ pub async fn build_arbitrage_transaction(
     let (min_out_buy, min_out_sell) = if let Some(p) = protections {
         (p.intermediate_min_amount_out, p.final_min_amount_out)
     } else {
-        // Pas de protections fournies, on est en mode "simulation de découverte".
         (1, 1)
     };
 
     let ix_buy = pool_buy_from.create_swap_instruction(
         &opportunity.token_in_mint,
         opportunity.amount_in,
-        min_out_buy, // <-- UTILISER LA VARIABLE
+        min_out_buy,
         &user_accounts_buy
     )?;
     let ix_sell = pool_sell_to.create_swap_instruction(
         &opportunity.token_intermediate_mint,
         predicted_intermediate_out,
-        min_out_sell, // <-- UTILISER LA VARIABLE
+        min_out_sell,
         &user_accounts_sell
     )?;
 
@@ -110,7 +126,7 @@ pub async fn build_arbitrage_transaction(
 
     let args = ExecuteRouteIxArgs {
         route: vec![step1, step2],
-        minimum_expected_profit: final_profit_protection, // <-- UTILISER LA VARIABLE
+        minimum_expected_profit: final_profit_protection,
     };
     let mut instruction_data = Vec::new();
     instruction_data.extend_from_slice(&[246, 14, 81, 121, 140, 237, 86, 23]);
@@ -120,8 +136,14 @@ pub async fn build_arbitrage_transaction(
     let mut final_accounts_list = vec![
         AccountMeta::new_readonly(config_pda, false),
         AccountMeta::new(payer.pubkey(), true),
+        // --- LA CORRECTION EST ICI ---
+        // On construit la struct directement pour pouvoir spécifier `is_writable`.
+        AccountMeta {
+            pubkey: user_accounts_sell.destination,
+            is_signer: false,
+            is_writable: true,
+        },
     ];
-    final_accounts_list.push(AccountMeta { pubkey: user_accounts_sell.destination, is_signer: false, is_writable: true });
     final_accounts_list.extend(ix_buy.accounts);
     final_accounts_list.extend(ix_sell.accounts);
 

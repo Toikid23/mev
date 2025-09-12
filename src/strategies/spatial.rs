@@ -1,11 +1,10 @@
-// DANS : src/strategies/spatial.rs
-
 use crate::decoders::{Pool, PoolOperations};
-use crate::graph_engine::Graph;
+use crate::graph_engine::Graph; // On importe notre nouvelle structure Graph
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+// On a seulement besoin de tokio::sync::RwLock pour les types, mais pas d'import direct si on n'utilise pas le nom court.
+// On va le retirer pour éviter le warning, car les types sont déjà dans la définition de `Graph`.
 
 #[derive(Debug, Clone)]
 pub struct ArbitrageOpportunity {
@@ -18,22 +17,32 @@ pub struct ArbitrageOpportunity {
 }
 
 pub async fn find_spatial_arbitrage(
-    graph: Arc<Mutex<Graph>>,
+    graph: Arc<Graph>,
 ) -> Vec<ArbitrageOpportunity> {
     const MINIMUM_PROFIT_LAMPS: u64 = 100_000;
     let mut opportunities = Vec::new();
 
-    let graph_guard = graph.lock().await;
-    let pools_map_ref: &HashMap<Pubkey, Arc<Pool>> = &graph_guard.pools;
+    // Étape 1 : Construire une map locale des paires de tokens.
+    // C'est ici qu'on utilise la nouvelle logique pour la première fois.
+    let pools_by_pair = {
+        // On prend un VERROU EN LECTURE sur la HashMap des pools.
+        // Plusieurs stratégies peuvent faire cela en même temps.
+        let pools_map_reader = graph.pools.read().await;
 
-    let mut pools_by_pair: HashMap<(Pubkey, Pubkey), Vec<Pubkey>> = HashMap::new();
-    for (pool_key, pool_arc) in pools_map_ref {
-        let (mut mint_a, mut mint_b) = pool_arc.get_mints();
-        if mint_a > mint_b { std::mem::swap(&mut mint_a, &mut mint_b); }
-        pools_by_pair.entry((mint_a, mint_b)).or_default().push(*pool_key);
-    }
-    drop(graph_guard);
+        // On aide le compilateur en spécifiant le type complet de notre map locale.
+        let mut map: HashMap<(Pubkey, Pubkey), Vec<Pubkey>> = HashMap::new();
 
+        for (pool_key, pool_arc_rwlock) in pools_map_reader.iter() {
+            // Pour chaque pool dans la grande map, on prend un VERROU EN LECTURE individuel.
+            let pool_reader = pool_arc_rwlock.read().await;
+            let (mut mint_a, mut mint_b) = pool_reader.get_mints();
+            if mint_a > mint_b { std::mem::swap(&mut mint_a, &mut mint_b); }
+            map.entry((mint_a, mint_b)).or_default().push(*pool_key);
+        }
+        map // Le verrou `pools_map_reader` est automatiquement relâché à la fin de ce bloc.
+    };
+
+    // Étape 2 : Itérer sur les paires qui ont au moins deux pools.
     for ((mint_a, mint_b), pool_keys) in pools_by_pair.iter() {
         if pool_keys.len() < 2 { continue; }
 
@@ -42,15 +51,22 @@ pub async fn find_spatial_arbitrage(
                 let key1 = pool_keys[i];
                 let key2 = pool_keys[j];
 
-                let graph_guard = graph.lock().await;
-                let pool1_arc = match graph_guard.pools.get(&key1) { Some(p) => p.clone(), None => continue };
-                let pool2_arc = match graph_guard.pools.get(&key2) { Some(p) => p.clone(), None => continue };
-                drop(graph_guard);
+                // Étape 3 : Récupérer les données clonées des deux pools à comparer.
+                let (pool1, pool2) = {
+                    // On reprend un VERROU EN LECTURE sur la HashMap pour trouver les Arcs.
+                    let pools_reader = graph.pools.read().await;
+                    let pool1_arc_rwlock = match pools_reader.get(&key1) { Some(p) => p.clone(), None => continue };
+                    let pool2_arc_rwlock = match pools_reader.get(&key2) { Some(p) => p.clone(), None => continue };
+                    drop(pools_reader); // On relâche le verrou de la map le plus tôt possible.
 
-                // CORRIGÉ : `mut` a été retiré, car non nécessaire.
-                let pool1 = (*pool1_arc).clone();
-                let pool2 = (*pool2_arc).clone();
+                    // On prend les DEUX verrous de lecture individuels en parallèle.
+                    let (p1_guard, p2_guard) = tokio::join!(pool1_arc_rwlock.read(), pool2_arc_rwlock.read());
 
+                    // On clone les données pour travailler dessus. Les verrous sont relâchés ici.
+                    (p1_guard.clone(), p2_guard.clone())
+                };
+
+                // Étape 4 : La logique de calcul reste la même.
                 let quote1_res = pool1.get_quote(mint_a, 1_000_000, 0);
                 let quote2_res = pool2.get_quote(mint_a, 1_000_000, 0);
 
@@ -81,6 +97,7 @@ fn find_optimal_arbitrage(
     token_in_mint: Pubkey,
     token_intermediate_mint: Pubkey,
 ) -> Option<ArbitrageOpportunity> {
+    // Le corps de cette fonction est correct et reste inchangé.
     let ts = 0;
     let mut low_bound: u64 = 0;
 
