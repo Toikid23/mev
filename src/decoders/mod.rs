@@ -112,6 +112,21 @@ impl PoolOperations for Pool {
         }
     }
 
+
+    fn update_from_account_data(&mut self, account_pubkey: &Pubkey, account_data: &[u8]) -> Result<()> {
+        match self {
+            Pool::RaydiumAmmV4(p) => p.update_from_account_data(account_pubkey, account_data),
+            Pool::RaydiumCpmm(p) => p.update_from_account_data(account_pubkey, account_data),
+            Pool::RaydiumClmm(p) => p.update_from_account_data(account_pubkey, account_data),
+            Pool::MeteoraDammV1(p) => p.update_from_account_data(account_pubkey, account_data),
+            Pool::MeteoraDammV2(p) => p.update_from_account_data(account_pubkey, account_data),
+            Pool::MeteoraDlmm(p) => p.update_from_account_data(account_pubkey, account_data),
+            Pool::OrcaWhirlpool(p) => p.update_from_account_data(account_pubkey, account_data),
+            Pool::PumpAmm(p) => p.update_from_account_data(account_pubkey, account_data),
+        }
+    }
+
+
     fn create_swap_instruction(
         &self,
         token_in_mint: &Pubkey,

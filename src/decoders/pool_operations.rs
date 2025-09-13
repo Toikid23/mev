@@ -22,6 +22,10 @@ pub trait PoolOperations {
         current_timestamp: i64
     ) -> Result<u64>;
 
+    /// Met à jour les champs internes du pool à partir des données brutes d'un compte.
+    /// Retourne un booléen indiquant si une ré-hydratation RPC (ex: pour les ticks) est nécessaire.
+    fn update_from_account_data(&mut self, account_pubkey: &Pubkey, account_data: &[u8]) -> Result<()>;
+
     fn create_swap_instruction(
         &self,
         token_in_mint: &Pubkey,

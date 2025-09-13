@@ -273,6 +273,18 @@ impl PoolOperations for DecodedMeteoraDammPool {
     }
 
 
+    fn update_from_account_data(&mut self, _account_pubkey: &Pubkey, account_data: &[u8]) -> Result<()> {
+        // On réutilise notre fonction de décodage existante pour parser les nouvelles données.
+        let updated_pool = super::decode_pool(&self.address, account_data)?;
+
+        // On met à jour les champs critiques qui changent lors d'un swap.
+        self.sqrt_price = updated_pool.sqrt_price;
+        self.liquidity = updated_pool.liquidity;
+
+        Ok(())
+    }
+
+
     fn create_swap_instruction(
         &self,
         token_in_mint: &Pubkey,

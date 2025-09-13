@@ -7,8 +7,6 @@ use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 use futures_util::sink::SinkExt;
-
-// --- Imports corrigés pour Yellowstone v9.0.0 ---
 use yellowstone_grpc_client::GeyserGrpcClient;
 use yellowstone_grpc_proto::{
     prelude::{
@@ -17,8 +15,6 @@ use yellowstone_grpc_proto::{
     },
 };
 
-/// Le Guetteur est responsable de la connexion au stream Geyser
-/// et de l'identification des pools actifs en temps réel.
 pub struct Watcher {
     geyser_grpc_url: String,
 }
@@ -28,23 +24,26 @@ impl Watcher {
         Self { geyser_grpc_url }
     }
 
-    /// Lance le processus d'écoute.
+    // --- LA SIGNATURE DE LA FONCTION CHANGE ---
     pub async fn run(
         &self,
         cache: PoolCache,
+        programs_to_watch: Vec<Pubkey>, // <-- NOUVEL ARGUMENT
         active_pool_sender: mpsc::Sender<Pubkey>,
     ) -> Result<()> {
         println!("[Watcher] Connexion au stream Geyser gRPC à l'adresse : {}", self.geyser_grpc_url);
 
-        // --- CORRECTION 1: Utilisation du Builder Pattern ---
         let mut client = GeyserGrpcClient::build_from_shared(self.geyser_grpc_url.clone())?
             .connect()
             .await
             .context("Impossible de se connecter au client Geyser gRPC")?;
 
-        println!("[Watcher] Connexion réussie. Envoi de la requête d'abonnement...");
+        println!("[Watcher] Connexion réussie. Préparation de l'abonnement pour {} programmes DEX...", programs_to_watch.len());
 
-        // --- CORRECTION 2: Ajout des champs manquants au filtre ---
+        // --- LA LOGIQUE DU FILTRE CHANGE ICI ---
+        // On convertit les Pubkeys en String pour le filtre.
+        let accounts_required_str: Vec<String> = programs_to_watch.into_iter().map(|p| p.to_string()).collect();
+
         let mut tx_filter = HashMap::new();
         tx_filter.insert(
             "txs".to_string(),
@@ -52,11 +51,14 @@ impl Watcher {
                 vote: Some(false),
                 failed: Some(false),
                 account_include: vec![],
-                account_required: vec![],
-                account_exclude: vec![], // Champ manquant ajouté
-                signature: None,         // Champ manquant ajouté
+                // `account_required` signifie : "envoyez-moi uniquement les tx qui impliquent AU MOINS UN de ces comptes".
+                // C'est parfait pour surveiller des programmes.
+                account_required: accounts_required_str,
+                account_exclude: vec![],
+                signature: None,
             },
         );
+        // --- FIN DE LA MODIFICATION DU FILTRE ---
 
         let request = SubscribeRequest {
             transactions: tx_filter,
@@ -75,12 +77,8 @@ impl Watcher {
             if let Some(UpdateOneof::Transaction(tx_update)) = message.update_oneof {
                 if let Some(tx_info) = &tx_update.transaction {
                     if let Some(tx_message) = &tx_info.transaction.as_ref().unwrap().message {
-
                         let mut found_pools = HashSet::new();
-
-                        // Stratégie robuste : on vérifie tous les comptes de la transaction
                         for key_bytes in &tx_message.account_keys {
-                            // --- CORRECTION 2: Conversion Vec<u8> -> Pubkey correcte ---
                             if key_bytes.len() == 32 {
                                 let key = Pubkey::new_from_array(key_bytes.as_slice().try_into()?);
                                 if let Some(pool_address) = cache.watch_map.get(&key) {
@@ -88,7 +86,6 @@ impl Watcher {
                                 }
                             }
                         }
-
                         for pool_address in found_pools {
                             if let Err(e) = active_pool_sender.send(pool_address).await {
                                 eprintln!("[Watcher] Erreur: Le canal est fermé. Arrêt. Raison: {}", e);

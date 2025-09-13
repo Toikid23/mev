@@ -419,6 +419,21 @@ impl PoolOperations for DecodedMeteoraSbpPool {
         find_input_by_binary_search(quote_fn, amount_out, high_bound)
     }
 
+    fn update_from_account_data(&mut self, account_pubkey: &Pubkey, account_data: &[u8]) -> Result<()> {
+        // Les données d'un compte token SPL ont le solde (u64) à l'offset 64.
+        if account_data.len() >= 72 {
+            let balance = u64::from_le_bytes(account_data[64..72].try_into()?);
+
+            // On vérifie si le compte mis à jour est un des vaults que l'on connaît
+            if *account_pubkey == self.a_token_vault {
+                self.reserve_a = balance;
+            } else if *account_pubkey == self.b_token_vault {
+                self.reserve_b = balance;
+            }
+        }
+        Ok(())
+    }
+
     fn create_swap_instruction(&self, token_in_mint: &Pubkey, amount_in: u64, min_amount_out: u64, user_accounts: &UserSwapAccounts) -> Result<Instruction> {
         let instruction_discriminator: [u8; 8] = [248, 198, 158, 145, 225, 117, 135, 200];
         let mut instruction_data = Vec::with_capacity(8 + 8 + 8);

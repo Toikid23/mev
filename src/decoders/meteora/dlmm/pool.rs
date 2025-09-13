@@ -282,6 +282,18 @@ impl PoolOperations for DecodedDlmmPool {
         find_input_by_binary_search(quote_fn, amount_out, high_bound)
     }
 
+    fn update_from_account_data(&mut self, _account_pubkey: &Pubkey, account_data: &[u8]) -> Result<()> {
+        // On réutilise notre décodeur spécifique `decode_lb_pair`.
+        let updated_pool = super::decode_lb_pair(&self.address, account_data, &self.program_id)?;
+
+        // On met à jour le bin actif, qui est l'indicateur de prix.
+        self.active_bin_id = updated_pool.active_bin_id;
+        // La liquidité est dans les BinArrays, donc on ne peut pas la mettre à jour ici.
+        // C'est pourquoi la ré-hydratation RPC restera nécessaire pour ce type de pool.
+
+        Ok(())
+    }
+
 
     fn create_swap_instruction(
         &self,

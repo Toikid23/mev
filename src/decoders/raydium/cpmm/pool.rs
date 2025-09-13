@@ -308,6 +308,21 @@ impl PoolOperations for DecodedCpmmPool {
         Ok(required_amount_in as u64)
     }
 
+    fn update_from_account_data(&mut self, account_pubkey: &Pubkey, account_data: &[u8]) -> Result<()> {
+        // Les données d'un compte token SPL ont le solde (u64) à l'offset 64.
+        if account_data.len() >= 72 {
+            let balance = u64::from_le_bytes(account_data[64..72].try_into()?);
+
+            // Les champs ici s'appellent token_0_vault et token_1_vault
+            if *account_pubkey == self.token_0_vault {
+                self.reserve_a = balance;
+            } else if *account_pubkey == self.token_1_vault {
+                self.reserve_b = balance;
+            }
+        }
+        Ok(())
+    }
+
     fn create_swap_instruction(
         &self,
         token_in_mint: &Pubkey,

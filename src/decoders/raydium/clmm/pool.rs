@@ -504,6 +504,18 @@ impl PoolOperations for DecodedClmmPool {
         calculate_gross_amount_before_transfer_fee(amount_in_after_transfer_fee, in_mint_fee_bps, in_mint_max_fee)
     }
 
+    fn update_from_account_data(&mut self, _account_pubkey: &Pubkey, account_data: &[u8]) -> Result<()> {
+        // On réutilise notre décodeur spécifique à Raydium CLMM.
+        let updated_pool = super::decode_pool(&self.address, account_data, &self.program_id)?;
+
+        // On met à jour les champs critiques qui changent à chaque swap.
+        self.sqrt_price_x64 = updated_pool.sqrt_price_x64;
+        self.liquidity = updated_pool.liquidity;
+        self.tick_current = updated_pool.tick_current;
+
+        Ok(())
+    }
+
 
     fn create_swap_instruction(
         &self,

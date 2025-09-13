@@ -517,6 +517,18 @@ impl PoolOperations for DecodedWhirlpoolPool {
         Ok(final_amount_in as u64)
     }
 
+    fn update_from_account_data(&mut self, _account_pubkey: &Pubkey, account_data: &[u8]) -> Result<()> {
+        // On réutilise notre fonction de décodage existante pour parser les nouvelles données.
+        let updated_pool = super::decode_pool(&self.address, account_data)?;
+
+        // On met à jour les champs critiques qui changent à chaque swap.
+        self.sqrt_price = updated_pool.sqrt_price;
+        self.liquidity = updated_pool.liquidity;
+        self.tick_current_index = updated_pool.tick_current_index;
+
+        Ok(())
+    }
+
 
     fn create_swap_instruction(
         &self,
