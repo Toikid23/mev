@@ -7,11 +7,16 @@ use mev::{
     execution::{fee_manager::FeeManager, protections, simulator, transaction_builder},
     graph_engine::Graph,
     rpc::ResilientRpcClient,
-    state::slot_tracker::SlotTracker,
+    state::{
+        // jito_leader_tracker est supprimé
+        leader_schedule::LeaderScheduleTracker,
+        slot_metronome::SlotMetronome,
+        slot_tracker::SlotTracker,
+        validator_intel::ValidatorIntelService, // NOUVEL IMPORT
+    },
     strategies::spatial::{find_spatial_arbitrage, ArbitrageOpportunity},
 };
 use solana_address_lookup_table_program::state::AddressLookupTable;
-use solana_client::nonblocking::pubsub_client::PubsubClient;
 use solana_sdk::{
     message::AddressLookupTableAccount as SdkAddressLookupTableAccount, pubkey::Pubkey,
     signature::Keypair, signer::Signer, transaction::Transaction,
@@ -24,7 +29,6 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-// --- ON UTILISE MAINTENANT TOUS LES OUTILS DE TOKIO ---
 use tokio::sync::{mpsc, Mutex, RwLock};
 use yellowstone_grpc_client::GeyserGrpcClient;
 use yellowstone_grpc_proto::prelude::{
@@ -36,6 +40,10 @@ use solana_sdk::transaction::VersionedTransaction;
 
 
 const ADDRESS_LOOKUP_TABLE_ADDRESS: Pubkey = solana_sdk::pubkey!("E5h798UBdK8V1L7MvRfi1ppr2vitPUUUUCVqvTyDgKXN");
+// Estimation du temps nécessaire pour construire et envoyer un bundle. À ajuster.
+const BOT_PROCESSING_TIME_MS: u128 = 200;
+// Pourcentage du profit net à offrir en pourboire Jito.
+const JITO_TIP_PERCENT: u64 = 20;
 
 
 /// Lit le fichier `hotlist.json`
@@ -229,7 +237,6 @@ impl GeyserUpdater {
     }
 }
 
-/// Logique de ré-hydratation simplifiée
 async fn rehydrate_and_find_opportunities(
     pool_address: Pubkey,
     graph: Arc<Graph>,
@@ -237,6 +244,9 @@ async fn rehydrate_and_find_opportunities(
     payer: Keypair,
     currently_processing: Arc<Mutex<HashSet<String>>>,
     slot_tracker: Arc<SlotTracker>,
+    slot_metronome: Arc<SlotMetronome>,
+    leader_schedule_tracker: Arc<LeaderScheduleTracker>,
+    validator_intel: Arc<ValidatorIntelService>, // NOUVEAU PARAMÈTRE
     fee_manager: FeeManager,
 ) {
     let pool_arc = {
@@ -255,13 +265,14 @@ async fn rehydrate_and_find_opportunities(
         if let Ok(hydrated_pool) = rehydrate_result {
             *pool_writer = hydrated_pool;
         } else {
-            eprintln!("[Rehydrate] Échec de la ré-hydratation des dépendances pour {}", pool_address);
+            eprintln!("[Rehydrate] Échec de la ré-hydratation pour {}", pool_address);
             return;
         }
         drop(pool_writer);
 
-        let clock_snapshot = slot_tracker.current();
+        let current_timestamp = slot_tracker.current().clock.unix_timestamp;
         let opportunities = find_spatial_arbitrage(graph.clone()).await;
+
         if let Some(opp) = opportunities.into_iter().next() {
             let mut pools = [opp.pool_buy_from_key.to_string(), opp.pool_sell_to_key.to_string()];
             pools.sort();
@@ -271,7 +282,10 @@ async fn rehydrate_and_find_opportunities(
                 if processing_guard.contains(&opportunity_id) { true } else { processing_guard.insert(opportunity_id.clone()); false }
             };
             if !is_already_processing {
-                if let Err(e) = process_opportunity(opp, graph, rpc_client, payer, clock_snapshot.unix_timestamp, &fee_manager).await {
+                if let Err(e) = process_opportunity(
+                    opp, graph, rpc_client, payer, current_timestamp, &fee_manager,
+                    slot_tracker, slot_metronome, leader_schedule_tracker, validator_intel,
+                ).await {
                     println!("[Erreur Traitement] {}", e);
                 }
                 currently_processing.lock().await.remove(&opportunity_id);
@@ -288,7 +302,12 @@ async fn process_opportunity(
     payer: Keypair,
     current_timestamp: i64,
     fee_manager: &FeeManager,
+    slot_tracker: Arc<SlotTracker>,
+    slot_metronome: Arc<SlotMetronome>,
+    leader_schedule_tracker: Arc<LeaderScheduleTracker>,
+    validator_intel: Arc<ValidatorIntelService>, // NOUVEAU PARAMÈTRE
 ) -> Result<()> {
+    // Phase 1 & 2 : Construction et validation de la transaction (inchangé)
     let lookup_table_account_data = rpc_client.get_account_data(&ADDRESS_LOOKUP_TABLE_ADDRESS).await?;
     let lookup_table_ref = AddressLookupTable::deserialize(&lookup_table_account_data)?;
     let owned_lookup_table = SdkAddressLookupTableAccount {
@@ -325,31 +344,74 @@ async fn process_opportunity(
         Ok(data) => data,
         Err(e) => { println!("[Phase 3 VALIDATION ÉCHOUÉE] La transaction n'est plus viable : {}", e); return Ok(()) }
     };
+    // Une fois la simulation réussie et `sim_data` obtenu :
     println!("  -> Validation et Découverte RÉUSSIES !");
 
-    // --- LA CORRECTION EST ICI ---
-    println!("\n--- [Phase 4] Calculs finaux et décision d'envoi ---");
-    const OVERBID_PERCENT: u8 = 20;
-    let accounts_in_tx = vec![opportunity.pool_buy_from_key, opportunity.pool_sell_to_key];
+    // --- PHASE 4 : LOGIQUE DE DÉCISION DE ROUTAGE (JITO vs NORMAL) ---
+    println!("\n--- [Phase 4] Analyse de routage et décision d'envoi ---");
 
-    // On `await` le résultat de la fonction asynchrone
-    let dynamic_priority_fee_price_per_cu = fee_manager.calculate_priority_fee(&accounts_in_tx, OVERBID_PERCENT).await;
+    let current_slot = slot_tracker.current().clock.slot;
+    let time_remaining_in_slot = slot_metronome.estimated_time_remaining_in_slot_ms();
 
-    let profit_brut_reel = sim_data.profit_brut_reel;
-    let compute_units = sim_data.compute_units;
-    let total_frais_normaux = 5000 + (compute_units * dynamic_priority_fee_price_per_cu) / 1_000_000;
-    let profit_net_final = profit_brut_reel.saturating_sub(total_frais_normaux);
-
-    println!("     -> Profit Net FINAL Calculé : {} lamports", profit_net_final);
-    if profit_net_final > 0 {
-        println!("  -> DÉCISION: ENVOYER LA TRANSACTION NORMALE");
+    let (target_slot, leader_info) = if time_remaining_in_slot > BOT_PROCESSING_TIME_MS {
+        (current_slot, leader_schedule_tracker.get_leader_info_for_slot(current_slot))
     } else {
-        println!("  -> DÉCISION : Abandon. Le profit réel est insuffisant après frais.");
+        println!("     -> Temps insuffisant dans le slot actuel ({}ms restants). On vise le prochain slot.", time_remaining_in_slot);
+        let next_slot = current_slot + 1;
+        (next_slot, leader_schedule_tracker.get_leader_info_for_slot(next_slot))
+    };
+
+    let (leader_identity, leader_vote_account) = match leader_info {
+        Some(info) => info,
+        None => {
+            println!("     -> DÉCISION : Abandon. Impossible de déterminer le leader pour le slot cible {}.", target_slot);
+            return Ok(());
+        }
+    };
+
+
+    // --- MODIFICATION : On utilise notre nouveau service ---
+    if validator_intel.is_jito_validator(&leader_vote_account).await {
+        println!("     -> Leader cible (Slot {}): {} (✅ Jito)", target_slot, leader_identity);
+
+        let profit_brut_reel = sim_data.profit_brut_reel;
+        let jito_tip = fee_manager.calculate_jito_tip(profit_brut_reel, JITO_TIP_PERCENT);
+        let profit_net_final = profit_brut_reel.saturating_sub(jito_tip);
+
+        println!("     -> Profit Net FINAL (après tip Jito) : {} lamports", profit_net_final);
+        if profit_net_final > 0 {
+            println!("  -> DÉCISION : ENVOYER VIA BUNDLE JITO");
+            // NOTE : Le routage géographique sera la prochaine étape. Pour l'instant, on envoie à l'endpoint par défaut.
+            println!("\n--- [Phase 5] Envoi (Mode Simulation Jito) ---");
+            println!("[ACTION SIMULÉE - BUNDLE JITO]");
+            println!("  -> Tip Jito inclus : {} lamports", jito_tip);
+        } else {
+            println!("  -> DÉCISION : Abandon. Le profit est insuffisant après le tip Jito.");
+        }
+
+    } else {
+        println!("     -> Leader cible (Slot {}): {} (❌ Non-Jito)", target_slot, leader_identity);
+
+        const OVERBID_PERCENT: u8 = 20;
+        let accounts_in_tx = vec![opportunity.pool_buy_from_key, opportunity.pool_sell_to_key];
+        let dynamic_priority_fee_price_per_cu = fee_manager.calculate_priority_fee(&accounts_in_tx, OVERBID_PERCENT).await;
+
+        let profit_brut_reel = sim_data.profit_brut_reel;
+        let compute_units = sim_data.compute_units;
+        let total_frais_normaux = 5000 + (compute_units * dynamic_priority_fee_price_per_cu) / 1_000_000;
+        let profit_net_final = profit_brut_reel.saturating_sub(total_frais_normaux);
+
+        println!("     -> Profit Net FINAL (après frais de priorité) : {} lamports", profit_net_final);
+        if profit_net_final > 0 {
+            println!("  -> DÉCISION: ENVOYER LA TRANSACTION NORMALE");
+            println!("\n--- [Phase 5] Envoi (Mode Simulation Normale) ---");
+            println!("[ACTION SIMULÉE - TX NORMALE]");
+            println!("  -> Enverrait une transaction avec un priority fee de {} micro-lamports/CU.", dynamic_priority_fee_price_per_cu);
+        } else {
+            println!("  -> DÉCISION : Abandon. Le profit réel est insuffisant après frais.");
+        }
     }
-    println!("\n--- [Phase 5] Envoi (Mode Simulation) ---");
-    println!("[ACTION SIMULÉE - TX NORMALE]");
-    println!("  -> Profit Net Attendu: {} lamports", profit_net_final);
-    println!("  -> Enverrait une transaction avec un priority fee de {} micro-lamports/CU.", dynamic_priority_fee_price_per_cu);
+
     Ok(())
 }
 
@@ -363,17 +425,30 @@ async fn main() -> Result<()> {
     let rpc_client = Arc::new(ResilientRpcClient::new(config.solana_rpc_url.clone(), 3, 500));
     let geyser_url = env::var("GEYSER_GRPC_URL").context("GEYSER_GRPC_URL doit être défini dans le fichier .env")?;
 
+
+    // --- BLOC D'INITIALISATION COMPLET ET FINAL ---
+    println!("[Init] Initialisation du ValidatorIntelService...");
+    let validator_intel_service = Arc::new(ValidatorIntelService::new().await?);
+    validator_intel_service.start();
+
+    println!("[Init] Initialisation du SlotTracker Geyser...");
+    let slot_tracker = Arc::new(SlotTracker::new(&rpc_client).await?);
+    slot_tracker.start(geyser_url.clone(), rpc_client.clone());
+
+    println!("[Init] Initialisation du LeaderScheduleTracker...");
+    let leader_schedule_tracker = Arc::new(LeaderScheduleTracker::new(rpc_client.clone()).await?);
+    leader_schedule_tracker.start();
+
+    println!("[Init] Initialisation du SlotMetronome...");
+    let slot_metronome = Arc::new(SlotMetronome::new(slot_tracker.clone()));
+    slot_metronome.start();
+    // --- FIN DU BLOC ---
+
     ensure_pump_user_account_exists(&rpc_client, &payer).await?;
     let main_graph = load_main_graph_from_cache()?;
     let hot_graph = Arc::new(Graph::new());
 
-    // --- CORRECTION : Utiliser tokio::sync::RwLock ---
     let shared_hotlist = Arc::new(RwLock::new(HashSet::<Pubkey>::new()));
-
-    let slot_tracker = Arc::new(SlotTracker::new(&rpc_client).await?);
-    let wss_url = config.solana_rpc_url.replace("http", "ws");
-    let pubsub_client = Arc::new(PubsubClient::new(&wss_url).await?);
-    slot_tracker.start(rpc_client.clone(), pubsub_client);
 
     // Tâche 1 : Mettre à jour la `shared_hotlist` depuis le fichier
     let hotlist_updater_clone = shared_hotlist.clone();
@@ -382,7 +457,6 @@ async fn main() -> Result<()> {
         loop {
             interval.tick().await;
             if let Ok(hotlist_from_file) = read_hotlist() {
-                // --- CORRECTION : Ajouter .await ---
                 let mut writer = hotlist_updater_clone.write().await;
                 *writer = hotlist_from_file;
             }
@@ -391,11 +465,11 @@ async fn main() -> Result<()> {
 
     // Tâche 2 : Le FeeManager
     let fee_manager = FeeManager::new(rpc_client.clone());
-    fee_manager.start(shared_hotlist.clone()); // La signature de start doit accepter Arc<tokio::sync::RwLock>
+    fee_manager.start(shared_hotlist.clone());
 
-    // Tâche 3 : Le GeyserUpdater
+    // Tâche 3 : Le GeyserUpdater pour les mises à jour de comptes
     let (update_sender, mut update_receiver) = mpsc::channel::<Pubkey>(1024);
-    let geyser_updater = GeyserUpdater::new(geyser_url, hot_graph.clone(), shared_hotlist.clone(), update_sender.clone());
+    let geyser_updater = GeyserUpdater::new(geyser_url.clone(), hot_graph.clone(), shared_hotlist.clone(), update_sender.clone());
     tokio::spawn(async move {
         geyser_updater.run().await;
     });
@@ -412,7 +486,6 @@ async fn main() -> Result<()> {
         loop {
             interval.tick().await;
             let hotlist_snapshot = {
-                // --- CORRECTION : Ajouter .await ---
                 let reader = onboarding_hotlist_reader.read().await;
                 reader.clone()
             };
@@ -439,7 +512,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    // 6. Boucle principale d'exécution
+    // Boucle principale d'exécution
     let currently_processing = Arc::new(Mutex::new(HashSet::<String>::new()));
     println!("[Bot] Prêt. En attente des mises à jour de Geyser...");
     loop {
@@ -448,8 +521,13 @@ async fn main() -> Result<()> {
             let rpc_clone = rpc_client.clone();
             let payer_clone = Keypair::try_from(payer.to_bytes().as_slice())?;
             let processing_clone = currently_processing.clone();
+            // --- ON CLONE TOUS LES NOUVEAUX SERVICES ---
             let tracker_clone = slot_tracker.clone();
+            let metronome_clone = slot_metronome.clone();
+            let leader_schedule_clone = leader_schedule_tracker.clone();
+            let validator_intel_clone = validator_intel_service.clone(); // NOUVEAU CLONE
             let fee_manager_clone = fee_manager.clone();
+
             tokio::spawn(async move {
                 rehydrate_and_find_opportunities(
                     pool_to_update,
@@ -458,6 +536,9 @@ async fn main() -> Result<()> {
                     payer_clone,
                     processing_clone,
                     tracker_clone,
+                    metronome_clone,
+                    leader_schedule_clone,
+                    validator_intel_clone, // NOUVEAU PARAM
                     fee_manager_clone,
                 ).await;
             });

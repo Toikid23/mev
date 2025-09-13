@@ -8,6 +8,8 @@ use solana_sdk::{
 use std::{sync::Arc, time::Duration};
 use tokio::time::sleep;
 use rpc_config::RpcSimulateTransactionConfig;
+use solana_sdk::epoch_info::EpochInfo;
+use std::collections::HashMap;
 
 /// Un "wrapper" autour du RpcClient de Solana qui ajoute une logique de
 /// ré-essai automatique pour les appels RPC qui échouent à cause d'erreurs réseau temporaires.
@@ -213,6 +215,60 @@ impl ResilientRpcClient {
                     } else {
                         return Err(e)
                             .with_context(|| "Échec final de get_recent_prioritization_fees");
+                    }
+                }
+            }
+        }
+        unreachable!()
+    }
+
+    pub async fn get_epoch_info(&self) -> Result<EpochInfo> { // MODIFIÉ : Le type de retour est solana_sdk::epoch_info::EpochInfo
+        for attempt in 0..=self.max_retries {
+            match self.client.get_epoch_info().await {
+                Ok(info) => return Ok(info),
+                Err(e) => {
+                    if Self::is_retryable(&e) && attempt < self.max_retries {
+                        sleep(Duration::from_millis(self.delay_ms)).await;
+                    } else {
+                        return Err(e).with_context(|| "Échec final de get_epoch_info");
+                    }
+                }
+            }
+        }
+        unreachable!()
+    }
+
+    // MODIFIÉ : Le type de retour est un HashMap brut, comme retourné par le client RPC
+    pub async fn get_leader_schedule(
+        &self,
+        epoch: Option<u64>,
+    ) -> Result<Option<HashMap<String, Vec<usize>>>> {
+        for attempt in 0..=self.max_retries {
+            match self.client.get_leader_schedule(epoch).await {
+                Ok(schedule) => return Ok(schedule),
+                Err(e) => {
+                    if Self::is_retryable(&e) && attempt < self.max_retries {
+                        sleep(Duration::from_millis(self.delay_ms)).await;
+                    } else {
+                        return Err(e).with_context(|| "Échec final de get_leader_schedule");
+                    }
+                }
+            }
+        }
+        unreachable!()
+    }
+
+    pub async fn get_vote_accounts(
+        &self,
+    ) -> Result<solana_client::rpc_response::RpcVoteAccountStatus> {
+        for attempt in 0..=self.max_retries {
+            match self.client.get_vote_accounts().await {
+                Ok(accounts) => return Ok(accounts),
+                Err(e) => {
+                    if Self::is_retryable(&e) && attempt < self.max_retries {
+                        sleep(Duration::from_millis(self.delay_ms)).await;
+                    } else {
+                        return Err(e).with_context(|| "Échec final de get_vote_accounts");
                     }
                 }
             }

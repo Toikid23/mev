@@ -94,4 +94,11 @@ impl FeeManager {
 
         (base_fee as u128 + overbid_amount) as u64
     }
+
+    pub fn calculate_jito_tip(&self, estimated_profit: u64, tip_percent: u64) -> u64 {
+        if tip_percent == 0 {
+            return 10_000; // Un tip minimum symbolique si le pourcentage est nul
+        }
+        (estimated_profit as u128 * tip_percent as u128 / 100) as u64
+    }
 }
