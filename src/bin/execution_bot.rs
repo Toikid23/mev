@@ -1,12 +1,10 @@
-// DANS : src/bin/execution_bot.rs (Version Définitive)
-
 use anyhow::{anyhow, Result, Context, bail};
 use futures_util::{StreamExt, sink::SinkExt};
 use mev::decoders::PoolOperations;
 use mev::{
     config::Config,
     decoders::Pool,
-    execution::{protections, simulator, transaction_builder},
+    execution::{fee_manager::FeeManager, protections, simulator, transaction_builder},
     graph_engine::Graph,
     rpc::ResilientRpcClient,
     state::slot_tracker::SlotTracker,
@@ -26,11 +24,12 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+// --- ON UTILISE MAINTENANT TOUS LES OUTILS DE TOKIO ---
 use tokio::sync::{mpsc, Mutex, RwLock};
 use yellowstone_grpc_client::GeyserGrpcClient;
 use yellowstone_grpc_proto::prelude::{
     subscribe_update::UpdateOneof, CommitmentLevel, SubscribeRequest,
-    SubscribeRequestFilterAccounts, // <-- Le bon import
+    SubscribeRequestFilterAccounts,
 };
 use spl_associated_token_account::instruction::create_associated_token_account;
 use solana_sdk::transaction::VersionedTransaction;
@@ -39,13 +38,13 @@ use solana_sdk::transaction::VersionedTransaction;
 const ADDRESS_LOOKUP_TABLE_ADDRESS: Pubkey = solana_sdk::pubkey!("E5h798UBdK8V1L7MvRfi1ppr2vitPUUUUCVqvTyDgKXN");
 
 
-/// Lit le fichier `hotlist.json` et retourne la liste des adresses de pools.
+/// Lit le fichier `hotlist.json`
 fn read_hotlist() -> Result<HashSet<Pubkey>> {
     let data = fs::read_to_string("hotlist.json")?;
     Ok(serde_json::from_str(&data)?)
 }
 
-/// Charge le graphe principal des pools depuis le cache binaire.
+/// Charge le graphe depuis le cache. Le `Graph` lui-même utilise `tokio::sync::RwLock`.
 fn load_main_graph_from_cache() -> Result<Arc<Graph>> {
     println!("[Graph] Chargement du cache de pools de référence depuis 'graph_cache.bin'...");
     let file = fs::File::open("graph_cache.bin")?;
@@ -56,14 +55,15 @@ fn load_main_graph_from_cache() -> Result<Arc<Graph>> {
 
     let graph = Graph::new();
     {
+        // `blocking_write` est correct ici car on est dans une fonction synchrone au démarrage.
         let mut pools_writer = graph.pools.blocking_write();
         let mut map_writer = graph.account_to_pool_map.blocking_write();
         for (key, pool) in decoded_pools.into_iter() {
             let (v_a, v_b) = pool.get_vaults();
             map_writer.insert(v_a, key);
             map_writer.insert(v_b, key);
-            map_writer.insert(pool.address(), key); // Pour les CLMM
-            pools_writer.insert(key, Arc::new(RwLock::new(pool)));
+            map_writer.insert(pool.address(), key);
+            pools_writer.insert(key, Arc::new(RwLock::new(pool))); // Ceci est un tokio::sync::RwLock
         }
     }
     Ok(Arc::new(graph))
@@ -121,16 +121,21 @@ async fn ensure_atas_exist_for_pool(rpc_client: &Arc<ResilientRpcClient>, payer:
     Ok(())
 }
 
-/// Le GeyserUpdater qui utilise `subscribeAccountUpdates`
 struct GeyserUpdater {
     geyser_grpc_url: String,
     hot_graph: Arc<Graph>,
+    shared_hotlist: Arc<RwLock<HashSet<Pubkey>>>, // C'est un tokio::sync::RwLock
     update_sender: mpsc::Sender<Pubkey>,
 }
 
 impl GeyserUpdater {
-    fn new(geyser_grpc_url: String, hot_graph: Arc<Graph>, update_sender: mpsc::Sender<Pubkey>) -> Self {
-        Self { geyser_grpc_url, hot_graph, update_sender }
+    fn new(
+        geyser_grpc_url: String,
+        hot_graph: Arc<Graph>,
+        shared_hotlist: Arc<RwLock<HashSet<Pubkey>>>,
+        update_sender: mpsc::Sender<Pubkey>,
+    ) -> Self {
+        Self { geyser_grpc_url, hot_graph, shared_hotlist, update_sender }
     }
 
     async fn run(&self) {
@@ -144,17 +149,20 @@ impl GeyserUpdater {
     }
 
     async fn subscribe_and_process(&self) -> Result<()> {
-        let mut client = GeyserGrpcClient::build_from_shared(self.geyser_grpc_url.clone())?
-            .connect().await.context("Connexion Geyser gRPC échouée")?;
+        let mut client = GeyserGrpcClient::build_from_shared(self.geyser_grpc_url.clone())?.connect().await.context("Connexion Geyser gRPC échouée")?;
         let (mut subscribe_tx, mut stream) = client.subscribe().await?;
         let mut watch_to_pool_map: HashMap<Pubkey, Pubkey> = HashMap::new();
         let mut interval = tokio::time::interval(Duration::from_secs(15));
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    let hotlist_pools = read_hotlist().unwrap_or_default();
+                    let hotlist_pools = {
+                        // --- CORRECTION : Ajouter .await pour le RwLock de tokio ---
+                        let reader = self.shared_hotlist.read().await;
+                        reader.clone()
+                    };
                     let mut accounts_to_watch = HashSet::new();
-                    watch_to_pool_map.clear();
+                    watch_to_pool_map.clear(); // --- CORRECTION : Ajout du ; manquant ---
                     let graph_pools_reader = self.hot_graph.pools.read().await;
                     for pool_addr in &hotlist_pools {
                         if let Some(pool_arc) = graph_pools_reader.get(pool_addr) {
@@ -175,29 +183,17 @@ impl GeyserUpdater {
                         }
                     }
                     if !accounts_to_watch.is_empty() {
-                        println!("[GeyserUpdater] Mise à jour de l'abonnement pour {} comptes.", accounts_to_watch.len());
-                        let mut accounts_filter = HashMap::new();
-
-                        // --- LA CORRECTION DÉFINITIVE BASÉE SUR LA SOURCE ---
+                         let mut accounts_filter = HashMap::new();
                         accounts_filter.insert(
                             "accounts".to_string(),
                             SubscribeRequestFilterAccounts {
-                                // On remplit le champ `account` avec notre liste de pubkeys
                                 account: accounts_to_watch.into_iter().map(|p| p.to_string()).collect(),
-                                // `owner` peut rester vide
                                 owner: vec![],
-                                // `filters` (pour memcmp) peut rester vide
                                 filters: vec![],
-                                // `nonempty_txn_signature` est optionnel, `None` est une valeur sûre.
                                 nonempty_txn_signature: None,
                             },
                         );
-
-                        let request = SubscribeRequest {
-                            accounts: accounts_filter,
-                            commitment: Some(CommitmentLevel::Processed as i32),
-                            ..Default::default()
-                        };
+                        let request = SubscribeRequest { accounts: accounts_filter, commitment: Some(CommitmentLevel::Processed as i32), ..Default::default() };
                         if subscribe_tx.send(request).await.is_err() {
                             bail!("Le canal d'abonnement Geyser est fermé.");
                         }
@@ -241,6 +237,7 @@ async fn rehydrate_and_find_opportunities(
     payer: Keypair,
     currently_processing: Arc<Mutex<HashSet<String>>>,
     slot_tracker: Arc<SlotTracker>,
+    fee_manager: FeeManager,
 ) {
     let pool_arc = {
         let pools_reader = graph.pools.read().await;
@@ -249,21 +246,18 @@ async fn rehydrate_and_find_opportunities(
     if let Some(pool_arc) = pool_arc {
         let mut pool_writer = pool_arc.write().await;
         let pool_type_clone = (*pool_writer).clone();
-
         let rehydrate_result = match pool_type_clone {
             Pool::RaydiumClmm(mut p) => mev::decoders::raydium::clmm::hydrate(&mut p, &rpc_client).await.map(|_| Pool::RaydiumClmm(p)),
             Pool::OrcaWhirlpool(mut p) => mev::decoders::orca::whirlpool::hydrate(&mut p, &rpc_client).await.map(|_| Pool::OrcaWhirlpool(p)),
             Pool::MeteoraDlmm(mut p) => mev::decoders::meteora::dlmm::hydrate(&mut p, &rpc_client).await.map(|_| Pool::MeteoraDlmm(p)),
             _ => Ok(pool_type_clone),
         };
-
         if let Ok(hydrated_pool) = rehydrate_result {
             *pool_writer = hydrated_pool;
         } else {
             eprintln!("[Rehydrate] Échec de la ré-hydratation des dépendances pour {}", pool_address);
             return;
         }
-
         drop(pool_writer);
 
         let clock_snapshot = slot_tracker.current();
@@ -277,8 +271,7 @@ async fn rehydrate_and_find_opportunities(
                 if processing_guard.contains(&opportunity_id) { true } else { processing_guard.insert(opportunity_id.clone()); false }
             };
             if !is_already_processing {
-                // --- CORRECTION DE L'APPEL AVEC TIMESTAMP ---
-                if let Err(e) = process_opportunity(opp, graph, rpc_client, payer, clock_snapshot.unix_timestamp).await {
+                if let Err(e) = process_opportunity(opp, graph, rpc_client, payer, clock_snapshot.unix_timestamp, &fee_manager).await {
                     println!("[Erreur Traitement] {}", e);
                 }
                 currently_processing.lock().await.remove(&opportunity_id);
@@ -288,8 +281,14 @@ async fn rehydrate_and_find_opportunities(
 }
 
 /// La fonction `process_opportunity` reste la même
-async fn process_opportunity( opportunity: ArbitrageOpportunity, graph: Arc<Graph>, rpc_client: Arc<ResilientRpcClient>, payer: Keypair, current_timestamp: i64) -> Result<()> {
-    // ... (aucun changement ici)
+async fn process_opportunity(
+    opportunity: ArbitrageOpportunity,
+    graph: Arc<Graph>,
+    rpc_client: Arc<ResilientRpcClient>,
+    payer: Keypair,
+    current_timestamp: i64,
+    fee_manager: &FeeManager,
+) -> Result<()> {
     let lookup_table_account_data = rpc_client.get_account_data(&ADDRESS_LOOKUP_TABLE_ADDRESS).await?;
     let lookup_table_ref = AddressLookupTable::deserialize(&lookup_table_account_data)?;
     let owned_lookup_table = SdkAddressLookupTableAccount {
@@ -322,21 +321,25 @@ async fn process_opportunity( opportunity: ArbitrageOpportunity, graph: Arc<Grap
         Err(e) => { println!("[Phase 2 ERREUR] Échec construction tx finale : {}", e); return Ok(()) }
     };
     let accounts_for_fees = vec![opportunity.pool_buy_from_key, opportunity.pool_sell_to_key];
-    let sim_data = match simulator::run_simulations(rpc_client.clone(), &final_arbitrage_tx, accounts_for_fees).await {
+    let sim_data = match simulator::run_simulations(rpc_client.clone(), &final_arbitrage_tx, accounts_for_fees.clone()).await {
         Ok(data) => data,
         Err(e) => { println!("[Phase 3 VALIDATION ÉCHOUÉE] La transaction n'est plus viable : {}", e); return Ok(()) }
     };
     println!("  -> Validation et Découverte RÉUSSIES !");
+
+    // --- LA CORRECTION EST ICI ---
+    println!("\n--- [Phase 4] Calculs finaux et décision d'envoi ---");
+    const OVERBID_PERCENT: u8 = 20;
+    let accounts_in_tx = vec![opportunity.pool_buy_from_key, opportunity.pool_sell_to_key];
+
+    // On `await` le résultat de la fonction asynchrone
+    let dynamic_priority_fee_price_per_cu = fee_manager.calculate_priority_fee(&accounts_in_tx, OVERBID_PERCENT).await;
+
     let profit_brut_reel = sim_data.profit_brut_reel;
     let compute_units = sim_data.compute_units;
-    let priority_fees = sim_data.priority_fees;
-    println!("\n--- [Phase 4] Calculs finaux et décision d'envoi ---");
-    let mut recent_fees: Vec<u64> = priority_fees.iter().map(|f| f.prioritization_fee).collect();
-    recent_fees.sort_unstable();
-    let percentile_index = (recent_fees.len() as f64 * 0.8).floor() as usize;
-    let dynamic_priority_fee_price_per_cu = *recent_fees.get(percentile_index).unwrap_or(&1000);
     let total_frais_normaux = 5000 + (compute_units * dynamic_priority_fee_price_per_cu) / 1_000_000;
     let profit_net_final = profit_brut_reel.saturating_sub(total_frais_normaux);
+
     println!("     -> Profit Net FINAL Calculé : {} lamports", profit_net_final);
     if profit_net_final > 0 {
         println!("  -> DÉCISION: ENVOYER LA TRANSACTION NORMALE");
@@ -363,66 +366,90 @@ async fn main() -> Result<()> {
     ensure_pump_user_account_exists(&rpc_client, &payer).await?;
     let main_graph = load_main_graph_from_cache()?;
     let hot_graph = Arc::new(Graph::new());
-    let (update_sender, mut update_receiver) = mpsc::channel::<Pubkey>(1024);
+
+    // --- CORRECTION : Utiliser tokio::sync::RwLock ---
+    let shared_hotlist = Arc::new(RwLock::new(HashSet::<Pubkey>::new()));
+
     let slot_tracker = Arc::new(SlotTracker::new(&rpc_client).await?);
     let wss_url = config.solana_rpc_url.replace("http", "ws");
     let pubsub_client = Arc::new(PubsubClient::new(&wss_url).await?);
     slot_tracker.start(rpc_client.clone(), pubsub_client);
 
-    let geyser_updater = GeyserUpdater::new(geyser_url, hot_graph.clone(), update_sender.clone());
+    // Tâche 1 : Mettre à jour la `shared_hotlist` depuis le fichier
+    let hotlist_updater_clone = shared_hotlist.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(2));
+        loop {
+            interval.tick().await;
+            if let Ok(hotlist_from_file) = read_hotlist() {
+                // --- CORRECTION : Ajouter .await ---
+                let mut writer = hotlist_updater_clone.write().await;
+                *writer = hotlist_from_file;
+            }
+        }
+    });
+
+    // Tâche 2 : Le FeeManager
+    let fee_manager = FeeManager::new(rpc_client.clone());
+    fee_manager.start(shared_hotlist.clone()); // La signature de start doit accepter Arc<tokio::sync::RwLock>
+
+    // Tâche 3 : Le GeyserUpdater
+    let (update_sender, mut update_receiver) = mpsc::channel::<Pubkey>(1024);
+    let geyser_updater = GeyserUpdater::new(geyser_url, hot_graph.clone(), shared_hotlist.clone(), update_sender.clone());
     tokio::spawn(async move {
         geyser_updater.run().await;
     });
 
-    let currently_processing = Arc::new(Mutex::new(HashSet::<String>::new()));
-    let hot_graph_clone_for_onboarding = Arc::clone(&hot_graph);
-    let main_graph_clone_for_onboarding = Arc::clone(&main_graph);
-    let rpc_client_clone_for_onboarding = Arc::clone(&rpc_client);
-    let payer_clone_for_onboarding = Keypair::try_from(payer.to_bytes().as_slice())?;
-
+    // Tâche 4 : L'Onboarding Manager
+    let onboarding_hot_graph = hot_graph.clone();
+    let onboarding_main_graph = main_graph.clone();
+    let onboarding_rpc = rpc_client.clone();
+    let onboarding_payer = Keypair::try_from(payer.to_bytes().as_slice())?;
+    let onboarding_hotlist_reader = shared_hotlist.clone();
     tokio::spawn(async move {
+        let mut processed_pools = HashSet::new();
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         loop {
             interval.tick().await;
-            if let Ok(hotlist) = read_hotlist() {
-                let mut pools_to_add = Vec::new();
-                {
-                    let graph_pools_reader = hot_graph_clone_for_onboarding.pools.read().await;
-                    for pool_address in hotlist {
-                        if !graph_pools_reader.contains_key(&pool_address) {
-                            pools_to_add.push(pool_address);
-                        }
-                    }
-                }
-                for pool_address in pools_to_add {
+            let hotlist_snapshot = {
+                // --- CORRECTION : Ajouter .await ---
+                let reader = onboarding_hotlist_reader.read().await;
+                reader.clone()
+            };
+            for pool_address in hotlist_snapshot {
+                if !processed_pools.contains(&pool_address) {
                     let unhydrated_pool = {
-                        let main_pools_reader = main_graph_clone_for_onboarding.pools.read().await;
+                        let main_pools_reader = onboarding_main_graph.pools.read().await;
                         let arc_rwlock = match main_pools_reader.get(&pool_address) { Some(p) => p.clone(), None => continue };
                         drop(main_pools_reader);
                         let pool_guard = arc_rwlock.read().await;
                         (*pool_guard).clone()
                     };
-                    if let Ok(hydrated_pool) = hot_graph_clone_for_onboarding.hydrate_pool(unhydrated_pool, &rpc_client_clone_for_onboarding).await {
-                        if let Err(e) = ensure_atas_exist_for_pool(&rpc_client_clone_for_onboarding, &payer_clone_for_onboarding, &hydrated_pool).await {
-                            eprintln!("[Admission ERREUR] Impossible de créer les ATAs pour le pool {}: {}. On ignore ce pool pour le moment.", pool_address, e);
+                    if let Ok(hydrated_pool) = onboarding_hot_graph.hydrate_pool(unhydrated_pool, &onboarding_rpc).await {
+                        if let Err(e) = ensure_atas_exist_for_pool(&onboarding_rpc, &onboarding_payer, &hydrated_pool).await {
+                            eprintln!("[Admission ERREUR] Impossible de créer les ATAs pour {}: {}", pool_address, e);
                             continue;
                         }
-                        hot_graph_clone_for_onboarding.add_pool_to_graph(hydrated_pool).await;
+                        onboarding_hot_graph.add_pool_to_graph(hydrated_pool).await;
                         println!("[Admission] Nouveau pool {} ajouté au hot graph.", pool_address);
+                        processed_pools.insert(pool_address);
                     }
                 }
             }
         }
     });
 
+    // 6. Boucle principale d'exécution
+    let currently_processing = Arc::new(Mutex::new(HashSet::<String>::new()));
     println!("[Bot] Prêt. En attente des mises à jour de Geyser...");
     loop {
         if let Some(pool_to_update) = update_receiver.recv().await {
-            let graph_clone = Arc::clone(&hot_graph);
-            let rpc_clone = Arc::clone(&rpc_client);
+            let graph_clone = hot_graph.clone();
+            let rpc_clone = rpc_client.clone();
             let payer_clone = Keypair::try_from(payer.to_bytes().as_slice())?;
-            let processing_clone = Arc::clone(&currently_processing);
-            let tracker_clone = Arc::clone(&slot_tracker);
+            let processing_clone = currently_processing.clone();
+            let tracker_clone = slot_tracker.clone();
+            let fee_manager_clone = fee_manager.clone();
             tokio::spawn(async move {
                 rehydrate_and_find_opportunities(
                     pool_to_update,
@@ -431,6 +458,7 @@ async fn main() -> Result<()> {
                     payer_clone,
                     processing_clone,
                     tracker_clone,
+                    fee_manager_clone,
                 ).await;
             });
         }
