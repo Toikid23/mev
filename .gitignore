@@ -1,2 +1,4 @@
 /target
 .env
+jito_validators.json
+hotlist.json
