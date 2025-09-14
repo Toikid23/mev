@@ -7,7 +7,7 @@ use solana_sdk_ids::system_program;
 use spl_associated_token_account::get_associated_token_address_with_program_id;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
-use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
+use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts, QuoteResult};
 use std::str::FromStr;
 use borsh::{BorshDeserialize, BorshSerialize};
 use crate::decoders::spl_token_decoders::mint::DecodedMint;
@@ -227,27 +227,42 @@ impl PoolOperations for DecodedPumpAmmPool {
     }
     fn address(&self) -> Pubkey { self.address }
 
-    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
+    fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<QuoteResult> {
         let is_buy = *token_in_mint == self.mint_b;
         let fees = compute_fees_bps(self, self.mint_a_decoded.supply, amount_in)?;
 
-        if is_buy {
+        let (final_amount_out, fee_amount) = if is_buy {
             let amount_in_u128 = amount_in as u128;
             let total_fee_bps = fees.lp_fee_bps + fees.protocol_fee_bps + fees.creator_fee_bps;
+            let total_fee = (amount_in_u128 * total_fee_bps as u128) / 10_000;
+
             let denominator = 10_000u128.saturating_add(total_fee_bps as u128);
             let net_amount_in = amount_in_u128.saturating_mul(10_000).saturating_div(denominator);
+
             let numerator = (self.reserve_a as u128).saturating_mul(net_amount_in);
             let effective_denominator = (self.reserve_b as u128).saturating_add(net_amount_in);
-            Ok((numerator / effective_denominator) as u64)
+
+            let amount_out = (numerator / effective_denominator) as u64;
+            (amount_out, total_fee as u64)
         } else {
             let numerator = (amount_in as u128) * (self.reserve_b as u128);
             let denominator = (self.reserve_a as u128) + (amount_in as u128);
-            if denominator == 0 { return Ok(0); }
+            if denominator == 0 { return Ok(QuoteResult::default()); }
             let gross_amount_out = numerator / denominator;
+
             let total_fee_bps = fees.lp_fee_bps + fees.protocol_fee_bps + fees.creator_fee_bps;
             let total_fee = (gross_amount_out * total_fee_bps as u128) / 10_000;
-            Ok(gross_amount_out.saturating_sub(total_fee) as u64)
-        }
+
+            let amount_out = gross_amount_out.saturating_sub(total_fee) as u64;
+            (amount_out, total_fee as u64)
+        };
+
+        // <-- MODIFIÉ : Encapsulation dans QuoteResult
+        Ok(QuoteResult {
+            amount_out: final_amount_out,
+            fee: fee_amount,
+            ticks_crossed: 0, // C'est un AMM
+        })
     }
 
     fn get_required_input(&mut self, token_out_mint: &Pubkey, amount_out: u64, _current_timestamp: i64) -> Result<u64> {

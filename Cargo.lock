@@ -2600,6 +2600,7 @@ dependencies = [
  "hex",
  "lazy_static",
  "num-integer",
+ "once_cell",
  "openbook_dex",
  "prost",
  "reqwest",

@@ -8,3 +8,4 @@ pub mod simulator;
 pub mod transaction_builder;
 pub mod sender;
 pub mod fee_manager;
+pub mod cu_manager;

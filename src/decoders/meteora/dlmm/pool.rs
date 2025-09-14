@@ -10,7 +10,7 @@ use solana_sdk::instruction::{Instruction, AccountMeta};
 use solana_sdk::pubkey;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
-use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
+use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts, QuoteResult};
 use crate::decoders::pool_operations::find_input_by_binary_search;
 use crate::rpc::ResilientRpcClient;
 
@@ -150,11 +150,13 @@ impl DecodedDlmmPool {
         Ok(total_amount_out as u64)
     }
 
-    fn calculate_swap_quote(&self, amount_in: u64, swap_for_y: bool, current_timestamp: i64) -> Result<u64> {
+    fn calculate_swap_quote_internal(&self, amount_in: u64, swap_for_y: bool, current_timestamp: i64) -> Result<(u64, u32)> {
         let bin_arrays = self.hydrated_bin_arrays.as_ref().ok_or_else(|| anyhow!("Pool not hydrated"))?;
         let mut amount_remaining_in = amount_in as u128;
         let mut total_amount_out: u128 = 0;
         let mut current_bin_id = self.active_bin_id;
+
+        let mut bins_crossed = 0u32; // <-- NOTRE COMPTEUR
 
         let mut temp_v_params = self.v_parameters;
         update_references(&mut temp_v_params, &self.parameters, self.active_bin_id, current_timestamp)?;
@@ -162,6 +164,7 @@ impl DecodedDlmmPool {
         while amount_remaining_in > 0 {
             if current_bin_id < self.parameters.min_bin_id || current_bin_id > self.parameters.max_bin_id { break; }
 
+            // ... (logique de get bin_array et bin_index_in_array)
             let bin_array_idx = get_bin_array_index_from_bin_id(current_bin_id);
             let bin_array = match bin_arrays.get(&bin_array_idx) {
                 Some(array) => array,
@@ -171,7 +174,10 @@ impl DecodedDlmmPool {
             let bin_index_in_array = (current_bin_id % (MAX_BIN_PER_ARRAY as i32) + (MAX_BIN_PER_ARRAY as i32)) % (MAX_BIN_PER_ARRAY as i32);
             let current_bin = &bin_array.bins[bin_index_in_array as usize];
 
-            // On ne met à jour l'accumulateur qu'une fois par bin traversé
+
+            bins_crossed += 1; // <-- ON INCRÉMENTE LE COMPTEUR
+
+            // ... (le reste de la logique de calcul de la boucle est identique)
             update_volatility_accumulator(&mut temp_v_params, &self.parameters, self.active_bin_id, current_bin_id)?;
             let total_fee_rate = get_total_fee(self.bin_step, &self.parameters, &temp_v_params)?;
 
@@ -186,20 +192,16 @@ impl DecodedDlmmPool {
                 continue;
             }
 
-            // Combien d'input peut-on mettre pour vider la réserve de sortie de ce bin ?
             let max_amount_out_from_bin = out_reserve as u128;
             let required_net_in_for_max_out = math::get_amount_out(max_amount_out_from_bin as u64, current_bin.price, !swap_for_y)? as u128;
-
             let fee_for_max_out = (required_net_in_for_max_out * total_fee_rate) / (FEE_PRECISION - total_fee_rate);
             let required_gross_in_for_max_out = required_net_in_for_max_out + fee_for_max_out;
 
             if amount_remaining_in >= required_gross_in_for_max_out {
-                // On prend tout le bin
                 total_amount_out += max_amount_out_from_bin;
                 amount_remaining_in -= required_gross_in_for_max_out;
                 current_bin_id = if swap_for_y { current_bin_id.saturating_sub(1) } else { current_bin_id.saturating_add(1) };
             } else {
-                // On ne prend qu'une partie du bin et on termine
                 let fee_on_remaining_in = (amount_remaining_in * total_fee_rate) / FEE_PRECISION;
                 let net_amount_in = amount_remaining_in - fee_on_remaining_in;
                 let amount_out_chunk = math::get_amount_out(net_amount_in as u64, current_bin.price, swap_for_y)?;
@@ -208,7 +210,7 @@ impl DecodedDlmmPool {
             }
         }
 
-        Ok(total_amount_out as u64)
+        Ok((total_amount_out as u64, bins_crossed)) // <-- On retourne les deux valeurs
     }
 }
 
@@ -225,7 +227,7 @@ impl PoolOperations for DecodedDlmmPool {
     fn address(&self) -> Pubkey { self.address }
 
     // VERSION SYNCHRONE AMÉLIORÉE
-    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<u64> {
+    fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<QuoteResult> {
         let swap_for_y = *token_in_mint == self.mint_a;
         let (in_mint_fee_bps, in_mint_max_fee, out_mint_fee_bps, out_mint_max_fee) = if swap_for_y {
             (self.mint_a_transfer_fee_bps, self.mint_a_transfer_fee_max, self.mint_b_transfer_fee_bps, self.mint_b_transfer_fee_max)
@@ -235,12 +237,17 @@ impl PoolOperations for DecodedDlmmPool {
         let fee_on_input = calculate_transfer_fee(amount_in, in_mint_fee_bps, in_mint_max_fee)?;
         let amount_in_after_transfer_fee = amount_in.saturating_sub(fee_on_input);
 
-        // On appelle la fonction de calcul interne, qui est déjà synchrone
-        let gross_amount_out = self.calculate_swap_quote(amount_in_after_transfer_fee, swap_for_y, current_timestamp)?;
+        // <-- On appelle la fonction interne qui retourne maintenant un tuple
+        let (gross_amount_out, bins_crossed) = self.calculate_swap_quote_internal(amount_in_after_transfer_fee, swap_for_y, current_timestamp)?;
 
         let fee_on_output = calculate_transfer_fee(gross_amount_out, out_mint_fee_bps, out_mint_max_fee)?;
         let final_amount_out = gross_amount_out.saturating_sub(fee_on_output);
-        Ok(final_amount_out)
+
+        Ok(QuoteResult {
+            amount_out: final_amount_out,
+            fee: 0, // Le calcul des frais est complexe dans la boucle, on le laisse à 0 pour l'instant
+            ticks_crossed: bins_crossed,
+        })
     }
 
     // VERSION SYNCHRONE

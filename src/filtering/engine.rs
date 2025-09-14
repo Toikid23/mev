@@ -1,8 +1,11 @@
+// DANS : src/filtering/engine.rs
+
 use crate::{
     decoders::{Pool, PoolOperations},
     filtering::cache::PoolCache,
     decoders::{raydium, orca, meteora, pump},
 };
+use crate::graph_engine::Graph;
 use anyhow::{anyhow, Result};
 use solana_sdk::pubkey::Pubkey;
 use std::{
@@ -56,6 +59,11 @@ impl FilteringEngine {
         let mut hotlist: HashSet<Pubkey> = HashSet::new();
         let mut analysis_interval = tokio::time::interval(Duration::from_secs(10));
 
+        // <-- MODIFIÉ : Pré-allocation des collections utilisées dans la boucle d'analyse
+        let mut hot_pairs: HashSet<(Pubkey, Pubkey)> = HashSet::with_capacity(100);
+        let mut new_hotlist: HashSet<Pubkey> = HashSet::with_capacity(500);
+
+
         loop {
             tokio::select! {
                 Some(pool_address) = active_pool_receiver.recv() => {
@@ -79,7 +87,10 @@ impl FilteringEngine {
                     }
                 },
                 _ = analysis_interval.tick() => {
-                    let mut hot_pairs: HashSet<(Pubkey, Pubkey)> = HashSet::new();
+                    // <-- MODIFIÉ : Vider les collections au lieu de les recréer
+                    hot_pairs.clear();
+                    new_hotlist.clear();
+
                     let now = Instant::now();
                     activity_tracker.retain(|pool_address, timestamps| {
                         timestamps.retain(|ts| now.duration_since(*ts).as_secs() < ACTIVITY_WINDOW_SECS);
@@ -93,15 +104,21 @@ impl FilteringEngine {
                         !timestamps.is_empty()
                     });
 
-                    let mut new_hotlist = HashSet::new();
-                    for (mint_a, mint_b) in hot_pairs {
+                    for (mint_a, mint_b) in &hot_pairs { // <-- MODIFIÉ : itération par référence
                         for identity in initial_cache.pools.values() {
                             let (mut id_mint_a, mut id_mint_b) = (identity.mint_a, identity.mint_b);
                             if id_mint_a > id_mint_b { std::mem::swap(&mut id_mint_a, &mut id_mint_b); }
-                            if id_mint_a == mint_a && id_mint_b == mint_b {
+                            if id_mint_a == *mint_a && id_mint_b == *mint_b { // <-- MODIFIÉ : Déréférencement
                                 new_hotlist.insert(identity.address);
                             }
                         }
+                    }
+
+                    if !new_hotlist.is_empty() {
+                        println!("[MEM_METRICS] engine.rs - new_hotlist length: {}", new_hotlist.len());
+                    }
+                    if !hot_pairs.is_empty() {
+                        println!("[MEM_METRICS] engine.rs - hot_pairs length: {}", hot_pairs.len());
                     }
 
                     if hotlist != new_hotlist {
@@ -109,7 +126,7 @@ impl FilteringEngine {
                         if let Err(e) = fs::write(HOTLIST_FILE_NAME, serde_json::to_string_pretty(&new_hotlist).unwrap()) {
                             eprintln!("[Engine] Erreur d'écriture de la hotlist: {}", e);
                         }
-                        hotlist = new_hotlist;
+                        hotlist = new_hotlist.clone(); // <-- MODIFIÉ : Cloner la nouvelle hotlist pour la sauvegarder
                     }
                 }
             }
@@ -120,8 +137,7 @@ impl FilteringEngine {
     async fn hydrate_and_check_liquidity(&self, identity: &super::PoolIdentity) -> Result<bool> {
         let account = self.rpc_client.get_account(&identity.address).await?;
         let raw_pool = self.decode_raw_pool(&identity.address, &account.data, &account.owner)?;
-        let graph = crate::graph_engine::Graph::new();
-        let hydrated_pool = graph.hydrate_pool(raw_pool, &self.rpc_client).await?;
+        let hydrated_pool = Graph::hydrate_pool(raw_pool, &self.rpc_client).await?;
 
         // Approximation de la liquidité : on vérifie juste que les réserves ne sont pas nulles.
         // C'est un filtre simple mais efficace contre les pools vides ou défectueux.

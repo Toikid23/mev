@@ -9,7 +9,7 @@ use anyhow::{anyhow, bail, Result};
 use solana_sdk::instruction::{Instruction, AccountMeta};
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
-use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
+use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts, QuoteResult};
 use crate::decoders::pool_operations::find_input_by_binary_search;
 use crate::rpc::ResilientRpcClient;
 
@@ -304,8 +304,10 @@ impl PoolOperations for DecodedMeteoraSbpPool {
     fn get_reserves(&self) -> (u64, u64) { (self.reserve_a, self.reserve_b) }
     fn address(&self) -> Pubkey { self.address }
 
-    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<u64> {
-        if !self.enabled || amount_in == 0 { return Ok(0); }
+    fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<QuoteResult> {
+        if !self.enabled || amount_in == 0 {
+            return Ok(QuoteResult::default()); // Retourne un résultat vide
+        }
 
 
         let (in_reserve, out_reserve, in_vault_state, out_vault_state, in_vault_lp_supply, out_vault_lp_supply, in_pool_lp_amount, _out_pool_lp_amount) =
@@ -378,7 +380,11 @@ impl PoolOperations for DecodedMeteoraSbpPool {
         let final_amount_out = get_tokens_for_lp(out_lp_to_burn, unlocked_out_vault, out_vault_lp_supply);
 
 
-        Ok(final_amount_out)
+        Ok(QuoteResult {
+            amount_out: final_amount_out,
+            fee: lp_fee as u64, // Estimation du LP fee
+            ticks_crossed: 0,   // Pas de ticks pour ce type de pool
+        })
     }
 
     fn get_required_input(&mut self, token_out_mint: &Pubkey, amount_out: u64, current_timestamp: i64) -> Result<u64> {

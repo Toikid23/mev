@@ -3,8 +3,10 @@ use solana_client::{client_error::{ClientError, ClientErrorKind}, nonblocking::r
 use solana_sdk::{
     account::Account, commitment_config::CommitmentConfig, pubkey::Pubkey,
     signature::Signature, transaction::{VersionedTransaction},
-
 };
+use solana_client::rpc_config::RpcTransactionConfig;
+use solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature;
+use solana_transaction_status::UiTransactionEncoding;
 use std::{sync::Arc, time::Duration};
 use tokio::time::sleep;
 use rpc_config::RpcSimulateTransactionConfig;
@@ -269,6 +271,76 @@ impl ResilientRpcClient {
                         sleep(Duration::from_millis(self.delay_ms)).await;
                     } else {
                         return Err(e).with_context(|| "Échec final de get_vote_accounts");
+                    }
+                }
+            }
+        }
+        unreachable!()
+    }
+    pub async fn get_signatures_for_address_with_limit(
+        &self,
+        address: &Pubkey,
+        limit: usize,
+    ) -> Result<Vec<RpcConfirmedTransactionStatusWithSignature>> {
+        for attempt in 0..=self.max_retries {
+            // Étape 1 : On appelle la fonction de base qui fonctionne toujours.
+            match self.client.get_signatures_for_address(address).await {
+                Ok(mut signatures) => {
+                    // Étape 2 : On tronque manuellement le résultat à la limite souhaitée.
+                    signatures.truncate(limit);
+                    return Ok(signatures);
+                }
+                Err(e) => {
+                    if Self::is_retryable(&e) && attempt < self.max_retries {
+                        sleep(Duration::from_millis(self.delay_ms)).await;
+                    } else {
+                        return Err(e)
+                            .with_context(|| "Échec final de get_signatures_for_address");
+                    }
+                }
+            }
+        }
+        unreachable!()
+    }
+
+    // <-- MÉTHODE 2 CORRIGÉE
+    pub async fn get_transaction(
+        &self,
+        signature: &Signature,
+        // La config est maintenant un UiTransactionEncoding
+        encoding: Option<UiTransactionEncoding>,
+    ) -> Result<solana_transaction_status::EncodedConfirmedTransactionWithStatusMeta> {
+        let config = RpcTransactionConfig {
+            encoding,
+            commitment: Some(self.commitment()),
+            max_supported_transaction_version: Some(0),
+        };
+
+        for attempt in 0..=self.max_retries {
+            match self.client.get_transaction_with_config(signature, config).await {
+                Ok(tx) => return Ok(tx),
+                Err(e) => {
+                    if Self::is_retryable(&e) && attempt < self.max_retries {
+                        sleep(Duration::from_millis(self.delay_ms)).await;
+                    } else {
+                        return Err(e).with_context(|| "Échec final de get_transaction");
+                    }
+                }
+            }
+        }
+        unreachable!()
+    }
+
+    // <-- NOUVELLE MÉTHODE 3 (pour la création de la LUT)
+    pub async fn get_slot(&self) -> Result<u64> {
+        for attempt in 0..=self.max_retries {
+            match self.client.get_slot().await {
+                Ok(slot) => return Ok(slot),
+                Err(e) => {
+                    if Self::is_retryable(&e) && attempt < self.max_retries {
+                        sleep(Duration::from_millis(self.delay_ms)).await;
+                    } else {
+                        return Err(e).with_context(|| "Échec final de get_slot");
                     }
                 }
             }

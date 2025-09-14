@@ -9,8 +9,7 @@ use std::mem::size_of;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 use crate::rpc::ResilientRpcClient;
-
-use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
+use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts, QuoteResult};
 
 
 // La structure de données reste la même
@@ -118,35 +117,35 @@ impl PoolOperations for DecodedAmmPool {
     fn get_reserves(&self) -> (u64, u64) { (self.reserve_a, self.reserve_b) }
     fn address(&self) -> Pubkey { self.address }
 
-    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
-        // Les logs ne sont plus nécessaires car l'approche change
+    fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<QuoteResult> {
         let (in_mint_fee_bps, out_mint_fee_bps, in_reserve, out_reserve) = if *token_in_mint == self.mint_a {
             (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps, self.reserve_a, self.reserve_b)
         } else {
             (self.mint_b_transfer_fee_bps, self.mint_a_transfer_fee_bps, self.reserve_b, self.reserve_a)
         };
-        if in_reserve == 0 || out_reserve == 0 { return Ok(0); }
+        if in_reserve == 0 || out_reserve == 0 { return Ok(QuoteResult::default()); }
 
-        // Étape 1: Frais de transfert sur l'input (inchangé)
         let fee_on_input = (amount_in as u128 * in_mint_fee_bps as u128) / 10000;
         let amount_in_after_transfer_fee = amount_in.saturating_sub(fee_on_input as u64) as u128;
 
-        // Étape 2: Calcul du swap brut, SANS les frais de pool
         let denominator = (in_reserve as u128).saturating_add(amount_in_after_transfer_fee);
-        if denominator == 0 { return Ok(0); }
+        if denominator == 0 { return Ok(QuoteResult::default()); }
         let gross_amount_out = amount_in_after_transfer_fee.saturating_mul(out_reserve as u128) / denominator;
 
-        // Étape 3: Appliquer les frais de pool sur le montant de sortie brut
         let swap_fee_numerator = 25;
         let swap_fee_denominator = 10000;
-        let fee_amount = (gross_amount_out * swap_fee_numerator) / swap_fee_denominator; // Floor division
+        let fee_amount = (gross_amount_out * swap_fee_numerator) / swap_fee_denominator;
         let amount_out_after_pool_fee = gross_amount_out.saturating_sub(fee_amount);
 
-        // Étape 4: Frais de transfert sur l'output (inchangé)
         let fee_on_output = (amount_out_after_pool_fee * out_mint_fee_bps as u128) / 10000;
         let final_amount_out = amount_out_after_pool_fee.saturating_sub(fee_on_output);
 
-        Ok(final_amount_out as u64)
+        // <-- MODIFIÉ : Encapsulation dans QuoteResult
+        Ok(QuoteResult {
+            amount_out: final_amount_out as u64,
+            fee: fee_amount as u64,
+            ticks_crossed: 0, // C'est un AMM, donc 0 tick traversé
+        })
     }
 
     fn get_required_input(

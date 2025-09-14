@@ -9,7 +9,7 @@ use super::math as orca_whirlpool_math;
 use super::tick_array;
 use super::math::sqrt_price_to_tick_index;
 use async_trait::async_trait;
-use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
+use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts, QuoteResult};
 use solana_sdk::instruction::{Instruction, AccountMeta};
 use spl_associated_token_account::get_associated_token_address;
 use crate::rpc::ResilientRpcClient;
@@ -364,9 +364,9 @@ impl PoolOperations for DecodedWhirlpoolPool {
     fn address(&self) -> Pubkey { self.address }
 
     // NOUVELLE VERSION SYNCHRONE DE get_quote
-    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
+    fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<QuoteResult> {
         let tick_arrays = self.tick_arrays.as_ref().ok_or_else(|| anyhow!("Pool is not hydrated."))?;
-        if self.liquidity == 0 && tick_arrays.is_empty() { return Ok(0); }
+        if self.liquidity == 0 && tick_arrays.is_empty() { return Ok(QuoteResult::default()); }
 
         let a_to_b = *token_in_mint == self.mint_a;
         let (in_mint_fee_bps, out_mint_fee_bps) = if a_to_b {
@@ -385,11 +385,15 @@ impl PoolOperations for DecodedWhirlpoolPool {
         let mut current_liquidity = self.liquidity;
         let mut current_sqrt_price = self.sqrt_price;
         let mut current_tick_index = self.tick_current_index;
+        let mut ticks_crossed_count = 0u32; // <-- NOTRE COMPTEUR
 
         while amount_remaining > 0 && current_liquidity > 0 {
             let (target_sqrt_price, next_liquidity_net) = {
                 match find_next_initialized_tick(self.tick_spacing, current_tick_index, a_to_b, tick_arrays) {
-                    Some((tick_index, tick_data)) => (orca_whirlpool_math::tick_to_sqrt_price_x64(tick_index), Some(tick_data.liquidity_net)),
+                    Some((tick_index, tick_data)) => {
+                        ticks_crossed_count += 1; // <-- ON INCRÉMENTE
+                        (orca_whirlpool_math::tick_to_sqrt_price_x64(tick_index), Some(tick_data.liquidity_net))
+                    },
                     None => (if a_to_b { orca_whirlpool_math::MIN_SQRT_PRICE_X64 } else { orca_whirlpool_math::MAX_SQRT_PRICE_X64 }, None)
                 }
             };
@@ -398,7 +402,7 @@ impl PoolOperations for DecodedWhirlpoolPool {
                 amount_remaining, current_sqrt_price, target_sqrt_price, current_liquidity, a_to_b,
             );
 
-            if amount_in_step == 0 { break; } // On ne progresse plus
+            if amount_in_step == 0 { break; }
 
             amount_remaining -= amount_in_step;
             total_amount_out += amount_out_step;
@@ -415,7 +419,12 @@ impl PoolOperations for DecodedWhirlpoolPool {
         let fee_on_output = (total_amount_out * out_mint_fee_bps as u128) / 10000;
         let final_amount_out = total_amount_out.saturating_sub(fee_on_output);
 
-        Ok(final_amount_out as u64)
+        // <-- MODIFIÉ : Encapsulation dans QuoteResult
+        Ok(QuoteResult {
+            amount_out: final_amount_out as u64,
+            fee: pool_fee as u64,
+            ticks_crossed: ticks_crossed_count,
+        })
     }
 
     // NOUVELLE VERSION SYNCHRONE DE get_required_input

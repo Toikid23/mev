@@ -95,10 +95,24 @@ impl FeeManager {
         (base_fee as u128 + overbid_amount) as u64
     }
 
-    pub fn calculate_jito_tip(&self, estimated_profit: u64, tip_percent: u64) -> u64 {
-        if tip_percent == 0 {
-            return 10_000; // Un tip minimum symbolique si le pourcentage est nul
-        }
-        (estimated_profit as u128 * tip_percent as u128 / 100) as u64
+    
+    pub fn calculate_jito_tip(
+        &self,
+        estimated_profit: u64,
+        tip_percent: u64,
+        estimated_cus: u64,
+    ) -> u64 {
+        // Stratégie de base : un pourcentage du profit
+        let profit_based_tip = (estimated_profit as u128 * tip_percent as u128 / 100) as u64;
+
+        // Stratégie avancée : assurer un "tip par CU" minimum pour être compétitif.
+        // Cette valeur (ex: 5000) peut être ajustée. Elle signifie qu'on offre
+        // au moins 5000 lamports pour chaque 1000 CUs consommés.
+        const MIN_TIP_PER_1000_CU: u64 = 5000;
+        let cu_based_tip = (estimated_cus * MIN_TIP_PER_1000_CU) / 1000;
+
+        // On prend le maximum des deux stratégies pour être sûr d'être compétitif,
+        // tout en garantissant un tip minimum absolu de 10,000 lamports.
+        profit_based_tip.max(cu_based_tip).max(10_000)
     }
 }

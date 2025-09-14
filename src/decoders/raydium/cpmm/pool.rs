@@ -1,12 +1,11 @@
 // src/decoders/raydium_decoders/pool
 use crate::rpc::ResilientRpcClient;
-use crate::decoders::pool_operations::PoolOperations; // On importe le contrat
 use bytemuck::{from_bytes, Pod, Zeroable};
 use super::config;
 use crate::decoders::spl_token_decoders;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
-use crate::decoders::pool_operations::UserSwapAccounts;
+use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts, QuoteResult};
 use solana_sdk::{
     instruction::{AccountMeta, Instruction}, // <-- On importe les types ici
     pubkey::Pubkey,
@@ -203,47 +202,45 @@ impl PoolOperations for DecodedCpmmPool {
     fn address(&self) -> Pubkey { self.address }
 
     // --- VERSION AMÉLIORÉE DE GET_QUOTE ---
-    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
+    fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<QuoteResult> {
         let (in_mint_fee_bps, out_mint_fee_bps, in_reserve, out_reserve) = if *token_in_mint == self.token_0_mint {
             (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps, self.reserve_a, self.reserve_b)
         } else {
             (self.mint_b_transfer_fee_bps, self.mint_a_transfer_fee_bps, self.reserve_b, self.reserve_a)
         };
 
-        // Étape 1 : Frais de transfert sur l'input (inchangé)
         let fee_on_input = (amount_in as u128 * in_mint_fee_bps as u128) / 10000;
         let amount_in_after_transfer_fee = amount_in.saturating_sub(fee_on_input as u64) as u128;
 
-        if in_reserve == 0 || out_reserve == 0 { return Ok(0); }
+        if in_reserve == 0 || out_reserve == 0 { return Ok(QuoteResult::default()); }
 
         const FEE_DENOMINATOR: u128 = 1_000_000;
 
-        // Étape 2 : Calculer les frais de trading avec un arrondi au plafond (ceil), comme le programme on-chain.
         let trade_fee = (amount_in_after_transfer_fee * self.trade_fee_rate as u128).div_ceil(FEE_DENOMINATOR);
-
-        // Étape 3 : Soustraire les frais pour obtenir le montant net pour le swap.
         let creator_fee = if self.enable_creator_fee {
             (amount_in_after_transfer_fee * self.creator_fee_rate as u128).div_ceil(FEE_DENOMINATOR)
         } else {
             0
         };
-        // --- FIN DE L'AJOUT ---
 
         let amount_in_less_fees = amount_in_after_transfer_fee
             .saturating_sub(trade_fee)
-            .saturating_sub(creator_fee); // <-- On soustrait aussi les frais du créateur
+            .saturating_sub(creator_fee);
 
-        // Étape 4 : Calculer le swap avec la formule de produit constant (arrondi au plancher).
         let numerator = amount_in_less_fees * out_reserve as u128;
         let denominator = in_reserve as u128 + amount_in_less_fees;
-        if denominator == 0 { return Ok(0); }
+        if denominator == 0 { return Ok(QuoteResult::default()); }
         let gross_amount_out = (numerator / denominator) as u64;
 
-        // Étape 5 : Frais de transfert sur l'output (inchangé)
         let fee_on_output = (gross_amount_out as u128 * out_mint_fee_bps as u128) / 10000;
         let final_amount_out = gross_amount_out.saturating_sub(fee_on_output as u64);
 
-        Ok(final_amount_out)
+        // <-- MODIFIÉ : Encapsulation dans QuoteResult
+        Ok(QuoteResult {
+            amount_out: final_amount_out,
+            fee: trade_fee as u64,
+            ticks_crossed: 0, // C'est un AMM
+        })
     }
 
     // --- NOUVELLE FONCTION get_required_input ---

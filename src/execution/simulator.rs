@@ -18,7 +18,7 @@ pub struct SimulationResult {
 }
 
 /// Extrait le profit réalisé à partir des logs d'une simulation réussie.
-fn parse_profit_from_logs(logs: &[String]) -> Option<u64> {
+pub fn parse_profit_from_logs(logs: &[String]) -> Option<u64> {
     let prefix = "Program log: SUCCÈS ! Profit net réalisé: ";
     for log in logs {
         if let Some(profit_str) = log.strip_prefix(prefix) {

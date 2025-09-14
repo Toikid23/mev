@@ -13,7 +13,7 @@ use super::tickarray_bitmap_extension;
 use super::config;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
-use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
+use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts, QuoteResult};
 use crate::decoders::raydium::clmm::full_math::MulDiv;
 use crate::decoders::spl_token_decoders::mint::{calculate_transfer_fee, calculate_gross_amount_before_transfer_fee};
 use crate::decoders::orca::whirlpool::math::U256;
@@ -57,10 +57,10 @@ impl DecodedClmmPool {
     }
 
     // Cette fonction est la version "aller" correcte.
-    fn calculate_swap_quote_internal(&self, amount_in: u64, is_base_input: bool) -> Result<(u64, Vec<Pubkey>)> {
+    fn calculate_swap_quote_internal(&self, amount_in: u64, is_base_input: bool) -> Result<(u64, u32, u64)> { // (amount_out, ticks_crossed, fee)
         let tick_arrays = self.tick_arrays.as_ref().ok_or_else(|| anyhow!("Pool is not hydrated."))?;
         if tick_arrays.is_empty() || self.liquidity == 0 {
-            return Ok((0, Vec::new()));
+            return Ok((0, 0, 0));
         }
 
         const FEE_RATE_DENOMINATOR_VALUE: u64 = 1_000_000;
@@ -76,6 +76,7 @@ impl DecodedClmmPool {
         let mut current_tick_index = self.tick_current;
         let mut current_liquidity = self.liquidity;
         let mut tick_arrays_crossed = HashSet::new();
+        let mut ticks_crossed_count = 0u32; // <-- NOTRE COMPTEUR
 
         while amount_remaining > 0 {
             let current_tick_array_start_index = tick_array::get_start_tick_index(current_tick_index, self.tick_spacing);
@@ -86,12 +87,13 @@ impl DecodedClmmPool {
                     Ok(result) => result,
                     Err(_) => (if is_base_input { math::MIN_TICK } else { math::MAX_TICK }, 0)
                 };
+
+                if next_tick_index != current_tick_index {
+                    ticks_crossed_count += 1; // <-- ON INCRÉMENTE
+                }
+
                 let sqrt_price_target = math::tick_to_sqrt_price_x64(next_tick_index);
-
-                let (next_sqrt_price, amount_in_step, amount_out_step) = compute_swap_step_without_fee(
-                    current_sqrt_price, sqrt_price_target, current_liquidity, amount_remaining, is_base_input,
-                )?;
-
+                let (next_sqrt_price, amount_in_step, amount_out_step) = compute_swap_step_without_fee(current_sqrt_price, sqrt_price_target, current_liquidity, amount_remaining, is_base_input)?;
                 if amount_in_step == 0 { break; }
 
                 amount_remaining = amount_remaining.saturating_sub(amount_in_step);
@@ -108,8 +110,8 @@ impl DecodedClmmPool {
                 break;
             }
         }
-
-        Ok((total_amount_out as u64, tick_arrays_crossed.into_iter().collect()))
+        // <-- MODIFIÉ : On retourne les 3 valeurs
+        Ok((total_amount_out as u64, ticks_crossed_count, fee_amount))
     }
 
     /// Trouve les N prochains TickArrays initialisés dans la direction du swap.
@@ -411,7 +413,7 @@ impl PoolOperations for DecodedClmmPool {
 
     fn address(&self) -> Pubkey { self.address }
 
-    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<u64> {
+    fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<QuoteResult> {
         let is_base_input = *token_in_mint == self.mint_a;
         let (in_mint_fee_bps, in_mint_max_fee, out_mint_fee_bps, out_mint_max_fee) = if is_base_input {
             (self.mint_a_transfer_fee_bps, self.mint_a_max_transfer_fee, self.mint_b_transfer_fee_bps, self.mint_b_max_transfer_fee)
@@ -422,10 +424,16 @@ impl PoolOperations for DecodedClmmPool {
         let fee_on_input = calculate_transfer_fee(amount_in, in_mint_fee_bps, in_mint_max_fee)?;
         let net_amount_in = amount_in.saturating_sub(fee_on_input);
 
-        let (gross_amount_out, _) = self.calculate_swap_quote_internal(net_amount_in, is_base_input)?;
+        // On appelle la fonction interne qui retourne maintenant toutes les infos
+        let (gross_amount_out, ticks_crossed, trade_fee) = self.calculate_swap_quote_internal(net_amount_in, is_base_input)?;
+
         let fee_on_output = calculate_transfer_fee(gross_amount_out, out_mint_fee_bps, out_mint_max_fee)?;
 
-        Ok(gross_amount_out.saturating_sub(fee_on_output))
+        Ok(QuoteResult {
+            amount_out: gross_amount_out.saturating_sub(fee_on_output),
+            fee: trade_fee,
+            ticks_crossed,
+        })
     }
 
 

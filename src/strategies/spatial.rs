@@ -1,11 +1,11 @@
+// DANS : src/strategies/spatial.rs
+
 use crate::decoders::{Pool, PoolOperations};
-use crate::graph_engine::Graph; // On importe notre nouvelle structure Graph
+use crate::graph_engine::Graph;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
 use std::sync::Arc;
-use anyhow::Result;
-// On a seulement besoin de tokio::sync::RwLock pour les types, mais pas d'import direct si on n'utilise pas le nom court.
-// On va le retirer pour éviter le warning, car les types sont déjà dans la définition de `Graph`.
+use anyhow::{Result};
 
 #[derive(Debug, Clone)]
 pub struct ArbitrageOpportunity {
@@ -21,44 +21,34 @@ pub async fn find_spatial_arbitrage(
     graph: Arc<Graph>,
 ) -> Vec<ArbitrageOpportunity> {
     const MINIMUM_PROFIT_LAMPS: u64 = 100_000;
-    // On utilise une unité de base standardisée pour comparer les prix (ex: 0.1 SOL)
-    // Cela évite les erreurs sur les tokens à faible liquidité ou avec peu de décimales.
-    const PRICE_CHECK_AMOUNT: u64 = 100_000_000; // 0.1 SOL en lamports (ou l'équivalent pour d'autres tokens)
+    const PRICE_CHECK_AMOUNT: u64 = 100_000_000;
 
-    let mut opportunities = Vec::new();
+    let mut opportunities = Vec::with_capacity(10);
 
+    // <-- BLOC CORRIGÉ : On travaille directement sur le snapshot
     let pools_by_pair = {
-        let pools_map_reader = graph.pools.read().await;
-        let mut map: HashMap<(Pubkey, Pubkey), Vec<Pubkey>> = HashMap::new();
-        for (pool_key, pool_arc_rwlock) in pools_map_reader.iter() {
-            let pool_reader = pool_arc_rwlock.read().await;
-            let (mut mint_a, mut mint_b) = pool_reader.get_mints();
+        let mut map: HashMap<(Pubkey, Pubkey), Vec<Pubkey>> = HashMap::with_capacity(graph.pools.len() / 2);
+        for (pool_key, pool_data) in graph.pools.iter() {
+            let (mut mint_a, mut mint_b) = pool_data.get_mints();
             if mint_a > mint_b { std::mem::swap(&mut mint_a, &mut mint_b); }
             map.entry((mint_a, mint_b)).or_default().push(*pool_key);
         }
         map
     };
 
-    // --- DÉBUT DE LA NOUVELLE LOGIQUE O(n) ---
     for ((mint_a, mint_b), pool_keys) in pools_by_pair.iter() {
         if pool_keys.len() < 2 { continue; }
 
-        let mut best_seller: Option<(u64, Pubkey)> = None; // (coût pour acheter B, clé du pool)
-        let mut best_buyer: Option<(u64, Pubkey)> = None;  // (revenu en vendant B, clé du pool)
+        let mut best_seller: Option<(u64, Pubkey)> = None;
+        let mut best_buyer: Option<(u64, Pubkey)> = None;
 
-        // Boucle unique pour trouver les meilleurs prix (O(n))
         for pool_key in pool_keys {
-            let pool_arc_rwlock = {
-                let pools_reader = graph.pools.read().await;
-                match pools_reader.get(pool_key) {
-                    Some(p) => p.clone(),
-                    None => continue,
-                }
+            // <-- MODIFIÉ : Accès direct au pool_data
+            let pool_data = match graph.pools.get(pool_key) {
+                Some(p) => p,
+                None => continue,
             };
 
-            let pool_data = pool_arc_rwlock.read().await;
-
-            // Calculer le "prix de vente" du pool (coût pour acheter mint_b avec mint_a)
             if let Ok(cost_to_buy_b) = pool_data.get_quote(mint_a, PRICE_CHECK_AMOUNT, 0) {
                 if cost_to_buy_b > 0 {
                     if best_seller.is_none() || cost_to_buy_b < best_seller.unwrap().0 {
@@ -67,7 +57,6 @@ pub async fn find_spatial_arbitrage(
                 }
             }
 
-            // Calculer le "prix d'achat" du pool (revenu en vendant mint_b pour mint_a)
             if let Ok(revenue_from_selling_b) = pool_data.get_quote(mint_b, PRICE_CHECK_AMOUNT, 0) {
                 if best_buyer.is_none() || revenue_from_selling_b > best_buyer.unwrap().0 {
                     best_buyer = Some((revenue_from_selling_b, *pool_key));
@@ -75,20 +64,18 @@ pub async fn find_spatial_arbitrage(
             }
         }
 
-        // Si on a trouvé un acheteur et un vendeur, et que le prix de vente est inférieur au prix d'achat
         if let (Some((_sell_price, sell_key)), Some((buy_price, buy_key))) = (best_seller, best_buyer) {
             if sell_key != buy_key && buy_price > PRICE_CHECK_AMOUNT {
-                // Opportunité détectée ! On lance maintenant l'optimiseur de profit.
-                let (mut pool_buy_from, mut pool_sell_to) = {
-                    let pools_reader = graph.pools.read().await;
-                    let p_buy_arc = pools_reader.get(&sell_key).unwrap().clone();
-                    let p_sell_arc = pools_reader.get(&buy_key).unwrap().clone();
-                    drop(pools_reader);
-                    let (p_buy_guard, p_sell_guard) = tokio::join!(p_buy_arc.read(), p_sell_arc.read());
-                    (p_buy_guard.clone(), p_sell_guard.clone())
+                // <-- BLOC CORRIGÉ : Accès direct aux pools pour l'optimiseur
+                let mut pool_buy_from = match graph.pools.get(&sell_key) {
+                    Some(p) => p.clone(),
+                    None => continue,
+                };
+                let mut pool_sell_to = match graph.pools.get(&buy_key) {
+                    Some(p) => p.clone(),
+                    None => continue,
                 };
 
-                // On appelle la fonction d'optimisation UNE SEULE FOIS.
                 if let Some(final_opportunity) = find_optimal_arbitrage(&mut pool_buy_from, &mut pool_sell_to, *mint_a, *mint_b) {
                     if final_opportunity.profit_in_lamports >= MINIMUM_PROFIT_LAMPS {
                         opportunities.push(final_opportunity);
@@ -96,8 +83,14 @@ pub async fn find_spatial_arbitrage(
                 }
             }
         }
+
     }
-    // --- FIN DE LA NOUVELLE LOGIQUE ---
+    if !opportunities.is_empty() {
+        println!("[MEM_METRICS] spatial.rs - opportunities length: {}", opportunities.len());
+    }
+    if !pools_by_pair.is_empty() {
+        println!("[MEM_METRICS] spatial.rs - pools_by_pair length: {}", pools_by_pair.len());
+    }
 
     opportunities
 }
@@ -119,7 +112,6 @@ fn find_optimal_arbitrage(
     let mut high_bound: u64 = std::cmp::min(buy_from_intermediate_reserve, sell_to_intermediate_reserve);
     if high_bound == 0 { high_bound = 500 * 1_000_000_000; }
 
-    // CORRIGÉ : La closure retourne maintenant un `anyhow::Result<i128>`.
     let profit_fn = |intermediate_amount: u64| -> Result<i128> {
         if intermediate_amount == 0 {
             return Ok(0);
@@ -147,24 +139,12 @@ fn find_optimal_arbitrage(
     None
 }
 
-/// Optimise une fonction de profit unimodale en utilisant la recherche ternaire.
-///
-/// # Arguments
-/// * `low_bound` - La borne inférieure de la recherche (ex: 0).
-/// * `high_bound` - La borne supérieure de la recherche (ex: la liquidité minimale).
-/// * `profit_fn` - Une closure qui prend un `u64` (montant) et retourne le profit en `i128`.
-///
-/// # Retours
-/// `None` si aucun profit n'est trouvé.
-/// `Some((best_input, max_profit))` avec le montant d'entrée optimal et le profit correspondant.
-/// Optimise une fonction de profit unimodale en utilisant la recherche ternaire.
 fn ternary_search_optimizer<F>(
     mut low_bound: u64,
     mut high_bound: u64,
     mut profit_fn: F,
 ) -> Option<(u64, i128)>
 where
-// CORRIGÉ : On utilise `anyhow::Result` qui inclut le type d'erreur.
     F: FnMut(u64) -> Result<i128>,
 {
     let mut max_profit: i128 = 0;

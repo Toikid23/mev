@@ -10,7 +10,7 @@ use solana_sdk::instruction::{Instruction, AccountMeta};
 use spl_token;
 use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
-use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
+use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts, QuoteResult};
 use super::math;
 use crate::decoders::pool_operations::find_input_by_binary_search;
 
@@ -154,8 +154,8 @@ impl PoolOperations for DecodedMeteoraDammPool {
 
     fn address(&self) -> Pubkey { self.address }
 
-    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<u64> {
-        if self.liquidity == 0 { return Ok(0); }
+    fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<QuoteResult> {
+        if self.liquidity == 0 { return Ok(QuoteResult::default()); }
         let a_to_b = *token_in_mint == self.mint_a;
         let (in_mint_fee_bps, out_mint_fee_bps) = if a_to_b {
             (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps)
@@ -202,7 +202,13 @@ impl PoolOperations for DecodedMeteoraDammPool {
         };
         let fee_on_output = (amount_out_after_pool_fee as u128 * out_mint_fee_bps as u128) / 10000;
         let final_amount_out = amount_out_after_pool_fee.saturating_sub(fee_on_output as u64);
-        Ok(final_amount_out)
+
+        // <-- MODIFIÉ : On encapsule le résultat final
+        Ok(QuoteResult {
+            amount_out: final_amount_out,
+            fee: lp_fee as u64,
+            ticks_crossed: 1, // Estimation, car le calcul est global
+        })
     }
 
     /// Calcule le montant d'entrée requis pour obtenir un montant de sortie spécifié.

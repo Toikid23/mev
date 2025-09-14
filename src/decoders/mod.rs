@@ -86,16 +86,16 @@ impl PoolOperations for Pool {
     }
 
 
-    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<u64> {
+    fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<pool_operations::QuoteResult> {
         match self {
-            Pool::RaydiumAmmV4(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
-            Pool::RaydiumCpmm(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
-            Pool::MeteoraDammV1(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
-            Pool::MeteoraDammV2(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
-            Pool::PumpAmm(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
-            Pool::RaydiumClmm(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
-            Pool::OrcaWhirlpool(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
-            Pool::MeteoraDlmm(p) => p.get_quote(token_in_mint, amount_in, current_timestamp),
+            Pool::RaydiumAmmV4(p) => p.get_quote_with_details(token_in_mint, amount_in, current_timestamp),
+            Pool::RaydiumCpmm(p) => p.get_quote_with_details(token_in_mint, amount_in, current_timestamp),
+            Pool::RaydiumClmm(p) => p.get_quote_with_details(token_in_mint, amount_in, current_timestamp),
+            Pool::MeteoraDammV1(p) => p.get_quote_with_details(token_in_mint, amount_in, current_timestamp),
+            Pool::MeteoraDammV2(p) => p.get_quote_with_details(token_in_mint, amount_in, current_timestamp),
+            Pool::MeteoraDlmm(p) => p.get_quote_with_details(token_in_mint, amount_in, current_timestamp),
+            Pool::OrcaWhirlpool(p) => p.get_quote_with_details(token_in_mint, amount_in, current_timestamp),
+            Pool::PumpAmm(p) => p.get_quote_with_details(token_in_mint, amount_in, current_timestamp),
         }
     }
 

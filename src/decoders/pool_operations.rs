@@ -2,6 +2,18 @@ use anyhow::Result;
 use solana_sdk::{instruction::Instruction, pubkey::Pubkey};
 use async_trait::async_trait;
 
+
+
+// NOUVEAU : Une structure pour un retour détaillé de get_quote
+#[derive(Default)]
+pub struct QuoteResult {
+    pub amount_out: u64,
+    pub fee: u64,
+    // Pour les CLMMs, le nombre de ticks/bins traversés
+    pub ticks_crossed: u32,
+}
+
+
 #[async_trait]
 pub trait PoolOperations {
 
@@ -13,7 +25,13 @@ pub trait PoolOperations {
 
     fn address(&self) -> Pubkey;
 
-    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<u64>;
+    // MODIFIÉ : La signature de get_quote change
+    fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<QuoteResult>;
+
+    // On garde l'ancienne pour la compatibilité, avec une implémentation par défaut
+    fn get_quote(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<u64> {
+        Ok(self.get_quote_with_details(token_in_mint, amount_in, current_timestamp)?.amount_out)
+    }
 
     fn get_required_input(
         &mut self,
