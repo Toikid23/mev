@@ -46,6 +46,24 @@ const BOT_PROCESSING_TIME_MS: u128 = 200;
 const JITO_TIP_PERCENT: u64 = 20;
 
 
+lazy_static::lazy_static! {
+    static ref JITO_REGIONAL_ENDPOINTS: HashMap<String, String> = {
+        let mut map = HashMap::new();
+        // On utilise la liste exacte que vous avez fournie
+        map.insert("Amsterdam".to_string(), "https://amsterdam.mainnet.block-engine.jito.wtf".to_string());
+        map.insert("Dublin".to_string(), "https://dublin.mainnet.block-engine.jito.wtf".to_string());
+        map.insert("Frankfurt".to_string(), "https://frankfurt.mainnet.block-engine.jito.wtf".to_string());
+        map.insert("London".to_string(), "https://london.mainnet.block-engine.jito.wtf".to_string());
+        map.insert("New York".to_string(), "https://ny.mainnet.block-engine.jito.wtf".to_string());
+        map.insert("Salt Lake City".to_string(), "https://slc.mainnet.block-engine.jito.wtf".to_string());
+        map.insert("Singapore".to_string(), "https://singapore.mainnet.block-engine.jito.wtf".to_string());
+        map.insert("Tokyo".to_string(), "https://tokyo.mainnet.block-engine.jito.wtf".to_string());
+        map
+    };
+}
+
+
+
 /// Lit le fichier `hotlist.json`
 fn read_hotlist() -> Result<HashSet<Pubkey>> {
     let data = fs::read_to_string("hotlist.json")?;
@@ -246,7 +264,7 @@ async fn rehydrate_and_find_opportunities(
     slot_tracker: Arc<SlotTracker>,
     slot_metronome: Arc<SlotMetronome>,
     leader_schedule_tracker: Arc<LeaderScheduleTracker>,
-    validator_intel: Arc<ValidatorIntelService>, // NOUVEAU PARAMÈTRE
+    validator_intel: Arc<ValidatorIntelService>,
     fee_manager: FeeManager,
 ) {
     let pool_arc = {
@@ -284,7 +302,7 @@ async fn rehydrate_and_find_opportunities(
             if !is_already_processing {
                 if let Err(e) = process_opportunity(
                     opp, graph, rpc_client, payer, current_timestamp, &fee_manager,
-                    slot_tracker, slot_metronome, leader_schedule_tracker, validator_intel,
+                    slot_tracker, slot_metronome, leader_schedule_tracker, validator_intel
                 ).await {
                     println!("[Erreur Traitement] {}", e);
                 }
@@ -305,7 +323,7 @@ async fn process_opportunity(
     slot_tracker: Arc<SlotTracker>,
     slot_metronome: Arc<SlotMetronome>,
     leader_schedule_tracker: Arc<LeaderScheduleTracker>,
-    validator_intel: Arc<ValidatorIntelService>, // NOUVEAU PARAMÈTRE
+    validator_intel: Arc<ValidatorIntelService>,
 ) -> Result<()> {
     // Phase 1 & 2 : Construction et validation de la transaction (inchangé)
     let lookup_table_account_data = rpc_client.get_account_data(&ADDRESS_LOOKUP_TABLE_ADDRESS).await?;
@@ -344,49 +362,69 @@ async fn process_opportunity(
         Ok(data) => data,
         Err(e) => { println!("[Phase 3 VALIDATION ÉCHOUÉE] La transaction n'est plus viable : {}", e); return Ok(()) }
     };
-    // Une fois la simulation réussie et `sim_data` obtenu :
     println!("  -> Validation et Découverte RÉUSSIES !");
 
-    // --- PHASE 4 : LOGIQUE DE DÉCISION DE ROUTAGE (JITO vs NORMAL) ---
     println!("\n--- [Phase 4] Analyse de routage et décision d'envoi ---");
 
     let current_slot = slot_tracker.current().clock.slot;
     let time_remaining_in_slot = slot_metronome.estimated_time_remaining_in_slot_ms();
 
-    let (target_slot, leader_info) = if time_remaining_in_slot > BOT_PROCESSING_TIME_MS {
-        (current_slot, leader_schedule_tracker.get_leader_info_for_slot(current_slot))
+    let (target_slot, leader_identity) = if time_remaining_in_slot > BOT_PROCESSING_TIME_MS {
+        (current_slot, leader_schedule_tracker.get_leader_for_slot(current_slot))
     } else {
         println!("     -> Temps insuffisant dans le slot actuel ({}ms restants). On vise le prochain slot.", time_remaining_in_slot);
         let next_slot = current_slot + 1;
-        (next_slot, leader_schedule_tracker.get_leader_info_for_slot(next_slot))
+        (next_slot, leader_schedule_tracker.get_leader_for_slot(next_slot))
     };
 
-    let (leader_identity, leader_vote_account) = match leader_info {
-        Some(info) => info,
+    let leader_identity = match leader_identity {
+        Some(id) => id,
         None => {
-            println!("     -> DÉCISION : Abandon. Impossible de déterminer le leader pour le slot cible {}.", target_slot);
+            println!("     -> DÉCISION : Abandon. Impossible de déterminer le leader pour le slot {}.", target_slot);
             return Ok(());
         }
     };
 
-
-    // --- MODIFICATION : On utilise notre nouveau service ---
-    if validator_intel.is_jito_validator(&leader_vote_account).await {
+    if let Some(validator_info) = validator_intel.get_validator_info(&leader_identity).await {
+        // Le statut Jito est implicite car on a trouvé des infos dans notre service.
         println!("     -> Leader cible (Slot {}): {} (✅ Jito)", target_slot, leader_identity);
+
+        // --- LOGIQUE DE ROUTAGE AMÉLIORÉE ET CORRIGÉE ---
+        let fallback_url_str; // On déclare la String à l'extérieur pour qu'elle vive assez longtemps
+        let target_endpoint: &str; // Le type cible est maintenant &str
+
+        if validator_info.location != "Unknown" {
+            println!("     -> Localisation détectée : {}", validator_info.location);
+
+            if let Some(url) = JITO_REGIONAL_ENDPOINTS.get(&validator_info.location) {
+                println!("     -> Endpoint Jito optimal trouvé pour la région '{}'.", validator_info.location);
+                target_endpoint = url;
+            } else {
+                println!("     -> AVERTISSEMENT : Pas d'endpoint Jito pour la région '{}'. Utilisation du fallback.", validator_info.location);
+                fallback_url_str = env::var("MY_NEAREST_JITO_ENDPOINT")
+                    .context("MY_NEAREST_JITO_ENDPOINT doit être défini dans le .env pour le fallback")?;
+                target_endpoint = &fallback_url_str;
+            }
+        } else {
+            println!("     -> AVERTISSEMENT : Localisation du validateur inconnue. Utilisation du fallback.");
+            fallback_url_str = env::var("MY_NEAREST_JITO_ENDPOINT")
+                .context("MY_NEAREST_JITO_ENDPOINT doit être défini dans le .env pour le fallback")?;
+            target_endpoint = &fallback_url_str;
+        }
+        // --- FIN DE LA LOGIQUE DE ROUTAGE ---
 
         let profit_brut_reel = sim_data.profit_brut_reel;
         let jito_tip = fee_manager.calculate_jito_tip(profit_brut_reel, JITO_TIP_PERCENT);
         let profit_net_final = profit_brut_reel.saturating_sub(jito_tip);
 
-        println!("     -> Profit Net FINAL (après tip Jito) : {} lamports", profit_net_final);
         if profit_net_final > 0 {
-            println!("  -> DÉCISION : ENVOYER VIA BUNDLE JITO");
-            // NOTE : Le routage géographique sera la prochaine étape. Pour l'instant, on envoie à l'endpoint par défaut.
+            println!("  -> DÉCISION : ENVOYER VIA BUNDLE JITO À {}", validator_info.location.to_uppercase());
             println!("\n--- [Phase 5] Envoi (Mode Simulation Jito) ---");
             println!("[ACTION SIMULÉE - BUNDLE JITO]");
+            println!("  -> Enverrait un bundle à l'endpoint : {}", target_endpoint);
             println!("  -> Tip Jito inclus : {} lamports", jito_tip);
         } else {
-            println!("  -> DÉCISION : Abandon. Le profit est insuffisant après le tip Jito.");
+            println!("  -> DÉCISION : Abandon. Profit insuffisant après le tip Jito.");
         }
 
     } else {
@@ -427,9 +465,14 @@ async fn main() -> Result<()> {
 
 
     // --- BLOC D'INITIALISATION COMPLET ET FINAL ---
+    // Vous devrez ajouter cette variable à votre fichier .env
+    // VALIDATORS_APP_API_KEY="VOTRE_CLE_ICI"
+    let validators_app_token = env::var("VALIDATORS_APP_API_KEY")
+        .context("VALIDATORS_APP_API_KEY doit être défini dans le fichier .env")?;
+
     println!("[Init] Initialisation du ValidatorIntelService...");
-    let validator_intel_service = Arc::new(ValidatorIntelService::new().await?);
-    validator_intel_service.start();
+    let validator_intel_service = Arc::new(ValidatorIntelService::new(validators_app_token.clone()).await?);
+    validator_intel_service.start(validators_app_token);
 
     println!("[Init] Initialisation du SlotTracker Geyser...");
     let slot_tracker = Arc::new(SlotTracker::new(&rpc_client).await?);

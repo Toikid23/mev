@@ -1,83 +1,125 @@
-// DANS : src/state/validator_intel.rs (Version Simplifiée)
+// DANS : src/state/validator_intel.rs
 
 use anyhow::{Context, Result};
 use solana_sdk::pubkey::Pubkey;
 use serde::Deserialize;
-use std::{collections::HashSet, str::FromStr, sync::Arc, time::Duration};
+use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
 use tokio::{sync::RwLock, task::JoinHandle};
 
-const JITO_VALIDATORS_API_URL: &str = "https://kobe.mainnet.jito.network/api/v1/validators";
+const VALIDATORS_APP_API_URL: &str = "https://www.validators.app/api/v1/validators/mainnet.json";
 const REFRESH_INTERVAL_MINS: u64 = 60; // Rafraîchir toutes les heures
 
+// Structure pour capturer tous les champs qui nous intéressent de l'API
 #[derive(Deserialize, Debug)]
-struct JitoValidator {
+struct ValidatorApiResponse {
+    account: String, // Identity Pubkey
     vote_account: String,
-    running_jito: bool,
+    jito: bool,
+    data_center_key: Option<String>, // Contient la localisation comme "12345-US-Ashburn"
+    active_stake: u64,
+    skipped_slot_score: i32,
+    skipped_after_score: i32,
+    vote_latency_score: i32,
+    // Ajoutez d'autres champs de l'API ici si vous en avez besoin
 }
 
+// La réponse de l'API est directement un tableau de ces objets.
 #[derive(Deserialize, Debug)]
-struct JitoApiResponse {
-    validators: Vec<JitoValidator>,
+struct ValidatorsAppResponse(Vec<ValidatorApiResponse>);
+
+// Notre structure de données interne, propre et optimisée pour notre bot.
+#[derive(Clone, Debug)]
+pub struct ValidatorInfo {
+    pub identity_pubkey: Pubkey,
+    pub vote_pubkey: Pubkey,
+    pub location: String,
+    pub active_stake: u64,
+    pub skipped_slot_score: i32,
+    // ... autres scores
 }
 
-/// Le service qui maintient la liste des VOTE ACCOUNTS des validateurs Jito à jour.
+/// Le service qui maintient la base de données des validateurs à jour.
 #[derive(Clone)]
 pub struct ValidatorIntelService {
-    jito_vote_accounts: Arc<RwLock<HashSet<Pubkey>>>,
+    // Clé: Identity Pubkey. C'est plus direct car le LeaderSchedule nous donne l'identité.
+    validators: Arc<RwLock<HashMap<Pubkey, ValidatorInfo>>>,
 }
 
 impl ValidatorIntelService {
-    /// Crée et initialise le service en faisant le premier appel à l'API Jito.
-    pub async fn new() -> Result<Self> {
+    pub async fn new(api_token: String) -> Result<Self> {
         println!("[ValidatorIntel] Initialisation...");
         let service = Self {
-            jito_vote_accounts: Arc::new(RwLock::new(HashSet::new())),
+            validators: Arc::new(RwLock::new(HashMap::new())),
         };
-        service.refresh().await?;
+        service.refresh(&api_token).await?;
         println!("[ValidatorIntel] Initialisation réussie.");
         Ok(service)
     }
 
-    /// Lance la tâche de fond qui rafraîchit les données périodiquement.
-    pub fn start(&self) -> JoinHandle<()> {
+    pub fn start(&self, api_token: String) -> JoinHandle<()> {
         let self_clone = self.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(REFRESH_INTERVAL_MINS * 60));
             loop {
                 interval.tick().await;
-                println!("[ValidatorIntel] Rafraîchissement périodique des validateurs Jito...");
-                if let Err(e) = self_clone.refresh().await {
+                println!("[ValidatorIntel] Rafraîchissement périodique des données des validateurs...");
+                if let Err(e) = self_clone.refresh(&api_token).await {
                     eprintln!("[ValidatorIntel] Erreur lors du rafraîchissement : {:?}", e);
                 }
             }
         })
     }
 
-    /// La logique de récupération et de mise à jour des données.
-    async fn refresh(&self) -> Result<()> {
-        let response: JitoApiResponse = reqwest::get(JITO_VALIDATORS_API_URL)
+    async fn refresh(&self, api_token: &str) -> Result<()> {
+        let client = reqwest::Client::new();
+        let response: ValidatorsAppResponse = client
+            .get(VALIDATORS_APP_API_URL)
+            .header("Token", api_token) // Utilisation de la clé API
+            .send()
             .await?
             .json()
             .await
-            .context("Échec de la récupération des données de l'API Jito")?;
+            .context("Échec de la récupération ou du parsing des données de l'API validators.app")?;
 
-        let new_jito_vote_accounts: HashSet<Pubkey> = response
-            .validators
+        let new_validators: HashMap<Pubkey, ValidatorInfo> = response.0
             .into_iter()
-            .filter(|v| v.running_jito)
-            .filter_map(|v| Pubkey::from_str(&v.vote_account).ok())
+            .filter_map(|v| {
+                // On parse les deux clés, et on ne continue que si c'est valide
+                if let (Ok(identity_pubkey), Ok(vote_pubkey)) = (
+                    Pubkey::from_str(&v.account),
+                    Pubkey::from_str(&v.vote_account),
+                ) {
+                    Some(
+                        (identity_pubkey, ValidatorInfo {
+                            identity_pubkey,
+                            vote_pubkey,
+                            // On extrait la ville depuis la data_center_key
+                            location: v.data_center_key
+                                .unwrap_or_else(|| "Unknown".to_string())
+                                .split('-')
+                                .nth(2)
+                                .unwrap_or("Unknown")
+                                .to_string(),
+                            active_stake: v.active_stake,
+                            skipped_slot_score: v.skipped_slot_score,
+                        })
+                    )
+                } else {
+                    None
+                }
+            })
             .collect();
 
-        let mut writer = self.jito_vote_accounts.write().await;
-        *writer = new_jito_vote_accounts;
+        let mut writer = self.validators.write().await;
+        *writer = new_validators;
 
-        println!("[ValidatorIntel] Données rafraîchies. {} validateurs Jito actifs en cache.", writer.len());
+        println!("[ValidatorIntel] Données rafraîchies. {} validateurs au total en cache.", writer.len());
         Ok(())
     }
 
-    /// Vérifie si un VOTE ACCOUNT donné est dans la liste Jito.
-    pub async fn is_jito_validator(&self, vote_pubkey: &Pubkey) -> bool {
-        let reader = self.jito_vote_accounts.read().await;
-        reader.contains(vote_pubkey)
+    /// Retourne les informations sur un validateur via son IDENTITY pubkey.
+    pub async fn get_validator_info(&self, identity_pubkey: &Pubkey) -> Option<ValidatorInfo> {
+        let reader = self.validators.read().await;
+        reader.get(identity_pubkey).cloned()
     }
 }

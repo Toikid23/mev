@@ -1,4 +1,4 @@
-// DANS : src/state/leader_schedule.rs
+// DANS : src/state/leader_schedule.rs (Version simplifiée)
 
 use crate::rpc::ResilientRpcClient;
 use anyhow::{Context, Result};
@@ -12,17 +12,11 @@ use std::{
 };
 use tokio::task::JoinHandle;
 
-#[derive(Clone, Default)]
-pub struct FullSchedule {
-    /// Clé: slot, Valeur: identity_pubkey du leader
-    pub slot_to_identity: HashMap<u64, Pubkey>,
-    /// Clé: identity_pubkey, Valeur: vote_pubkey
-    pub identity_to_vote: HashMap<Pubkey, Pubkey>,
-}
-
+/// Le service qui maintient le planning des leaders à jour.
 #[derive(Clone)]
 pub struct LeaderScheduleTracker {
-    schedule: Arc<ArcSwap<FullSchedule>>,
+    /// Clé: slot, Valeur: identity_pubkey du leader
+    slot_to_identity: Arc<ArcSwap<HashMap<u64, Pubkey>>>,
     current_epoch: Arc<AtomicU64>,
     rpc_client: Arc<ResilientRpcClient>,
 }
@@ -31,7 +25,7 @@ impl LeaderScheduleTracker {
     pub async fn new(rpc_client: Arc<ResilientRpcClient>) -> Result<Self> {
         println!("[LeaderSchedule] Initialisation...");
         let tracker = Self {
-            schedule: Arc::new(ArcSwap::from_pointee(FullSchedule::default())),
+            slot_to_identity: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             current_epoch: Arc::new(AtomicU64::new(0)),
             rpc_client,
         };
@@ -59,14 +53,13 @@ impl LeaderScheduleTracker {
         })
     }
 
+    /// Récupère le planning des leaders et le met en cache.
     async fn refresh_schedule(&self) -> Result<()> {
         let epoch_info: EpochInfo = self.rpc_client.get_epoch_info().await?;
         let current_epoch = epoch_info.epoch;
 
-        let (schedule_res, vote_accounts_res) = tokio::join!(
-            self.rpc_client.get_leader_schedule(None),
-            self.rpc_client.get_vote_accounts()
-        );
+        // On ne fait plus qu'un seul appel RPC.
+        let schedule_res = self.rpc_client.get_leader_schedule(None).await;
 
         let slot_to_identity = if let Some(schedule) = schedule_res.context("Impossible de récupérer le planning des leaders")? {
             let mut map = HashMap::new();
@@ -82,36 +75,15 @@ impl LeaderScheduleTracker {
             HashMap::new()
         };
 
-        let identity_to_vote = {
-            let vote_accounts = vote_accounts_res.context("Impossible de récupérer les vote accounts")?;
-            let mut map = HashMap::new();
-            for account in vote_accounts.current.iter().chain(vote_accounts.delinquent.iter()) {
-                if let (Ok(identity), Ok(vote_pubkey)) = (
-                    Pubkey::from_str(&account.node_pubkey),
-                    Pubkey::from_str(&account.vote_pubkey),
-                ) {
-                    map.insert(identity, vote_pubkey);
-                }
-            }
-            map
-        };
+        println!("[LeaderSchedule] Planning rafraîchi pour l'epoch {}. {} entrées de slots.", current_epoch, slot_to_identity.len());
 
-        println!("[LeaderSchedule] Planning rafraîchi pour l'epoch {}. {} leaders mappés.", current_epoch, identity_to_vote.len());
-
-        self.schedule.store(Arc::new(FullSchedule {
-            slot_to_identity,
-            identity_to_vote,
-        }));
+        self.slot_to_identity.store(Arc::new(slot_to_identity));
         self.current_epoch.store(current_epoch, Ordering::Relaxed);
         Ok(())
     }
 
-    pub fn get_leader_info_for_slot(&self, slot: u64) -> Option<(Pubkey, Pubkey)> {
-        let schedule = self.schedule.load();
-        schedule.slot_to_identity
-            .get(&slot)
-            .and_then(|identity| {
-                schedule.identity_to_vote.get(identity).map(|vote| (*identity, *vote))
-            })
+    /// Pour un slot donné, retourne l'identité du leader.
+    pub fn get_leader_for_slot(&self, slot: u64) -> Option<Pubkey> {
+        self.slot_to_identity.load().get(&slot).copied()
     }
 }

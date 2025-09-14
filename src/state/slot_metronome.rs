@@ -1,13 +1,13 @@
-// DANS : src/state/slot_metronome.rs (Version Corrigée)
+// DANS : src/state/slot_metronome.rs (Version améliorée avec gestion des slots manqués)
 
-use super::slot_tracker::{SlotState, SlotTracker}; // On importe SlotState
+use super::slot_tracker::{SlotState, SlotTracker};
 use std::{
     collections::VecDeque,
     sync::{Arc, RwLock},
 };
 use tokio::task::JoinHandle;
 
-const SLOT_HISTORY_SIZE: usize = 100;
+const SLOT_HISTORY_SIZE: usize = 100; // Garder l'historique des 100 derniers slots
 
 #[derive(Debug, Clone)]
 struct SlotTiming {
@@ -19,7 +19,7 @@ struct SlotTiming {
 pub struct SlotMetronome {
     slot_tracker: Arc<SlotTracker>,
     history: Arc<RwLock<VecDeque<SlotTiming>>>,
-    // Stocke l'état du slot précédent pour calculer la durée.
+    // Stocke l'état du slot précédent pour pouvoir calculer la durée.
     last_slot_state: Arc<RwLock<SlotState>>,
 }
 
@@ -45,20 +45,33 @@ impl SlotMetronome {
                 let mut last_slot_writer = self_clone.last_slot_state.write().unwrap();
 
                 if current_slot_state_arc.clock.slot > last_slot_writer.clock.slot {
-                    // Calcul de la durée du slot qui vient de se terminer
-                    let duration = current_slot_state_arc.received_at.duration_since(last_slot_writer.received_at);
+                    // --- NOUVELLE LOGIQUE DE GESTION DES SLOTS MANQUÉS ---
+                    let slots_elapsed = current_slot_state_arc.clock.slot.saturating_sub(last_slot_writer.clock.slot);
+                    let total_duration_ms = current_slot_state_arc.received_at
+                        .duration_since(last_slot_writer.received_at)
+                        .as_millis();
 
-                    let new_timing = SlotTiming {
-                        duration_ms: duration.as_millis(),
-                    };
+                    if slots_elapsed > 0 {
+                        // On calcule la durée moyenne sur la période.
+                        let avg_duration_for_period = total_duration_ms / (slots_elapsed as u128);
 
-                    { // Bloc pour le write lock sur l'historique
-                        let mut history_writer = self_clone.history.write().unwrap();
-                        if history_writer.len() == SLOT_HISTORY_SIZE {
-                            history_writer.pop_front();
+                        if slots_elapsed > 1 {
+                            println!("[Metronome] Détection d'un saut de {} slots. Durée moyenne enregistrée: {}ms.", slots_elapsed - 1, avg_duration_for_period);
                         }
-                        history_writer.push_back(new_timing);
-                    } // Le write lock est libéré ici
+
+                        let mut history_writer = self_clone.history.write().unwrap();
+
+                        // On ajoute autant de mesures que de slots écoulés pour ne pas fausser la moyenne.
+                        for _ in 0..slots_elapsed {
+                            if history_writer.len() == SLOT_HISTORY_SIZE {
+                                history_writer.pop_front();
+                            }
+                            history_writer.push_back(SlotTiming {
+                                duration_ms: avg_duration_for_period,
+                            });
+                        }
+                    }
+                    // --- FIN DE LA NOUVELLE LOGIQUE ---
 
                     // On met à jour le dernier état connu avec l'état actuel
                     *last_slot_writer = (*current_slot_state_arc).clone();
