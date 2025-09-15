@@ -11,3 +11,4 @@ pub mod state;
 pub mod strategies;
 pub mod filtering;
 pub mod rpc;
+pub mod monitoring;

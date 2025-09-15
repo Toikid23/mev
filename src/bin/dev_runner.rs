@@ -1,75 +1,69 @@
 // DANS : src/bin/dev_runner.rs
-use anyhow::Result;
-use solana_sdk::signature::Keypair;
-use solana_sdk::signer::Signer;
-use std::env;
-use mev::config::Config;
-use mev::rpc::ResilientRpcClient;
-use mev::decoders::{
-    meteora::{damm_v1, damm_v2, dlmm},
-    orca::whirlpool,
-    pump::amm,
-    raydium::{amm_v4, clmm, cpmm},
-};
-use mev::state::global_cache::get_cached_clock;
 
-// --- 2. REMPLACEZ L'ANCIENNE FONCTION get_timestamp ---
-async fn get_timestamp(rpc_client: &ResilientRpcClient) -> Result<i64> {
-    // La fonction devient une simple passe-plat vers notre logique de cache.
-    let clock = get_cached_clock(rpc_client).await?;
-    Ok(clock.unix_timestamp)
+use anyhow::Result;
+use std::time::{Duration, Instant};
+use tokio::time::sleep;
+use tracing::{error, info, instrument, warn};
+use mev::monitoring;
+
+/// Une fonction de travail simulée. L'attribut `#[instrument]`
+/// indique à `tracing` de créer une "span" pour cette fonction.
+/// Quand la fonction se termine, `tracing` enregistrera automatiquement
+/// sa durée d'exécution.
+#[instrument]
+async fn perform_dev_run_cycle(iteration: u64) {
+    info!(iteration, "Début du cycle de travail de simulation.");
+
+    // Simule un travail qui prend entre 1 et 3 secondes
+    let sleep_duration = Duration::from_millis(1000 + (iteration % 2000));
+    sleep(sleep_duration).await;
+
+    // Simule différents types de résultats pour générer différents niveaux de log
+    if iteration % 10 == 0 {
+        // Un log de niveau ERREUR, avec des champs structurés
+        error!(
+            iteration,
+            error_code = 500,
+            details = "Erreur de simulation volontaire",
+            "Échec critique du cycle de test !"
+        );
+    } else if iteration % 3 == 0 {
+        // Un log de niveau AVERTISSEMENT
+        warn!(
+            iteration,
+            latency_ms = sleep_duration.as_millis(),
+            "Le cycle de test a pris plus de temps que prévu."
+        );
+    } else {
+        // Un log de niveau INFORMATION
+        info!(iteration, "Cycle de travail de simulation terminé avec succès.");
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("--- Lancement du Banc d'Essai des Décodeurs ---");
-    let config = Config::load()?;
-    let rpc_client = ResilientRpcClient::new(config.solana_rpc_url, 3, 500);
+    // Étape 1: Initialiser le logging. C'est la TOUTE première chose à faire.
+    monitoring::logging::setup_logging();
 
-    let payer_keypair = Keypair::from_base58_string(&config.payer_private_key);
-    println!("-> Utilisation du portefeuille payeur : {}", payer_keypair.pubkey());
+    // Étape 2: Lancer le serveur de métriques en tâche de fond (dans un "thread" tokio).
+    tokio::spawn(monitoring::metrics::start_metrics_server());
 
-    // Cet appel va maintenant utiliser le cache !
-    let current_timestamp = get_timestamp(&rpc_client).await?;
-    println!("-> Timestamp du cluster utilisé pour tous les tests: {}", current_timestamp);
+    // On utilise `info!` au lieu de `println!`
+    info!("--- Lancement du Dev Runner (Mode Monitoring Test) ---");
 
-    let args: Vec<String> = env::args().skip(1).collect();
+    let mut iteration_count: u64 = 0;
+    loop {
+        let start_time = Instant::now();
 
-    if args.is_empty() || args.contains(&"all".to_string()) {
-        println!("Mode: Exécution de tous les tests.");
-        // Les appels aux fonctions de test ne changent pas, mais les fonctions elles-mêmes devront être mises à jour.
-        if let Err(e) = amm_v4::test::test_ammv4_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! AMMv4 a échoué: {}", e); }
-        if let Err(e) = cpmm::test::test_cpmm_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! CPMM a échoué: {}", e); }
-        if let Err(e) = clmm::test::test_clmm(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! CLMM a échoué: {}", e); }
-        if let Err(e) = damm_v1::test::test_damm_v1_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! Meteora DAMM v1 a échoué: {}", e); }
-        if let Err(e) = damm_v2::test::test_damm_v2_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! Meteora DAMM v2 a échoué: {}", e); }
-        if let Err(e) = dlmm::test::test_dlmm_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! DLMM a échoué: {}", e); }
-        if let Err(e) = whirlpool::test::test_whirlpool_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! Whirlpool a échoué: {}", e); }
-        if let Err(e) = amm::test::test_amm_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await { println!("!! pump.fun AMM a échoué: {}", e); }
+        // Étape 3: Exécuter notre logique de test
+        perform_dev_run_cycle(iteration_count).await;
 
-    } else {
-        println!("Mode: Exécution des tests spécifiques: {:?}", args);
-        for test_name in args {
-            let result = match test_name.as_str() {
-                "amm_v4" => amm_v4::test::test_ammv4_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await,
-                "cpmm" => cpmm::test::test_cpmm_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await,
-                "clmm" => clmm::test::test_clmm(&rpc_client, &payer_keypair, current_timestamp).await,
-                "damm_v1" => damm_v1::test::test_damm_v1_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await,
-                "damm_v2" => damm_v2::test::test_damm_v2_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await,
-                "dlmm" => dlmm::test::test_dlmm_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await,
-                "whirlpool" => whirlpool::test::test_whirlpool_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await,
-                "pump_amm" => amm::test::test_amm_with_simulation(&rpc_client, &payer_keypair, current_timestamp).await,
-                _ => {
-                    println!("!! Test inconnu: '{}'", test_name);
-                    continue;
-                }
-            };
-            if let Err(e) = result {
-                println!("!! Le test '{}' a échoué: {}", test_name, e);
-            }
-        }
+        // Étape 4: Mettre à jour nos métriques Prometheus
+        monitoring::metrics::DEV_RUNNER_ITERATIONS.inc(); // Incrémente le compteur
+        monitoring::metrics::DEV_RUNNER_CYCLE_LATENCY.observe(start_time.elapsed().as_secs_f64()); // Enregistre la durée
+
+        info!("Attente de 3 secondes avant le prochain cycle...");
+        sleep(Duration::from_secs(3)).await;
+        iteration_count += 1;
     }
-
-    println!("\n--- Banc d'essai terminé ---");
-    Ok(())
 }

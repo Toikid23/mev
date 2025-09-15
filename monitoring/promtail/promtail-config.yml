@@ -1,0 +1,21 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml # Fichier interne où Promtail note où il s'est arrêté de lire.
+
+clients:
+  # Dit à Promtail où se trouve le serveur Loki (le conteneur 'loki' sur le même réseau Docker).
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+# C'est la section qui nous intéresse le plus.
+- job_name: mev-bot-dev
+  static_configs:
+  - targets: [localhost]
+    labels:
+      job: mev-bot-dev-runner
+      # Ce chemin '/var/log/mev-bot/bot.log' est le chemin DANS le conteneur Promtail.
+      # Dans notre docker-compose.yml, nous avons mappé notre dossier local `logs` vers `/var/log/mev-bot`.
+      __path__: /var/log/mev-bot/bot.log
