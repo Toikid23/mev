@@ -59,8 +59,8 @@ async fn main() -> Result<()> {
         perform_dev_run_cycle(iteration_count).await;
 
         // Étape 4: Mettre à jour nos métriques Prometheus
-        monitoring::metrics::DEV_RUNNER_ITERATIONS.inc(); // Incrémente le compteur
-        monitoring::metrics::DEV_RUNNER_CYCLE_LATENCY.observe(start_time.elapsed().as_secs_f64()); // Enregistre la durée
+        //monitoring::metrics::DEV_RUNNER_ITERATIONS.inc(); // Incrémente le compteur
+        //monitoring::metrics::DEV_RUNNER_CYCLE_LATENCY.observe(start_time.elapsed().as_secs_f64()); // Enregistre la durée
 
         info!("Attente de 3 secondes avant le prochain cycle...");
         sleep(Duration::from_secs(3)).await;

@@ -1,3 +1,5 @@
+// DANS : src/rpc/resilient_client.rs
+
 use anyhow::{Context, Result};
 use solana_client::{client_error::{ClientError, ClientErrorKind}, nonblocking::rpc_client::RpcClient, rpc_config, rpc_response::{Response as RpcResponse, RpcSimulateTransactionResult}};
 use solana_sdk::{
@@ -7,14 +9,14 @@ use solana_sdk::{
 use solana_client::rpc_config::RpcTransactionConfig;
 use solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature;
 use solana_transaction_status::UiTransactionEncoding;
-use std::{sync::Arc, time::Duration};
+use std::{sync::Arc, time::{Duration, Instant}};
 use tokio::time::sleep;
 use rpc_config::RpcSimulateTransactionConfig;
 use solana_sdk::epoch_info::EpochInfo;
 use std::collections::HashMap;
+use tracing::warn;
+use crate::monitoring::metrics;
 
-/// Un "wrapper" autour du RpcClient de Solana qui ajoute une logique de
-/// ré-essai automatique pour les appels RPC qui échouent à cause d'erreurs réseau temporaires.
 #[derive(Clone)]
 pub struct ResilientRpcClient {
     client: Arc<RpcClient>,
@@ -23,7 +25,6 @@ pub struct ResilientRpcClient {
 }
 
 impl ResilientRpcClient {
-    /// Construit un nouveau client RPC résilient.
     pub fn new(rpc_url: String, max_retries: u8, delay_ms: u64) -> Self {
         Self {
             client: Arc::new(RpcClient::new(rpc_url)),
@@ -32,12 +33,10 @@ impl ResilientRpcClient {
         }
     }
 
-    /// Méthode "passe-plat" pour accéder à la configuration de commitment du client sous-jacent.
     pub fn commitment(&self) -> CommitmentConfig {
         self.client.commitment()
     }
 
-    /// Détermine si une erreur du client est temporaire et si une nouvelle tentative doit être effectuée.
     fn is_retryable(error: &ClientError) -> bool {
         matches!(
             error.kind,
@@ -45,16 +44,22 @@ impl ResilientRpcClient {
         )
     }
 
-    // --- MÉTHODES WRAPPÉES AVEC LOGIQUE DE RÉ-ESSAI ---
-
-    /// Récupère les données brutes d'un compte.
     pub async fn get_account_data(&self, pubkey: &Pubkey) -> Result<Vec<u8>> {
+        const METHOD_NAME: &str = "get_account_data";
         for attempt in 0..=self.max_retries {
-            match self.client.get_account_data(pubkey).await {
-                Ok(data) => return Ok(data),
+            let start_time = Instant::now();
+            let result = self.client.get_account_data(pubkey).await;
+            metrics::RPC_REQUEST_LATENCY.with_label_values(&[METHOD_NAME]).observe(start_time.elapsed().as_secs_f64());
+
+            match result {
+                Ok(data) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "success"]).inc();
+                    return Ok(data);
+                }
                 Err(e) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "failure"]).inc();
                     if Self::is_retryable(&e) && attempt < self.max_retries {
-                        // Log de l'erreur et de la nouvelle tentative
+                        warn!(attempt = attempt + 1, error = %e, pubkey = %pubkey, "Échec RPC (get_account_data), nouvelle tentative...");
                         sleep(Duration::from_millis(self.delay_ms)).await;
                     } else {
                         return Err(e).with_context(|| format!("Échec final de get_account_data pour {}", pubkey));
@@ -65,13 +70,22 @@ impl ResilientRpcClient {
         unreachable!()
     }
 
-    /// Récupère un compte complet.
     pub async fn get_account(&self, pubkey: &Pubkey) -> Result<Account> {
+        const METHOD_NAME: &str = "get_account";
         for attempt in 0..=self.max_retries {
-            match self.client.get_account(pubkey).await {
-                Ok(account) => return Ok(account),
+            let start_time = Instant::now();
+            let result = self.client.get_account(pubkey).await;
+            metrics::RPC_REQUEST_LATENCY.with_label_values(&[METHOD_NAME]).observe(start_time.elapsed().as_secs_f64());
+
+            match result {
+                Ok(account) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "success"]).inc();
+                    return Ok(account);
+                }
                 Err(e) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "failure"]).inc();
                     if Self::is_retryable(&e) && attempt < self.max_retries {
+                        warn!(attempt = attempt + 1, error = %e, pubkey = %pubkey, "Échec RPC (get_account), nouvelle tentative...");
                         sleep(Duration::from_millis(self.delay_ms)).await;
                     } else {
                         return Err(e).with_context(|| format!("Échec final de get_account pour {}", pubkey));
@@ -82,13 +96,22 @@ impl ResilientRpcClient {
         unreachable!()
     }
 
-    /// Récupère plusieurs comptes.
     pub async fn get_multiple_accounts(&self, pubkeys: &[Pubkey]) -> Result<Vec<Option<Account>>> {
+        const METHOD_NAME: &str = "get_multiple_accounts";
         for attempt in 0..=self.max_retries {
-            match self.client.get_multiple_accounts(pubkeys).await {
-                Ok(accounts) => return Ok(accounts),
+            let start_time = Instant::now();
+            let result = self.client.get_multiple_accounts(pubkeys).await;
+            metrics::RPC_REQUEST_LATENCY.with_label_values(&[METHOD_NAME]).observe(start_time.elapsed().as_secs_f64());
+
+            match result {
+                Ok(accounts) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "success"]).inc();
+                    return Ok(accounts);
+                }
                 Err(e) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "failure"]).inc();
                     if Self::is_retryable(&e) && attempt < self.max_retries {
+                        warn!(attempt = attempt + 1, error = %e, "Échec RPC (get_multiple_accounts), nouvelle tentative...");
                         sleep(Duration::from_millis(self.delay_ms)).await;
                     } else {
                         return Err(e).with_context(|| "Échec final de get_multiple_accounts");
@@ -99,13 +122,22 @@ impl ResilientRpcClient {
         unreachable!()
     }
 
-    /// Récupère le dernier blockhash.
     pub async fn get_latest_blockhash(&self) -> Result<solana_sdk::hash::Hash> {
+        const METHOD_NAME: &str = "get_latest_blockhash";
         for attempt in 0..=self.max_retries {
-            match self.client.get_latest_blockhash().await {
-                Ok(hash) => return Ok(hash),
+            let start_time = Instant::now();
+            let result = self.client.get_latest_blockhash().await;
+            metrics::RPC_REQUEST_LATENCY.with_label_values(&[METHOD_NAME]).observe(start_time.elapsed().as_secs_f64());
+
+            match result {
+                Ok(hash) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "success"]).inc();
+                    return Ok(hash);
+                }
                 Err(e) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "failure"]).inc();
                     if Self::is_retryable(&e) && attempt < self.max_retries {
+                        warn!(attempt = attempt + 1, error = %e, "Échec RPC (get_latest_blockhash), nouvelle tentative...");
                         sleep(Duration::from_millis(self.delay_ms)).await;
                     } else {
                         return Err(e).with_context(|| "Échec final de get_latest_blockhash");
@@ -116,13 +148,22 @@ impl ResilientRpcClient {
         unreachable!()
     }
 
-    /// Envoie et confirme une transaction.
     pub async fn send_and_confirm_transaction(&self, transaction: &VersionedTransaction) -> Result<Signature> {
+        const METHOD_NAME: &str = "send_and_confirm_transaction";
         for attempt in 0..=self.max_retries {
-            match self.client.send_and_confirm_transaction(transaction).await {
-                Ok(signature) => return Ok(signature),
+            let start_time = Instant::now();
+            let result = self.client.send_and_confirm_transaction(transaction).await;
+            metrics::RPC_REQUEST_LATENCY.with_label_values(&[METHOD_NAME]).observe(start_time.elapsed().as_secs_f64());
+
+            match result {
+                Ok(signature) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "success"]).inc();
+                    return Ok(signature);
+                }
                 Err(e) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "failure"]).inc();
                     if Self::is_retryable(&e) && attempt < self.max_retries {
+                        warn!(attempt = attempt + 1, error = %e, "Échec RPC (send_and_confirm_transaction), nouvelle tentative...");
                         sleep(Duration::from_millis(self.delay_ms)).await;
                     } else {
                         return Err(e).with_context(|| "Échec final de send_and_confirm_transaction");
@@ -133,13 +174,22 @@ impl ResilientRpcClient {
         unreachable!()
     }
 
-    /// Simule une transaction.
     pub async fn simulate_transaction(&self, transaction: &VersionedTransaction) -> Result<RpcResponse<RpcSimulateTransactionResult>> {
+        const METHOD_NAME: &str = "simulate_transaction";
         for attempt in 0..=self.max_retries {
-            match self.client.simulate_transaction(transaction).await {
-                Ok(response) => return Ok(response),
+            let start_time = Instant::now();
+            let result = self.client.simulate_transaction(transaction).await;
+            metrics::RPC_REQUEST_LATENCY.with_label_values(&[METHOD_NAME]).observe(start_time.elapsed().as_secs_f64());
+
+            match result {
+                Ok(response) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "success"]).inc();
+                    return Ok(response);
+                }
                 Err(e) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "failure"]).inc();
                     if Self::is_retryable(&e) && attempt < self.max_retries {
+                        warn!(attempt = attempt + 1, error = %e, "Échec RPC (simulate_transaction), nouvelle tentative...");
                         sleep(Duration::from_millis(self.delay_ms)).await;
                     } else {
                         return Err(e).with_context(|| "Échec final de simulate_transaction");
@@ -150,28 +200,25 @@ impl ResilientRpcClient {
         unreachable!()
     }
 
-    pub async fn get_program_accounts_with_config(
-        &self,
-        program_id: &Pubkey,
-        config: solana_client::rpc_config::RpcProgramAccountsConfig,
-    ) -> Result<Vec<(Pubkey, Account)>> {
+    pub async fn get_program_accounts_with_config(&self, program_id: &Pubkey, config: solana_client::rpc_config::RpcProgramAccountsConfig) -> Result<Vec<(Pubkey, Account)>> {
+        const METHOD_NAME: &str = "get_program_accounts_with_config";
         for attempt in 0..=self.max_retries {
-            match self
-                .client
-                .get_program_accounts_with_config(program_id, config.clone())
-                .await
-            {
-                Ok(accounts) => return Ok(accounts),
+            let start_time = Instant::now();
+            let result = self.client.get_program_accounts_with_config(program_id, config.clone()).await;
+            metrics::RPC_REQUEST_LATENCY.with_label_values(&[METHOD_NAME]).observe(start_time.elapsed().as_secs_f64());
+
+            match result {
+                Ok(accounts) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "success"]).inc();
+                    return Ok(accounts);
+                }
                 Err(e) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "failure"]).inc();
                     if Self::is_retryable(&e) && attempt < self.max_retries {
+                        warn!(attempt = attempt + 1, error = %e, program_id = %program_id, "Échec RPC (get_program_accounts_with_config), nouvelle tentative...");
                         sleep(Duration::from_millis(self.delay_ms)).await;
                     } else {
-                        return Err(e).with_context(|| {
-                            format!(
-                                "Échec final de get_program_accounts_with_config pour le programme {}",
-                                program_id
-                            )
-                        });
+                        return Err(e).with_context(|| format!("Échec final de get_program_accounts_with_config pour le programme {}", program_id));
                     }
                 }
             }
@@ -179,24 +226,25 @@ impl ResilientRpcClient {
         unreachable!()
     }
 
-    pub async fn simulate_transaction_with_config(
-        &self,
-        transaction: &VersionedTransaction,
-        config: RpcSimulateTransactionConfig,
-    ) -> Result<RpcResponse<RpcSimulateTransactionResult>> {
+    pub async fn simulate_transaction_with_config(&self, transaction: &VersionedTransaction, config: RpcSimulateTransactionConfig) -> Result<RpcResponse<RpcSimulateTransactionResult>> {
+        const METHOD_NAME: &str = "simulate_transaction_with_config";
         for attempt in 0..=self.max_retries {
-            match self
-                .client
-                .simulate_transaction_with_config(transaction, config.clone())
-                .await
-            {
-                Ok(response) => return Ok(response),
+            let start_time = Instant::now();
+            let result = self.client.simulate_transaction_with_config(transaction, config.clone()).await;
+            metrics::RPC_REQUEST_LATENCY.with_label_values(&[METHOD_NAME]).observe(start_time.elapsed().as_secs_f64());
+
+            match result {
+                Ok(response) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "success"]).inc();
+                    return Ok(response);
+                }
                 Err(e) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "failure"]).inc();
                     if Self::is_retryable(&e) && attempt < self.max_retries {
+                        warn!(attempt = attempt + 1, error = %e, "Échec RPC (simulate_transaction_with_config), nouvelle tentative...");
                         sleep(Duration::from_millis(self.delay_ms)).await;
                     } else {
-                        return Err(e)
-                            .with_context(|| "Échec final de simulate_transaction_with_config");
+                        return Err(e).with_context(|| "Échec final de simulate_transaction_with_config");
                     }
                 }
             }
@@ -204,19 +252,25 @@ impl ResilientRpcClient {
         unreachable!()
     }
 
-    pub async fn get_recent_prioritization_fees(
-        &self,
-        accounts: &[Pubkey],
-    ) -> Result<Vec<solana_client::rpc_response::RpcPrioritizationFee>> {
+    pub async fn get_recent_prioritization_fees(&self, accounts: &[Pubkey]) -> Result<Vec<solana_client::rpc_response::RpcPrioritizationFee>> {
+        const METHOD_NAME: &str = "get_recent_prioritization_fees";
         for attempt in 0..=self.max_retries {
-            match self.client.get_recent_prioritization_fees(accounts).await {
-                Ok(fees) => return Ok(fees),
+            let start_time = Instant::now();
+            let result = self.client.get_recent_prioritization_fees(accounts).await;
+            metrics::RPC_REQUEST_LATENCY.with_label_values(&[METHOD_NAME]).observe(start_time.elapsed().as_secs_f64());
+
+            match result {
+                Ok(fees) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "success"]).inc();
+                    return Ok(fees);
+                }
                 Err(e) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "failure"]).inc();
                     if Self::is_retryable(&e) && attempt < self.max_retries {
+                        warn!(attempt = attempt + 1, error = %e, "Échec RPC (get_recent_prioritization_fees), nouvelle tentative...");
                         sleep(Duration::from_millis(self.delay_ms)).await;
                     } else {
-                        return Err(e)
-                            .with_context(|| "Échec final de get_recent_prioritization_fees");
+                        return Err(e).with_context(|| "Échec final de get_recent_prioritization_fees");
                     }
                 }
             }
@@ -224,12 +278,22 @@ impl ResilientRpcClient {
         unreachable!()
     }
 
-    pub async fn get_epoch_info(&self) -> Result<EpochInfo> { // MODIFIÉ : Le type de retour est solana_sdk::epoch_info::EpochInfo
+    pub async fn get_epoch_info(&self) -> Result<EpochInfo> {
+        const METHOD_NAME: &str = "get_epoch_info";
         for attempt in 0..=self.max_retries {
-            match self.client.get_epoch_info().await {
-                Ok(info) => return Ok(info),
+            let start_time = Instant::now();
+            let result = self.client.get_epoch_info().await;
+            metrics::RPC_REQUEST_LATENCY.with_label_values(&[METHOD_NAME]).observe(start_time.elapsed().as_secs_f64());
+
+            match result {
+                Ok(info) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "success"]).inc();
+                    return Ok(info);
+                }
                 Err(e) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "failure"]).inc();
                     if Self::is_retryable(&e) && attempt < self.max_retries {
+                        warn!(attempt = attempt + 1, error = %e, "Échec RPC (get_epoch_info), nouvelle tentative...");
                         sleep(Duration::from_millis(self.delay_ms)).await;
                     } else {
                         return Err(e).with_context(|| "Échec final de get_epoch_info");
@@ -240,16 +304,22 @@ impl ResilientRpcClient {
         unreachable!()
     }
 
-    // MODIFIÉ : Le type de retour est un HashMap brut, comme retourné par le client RPC
-    pub async fn get_leader_schedule(
-        &self,
-        epoch: Option<u64>,
-    ) -> Result<Option<HashMap<String, Vec<usize>>>> {
+    pub async fn get_leader_schedule(&self, epoch: Option<u64>) -> Result<Option<HashMap<String, Vec<usize>>>> {
+        const METHOD_NAME: &str = "get_leader_schedule";
         for attempt in 0..=self.max_retries {
-            match self.client.get_leader_schedule(epoch).await {
-                Ok(schedule) => return Ok(schedule),
+            let start_time = Instant::now();
+            let result = self.client.get_leader_schedule(epoch).await;
+            metrics::RPC_REQUEST_LATENCY.with_label_values(&[METHOD_NAME]).observe(start_time.elapsed().as_secs_f64());
+
+            match result {
+                Ok(schedule) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "success"]).inc();
+                    return Ok(schedule);
+                }
                 Err(e) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "failure"]).inc();
                     if Self::is_retryable(&e) && attempt < self.max_retries {
+                        warn!(attempt = attempt + 1, error = %e, "Échec RPC (get_leader_schedule), nouvelle tentative...");
                         sleep(Duration::from_millis(self.delay_ms)).await;
                     } else {
                         return Err(e).with_context(|| "Échec final de get_leader_schedule");
@@ -260,14 +330,22 @@ impl ResilientRpcClient {
         unreachable!()
     }
 
-    pub async fn get_vote_accounts(
-        &self,
-    ) -> Result<solana_client::rpc_response::RpcVoteAccountStatus> {
+    pub async fn get_vote_accounts(&self) -> Result<solana_client::rpc_response::RpcVoteAccountStatus> {
+        const METHOD_NAME: &str = "get_vote_accounts";
         for attempt in 0..=self.max_retries {
-            match self.client.get_vote_accounts().await {
-                Ok(accounts) => return Ok(accounts),
+            let start_time = Instant::now();
+            let result = self.client.get_vote_accounts().await;
+            metrics::RPC_REQUEST_LATENCY.with_label_values(&[METHOD_NAME]).observe(start_time.elapsed().as_secs_f64());
+
+            match result {
+                Ok(accounts) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "success"]).inc();
+                    return Ok(accounts);
+                }
                 Err(e) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "failure"]).inc();
                     if Self::is_retryable(&e) && attempt < self.max_retries {
+                        warn!(attempt = attempt + 1, error = %e, "Échec RPC (get_vote_accounts), nouvelle tentative...");
                         sleep(Duration::from_millis(self.delay_ms)).await;
                     } else {
                         return Err(e).with_context(|| "Échec final de get_vote_accounts");
@@ -277,25 +355,27 @@ impl ResilientRpcClient {
         }
         unreachable!()
     }
-    pub async fn get_signatures_for_address_with_limit(
-        &self,
-        address: &Pubkey,
-        limit: usize,
-    ) -> Result<Vec<RpcConfirmedTransactionStatusWithSignature>> {
+
+    pub async fn get_signatures_for_address_with_limit(&self, address: &Pubkey, limit: usize) -> Result<Vec<RpcConfirmedTransactionStatusWithSignature>> {
+        const METHOD_NAME: &str = "get_signatures_for_address";
         for attempt in 0..=self.max_retries {
-            // Étape 1 : On appelle la fonction de base qui fonctionne toujours.
-            match self.client.get_signatures_for_address(address).await {
+            let start_time = Instant::now();
+            let result = self.client.get_signatures_for_address(address).await;
+            metrics::RPC_REQUEST_LATENCY.with_label_values(&[METHOD_NAME]).observe(start_time.elapsed().as_secs_f64());
+
+            match result {
                 Ok(mut signatures) => {
-                    // Étape 2 : On tronque manuellement le résultat à la limite souhaitée.
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "success"]).inc();
                     signatures.truncate(limit);
                     return Ok(signatures);
                 }
                 Err(e) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "failure"]).inc();
                     if Self::is_retryable(&e) && attempt < self.max_retries {
+                        warn!(attempt = attempt + 1, error = %e, address = %address, "Échec RPC (get_signatures_for_address), nouvelle tentative...");
                         sleep(Duration::from_millis(self.delay_ms)).await;
                     } else {
-                        return Err(e)
-                            .with_context(|| "Échec final de get_signatures_for_address");
+                        return Err(e).with_context(|| "Échec final de get_signatures_for_address");
                     }
                 }
             }
@@ -303,13 +383,8 @@ impl ResilientRpcClient {
         unreachable!()
     }
 
-    // <-- MÉTHODE 2 CORRIGÉE
-    pub async fn get_transaction(
-        &self,
-        signature: &Signature,
-        // La config est maintenant un UiTransactionEncoding
-        encoding: Option<UiTransactionEncoding>,
-    ) -> Result<solana_transaction_status::EncodedConfirmedTransactionWithStatusMeta> {
+    pub async fn get_transaction(&self, signature: &Signature, encoding: Option<UiTransactionEncoding>) -> Result<solana_transaction_status::EncodedConfirmedTransactionWithStatusMeta> {
+        const METHOD_NAME: &str = "get_transaction";
         let config = RpcTransactionConfig {
             encoding,
             commitment: Some(self.commitment()),
@@ -317,10 +392,19 @@ impl ResilientRpcClient {
         };
 
         for attempt in 0..=self.max_retries {
-            match self.client.get_transaction_with_config(signature, config).await {
-                Ok(tx) => return Ok(tx),
+            let start_time = Instant::now();
+            let result = self.client.get_transaction_with_config(signature, config).await;
+            metrics::RPC_REQUEST_LATENCY.with_label_values(&[METHOD_NAME]).observe(start_time.elapsed().as_secs_f64());
+
+            match result {
+                Ok(tx) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "success"]).inc();
+                    return Ok(tx);
+                }
                 Err(e) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "failure"]).inc();
                     if Self::is_retryable(&e) && attempt < self.max_retries {
+                        warn!(attempt = attempt + 1, error = %e, signature = %signature, "Échec RPC (get_transaction), nouvelle tentative...");
                         sleep(Duration::from_millis(self.delay_ms)).await;
                     } else {
                         return Err(e).with_context(|| "Échec final de get_transaction");
@@ -331,13 +415,22 @@ impl ResilientRpcClient {
         unreachable!()
     }
 
-    // <-- NOUVELLE MÉTHODE 3 (pour la création de la LUT)
     pub async fn get_slot(&self) -> Result<u64> {
+        const METHOD_NAME: &str = "get_slot";
         for attempt in 0..=self.max_retries {
-            match self.client.get_slot().await {
-                Ok(slot) => return Ok(slot),
+            let start_time = Instant::now();
+            let result = self.client.get_slot().await;
+            metrics::RPC_REQUEST_LATENCY.with_label_values(&[METHOD_NAME]).observe(start_time.elapsed().as_secs_f64());
+
+            match result {
+                Ok(slot) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "success"]).inc();
+                    return Ok(slot);
+                }
                 Err(e) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "failure"]).inc();
                     if Self::is_retryable(&e) && attempt < self.max_retries {
+                        warn!(attempt = attempt + 1, error = %e, "Échec RPC (get_slot), nouvelle tentative...");
                         sleep(Duration::from_millis(self.delay_ms)).await;
                     } else {
                         return Err(e).with_context(|| "Échec final de get_slot");
@@ -348,4 +441,3 @@ impl ResilientRpcClient {
         unreachable!()
     }
 }
-

@@ -1,6 +1,16 @@
 version: '3.8'
 
 services:
+
+
+  process-exporter:
+    image: ncabatoff/process-exporter
+    container_name: process-exporter
+    command: -procnames execution_bot
+    pid: "host" # Permet au conteneur de voir les processus de la machine hôte
+    ports: [ "9256:9256" ]
+
+
   prometheus:
     image: prom/prometheus:latest
     container_name: prometheus

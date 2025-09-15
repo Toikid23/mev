@@ -17,8 +17,8 @@ pub struct SimulationResult {
     pub priority_fees: Vec<RpcPrioritizationFee>,
 }
 
-/// Extrait le profit réalisé à partir des logs d'une simulation réussie.
-pub fn parse_profit_from_logs(logs: &[String]) -> Option<u64> {
+/// Extrait le profit réalisé à partir des logs d'une transaction (simulée ou réelle).
+pub fn parse_realized_profit_from_logs(logs: &[String]) -> Option<u64> { // <-- RENOMMÉE
     let prefix = "Program log: SUCCÈS ! Profit net réalisé: ";
     for log in logs {
         if let Some(profit_str) = log.strip_prefix(prefix) {
@@ -68,7 +68,7 @@ pub async fn run_simulations(
     let compute_units = sim_value.units_consumed.unwrap_or(0);
     let logs = sim_value.logs.unwrap_or_default();
 
-    let profit_brut_reel = parse_profit_from_logs(&logs)
+    let profit_brut_reel = parse_realized_profit_from_logs(&logs)
         .ok_or_else(|| anyhow!("ERREUR : Impossible d'extraire le profit des logs de simulation."))?;
 
     println!("     -> Profit Brut Réel (simulé) : {} lamports", profit_brut_reel);

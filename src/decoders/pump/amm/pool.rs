@@ -14,6 +14,9 @@ use crate::decoders::spl_token_decoders::mint::DecodedMint;
 use crate::rpc::ResilientRpcClient;
 use crate::state::global_cache::{CacheableData, GLOBAL_CACHE};
 use anyhow::Context;
+use crate::monitoring::metrics;
+use std::time::Instant;
+use tracing::debug;
 
 // --- CONSTANTES ---
 pub const PUMP_PROGRAM_ID: Pubkey = solana_sdk::pubkey!("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA");
@@ -228,6 +231,10 @@ impl PoolOperations for DecodedPumpAmmPool {
     fn address(&self) -> Pubkey { self.address }
 
     fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<QuoteResult> {
+
+        let start_time = Instant::now();
+        debug!(amount_in, "Calcul de get_quote_with_details pour Pump AMM");
+
         let is_buy = *token_in_mint == self.mint_b;
         let fees = compute_fees_bps(self, self.mint_a_decoded.supply, amount_in)?;
 
@@ -257,6 +264,8 @@ impl PoolOperations for DecodedPumpAmmPool {
             (amount_out, total_fee as u64)
         };
 
+        metrics::GET_QUOTE_LATENCY.with_label_values(&["PumpAmm"]).observe(start_time.elapsed().as_secs_f64());
+
         // <-- MODIFIÉ : Encapsulation dans QuoteResult
         Ok(QuoteResult {
             amount_out: final_amount_out,
@@ -266,6 +275,10 @@ impl PoolOperations for DecodedPumpAmmPool {
     }
 
     fn get_required_input(&mut self, token_out_mint: &Pubkey, amount_out: u64, _current_timestamp: i64) -> Result<u64> {
+
+        let start_time = Instant::now();
+        debug!(amount_out, "Calcul de get_required_input pour Pump AMM");
+
         if amount_out == 0 { return Ok(0); }
         let is_buy = *token_out_mint == self.mint_a;
         if !is_buy { return Err(anyhow!("get_required_input pour pump.fun est optimisé pour les achats.")); }
@@ -309,6 +322,8 @@ impl PoolOperations for DecodedPumpAmmPool {
         println!("  - Multiplicateur de coût total (bps): {}", 10000 + total_fee_bps);
         println!("  - Coût Total PRÉDIT    : {}", final_total_cost);
         println!("------------------------------------");
+
+        metrics::GET_QUOTE_LATENCY.with_label_values(&["PumpAmm_required_input"]).observe(start_time.elapsed().as_secs_f64());
 
         Ok(final_total_cost as u64)
     }

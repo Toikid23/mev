@@ -20,6 +20,9 @@ use crate::decoders::orca::whirlpool::math::U256;
 use crate::rpc::ResilientRpcClient;
 use crate::state::global_cache::{CacheableData, GLOBAL_CACHE};
 use anyhow::Context;
+use crate::monitoring::metrics;
+use std::time::Instant;
+use tracing::debug;
 
 // --- STRUCTURES (Inchangées) ---
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -414,6 +417,10 @@ impl PoolOperations for DecodedClmmPool {
     fn address(&self) -> Pubkey { self.address }
 
     fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<QuoteResult> {
+
+        let start_time = Instant::now();
+        debug!(amount_in, "Calcul de get_quote_with_details pour Raydium CLMM");
+
         let is_base_input = *token_in_mint == self.mint_a;
         let (in_mint_fee_bps, in_mint_max_fee, out_mint_fee_bps, out_mint_max_fee) = if is_base_input {
             (self.mint_a_transfer_fee_bps, self.mint_a_max_transfer_fee, self.mint_b_transfer_fee_bps, self.mint_b_max_transfer_fee)
@@ -429,6 +436,8 @@ impl PoolOperations for DecodedClmmPool {
 
         let fee_on_output = calculate_transfer_fee(gross_amount_out, out_mint_fee_bps, out_mint_max_fee)?;
 
+        metrics::GET_QUOTE_LATENCY.with_label_values(&["RaydiumCLMM"]).observe(start_time.elapsed().as_secs_f64());
+
         Ok(QuoteResult {
             amount_out: gross_amount_out.saturating_sub(fee_on_output),
             fee: trade_fee,
@@ -438,6 +447,10 @@ impl PoolOperations for DecodedClmmPool {
 
 
     fn get_required_input(&mut self, token_out_mint: &Pubkey, amount_out: u64, _current_timestamp: i64) -> Result<u64> {
+
+        let start_time = Instant::now();
+        debug!(amount_out, "Calcul de get_required_input pour Raydium CLMM");
+
         if amount_out == 0 { return Ok(0); }
         let tick_arrays = self.tick_arrays.as_ref().ok_or_else(|| anyhow!("Pool not hydrated."))?;
         if tick_arrays.is_empty() || self.liquidity == 0 {
@@ -509,8 +522,16 @@ impl PoolOperations for DecodedClmmPool {
             FEE_RATE_DENOMINATOR_VALUE - self.trade_fee_rate as u64
         ).ok_or_else(|| anyhow!("Math overflow"))?;
 
-        calculate_gross_amount_before_transfer_fee(amount_in_after_transfer_fee, in_mint_fee_bps, in_mint_max_fee)
+        // 1. On stocke le résultat du calcul dans une variable `result`
+        let result = calculate_gross_amount_before_transfer_fee(amount_in_after_transfer_fee, in_mint_fee_bps, in_mint_max_fee);
+
+        // 2. MAINTENANT, on peut enregistrer la métrique
+        metrics::GET_QUOTE_LATENCY.with_label_values(&["RaydiumCLMM_required_input"]).observe(start_time.elapsed().as_secs_f64());
+
+        // 3. Et enfin, on retourne le résultat qu'on a stocké
+        result
     }
+
 
     fn update_from_account_data(&mut self, _account_pubkey: &Pubkey, account_data: &[u8]) -> Result<()> {
         // On réutilise notre décodeur spécifique à Raydium CLMM.

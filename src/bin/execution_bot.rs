@@ -20,6 +20,7 @@ use mev::{
     },
     strategies::spatial::{find_spatial_arbitrage, ArbitrageOpportunity},
 };
+use chrono::Utc;
 use solana_address_lookup_table_program::state::AddressLookupTable;
 use solana_sdk::{
     message::AddressLookupTableAccount as SdkAddressLookupTableAccount, pubkey::Pubkey,
@@ -31,7 +32,7 @@ use std::{
     fs,
     io::Read,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::{Mutex, watch}; // <-- NOUVEL IMPORT
 use yellowstone_grpc_client::GeyserGrpcClient;
@@ -41,6 +42,8 @@ use yellowstone_grpc_proto::prelude::{
 };
 use spl_associated_token_account::instruction::create_associated_token_account;
 use solana_sdk::transaction::VersionedTransaction;
+use tracing::{info, warn, error, instrument};
+use mev::monitoring::metrics;
 
 
 const MANAGED_LUT_ADDRESS: &str = "E5h798UBdK8V1L7MvRfi1ppr2vitPUUUUCVqvTyDgKXN";
@@ -244,6 +247,10 @@ impl DataProducer {
                     }
                 }
                 message_result = stream.next() => {
+
+                    metrics::GEYSER_MESSAGES_RECEIVED.inc();
+                    metrics::GEYSER_LAST_MESSAGE_TIMESTAMP.set(Utc::now().timestamp());
+
                     let message = match message_result { Some(res) => res?, None => break };
                     if let Some(UpdateOneof::Account(account_update)) = message.update_oneof {
                         let rpc_account = account_update.account.context("Message Geyser sans données de compte")?;
@@ -320,20 +327,21 @@ async fn analysis_worker(
                     temp_graph_for_processing.add_pool_to_graph(new_buy);
                     temp_graph_for_processing.add_pool_to_graph(new_sell);
 
-                    if let Err(e) = process_opportunity(
+                    // --- MODIFIÉ ---
+                    process_opportunity(
                         rehydrated_opp, Arc::new(temp_graph_for_processing), rpc_client.clone(), payer.insecure_clone(), &fee_manager,
                         slot_tracker.clone(), slot_metronome.clone(), leader_schedule_tracker.clone(), validator_intel.clone()
-                    ).await {
-                        println!("[Worker {}] Erreur Traitement: {}", id, e);
-                    }
+                    ).await;
+                    // --- FIN DE LA MODIFICATION ---
 
-                } else if let Err(e) = process_opportunity(
-                    opp, graph_snapshot.clone(), rpc_client.clone(), payer.insecure_clone(), &fee_manager,
-                    slot_tracker.clone(), slot_metronome.clone(), leader_schedule_tracker.clone(), validator_intel.clone()
-                ).await {
-                    println!("[Worker {}] Erreur Traitement: {}", id, e);
+                } else {
+                    // --- MODIFIÉ ---
+                    process_opportunity(
+                        opp, graph_snapshot.clone(), rpc_client.clone(), payer.insecure_clone(), &fee_manager,
+                        slot_tracker.clone(), slot_metronome.clone(), leader_schedule_tracker.clone(), validator_intel.clone()
+                    ).await;
+                    // --- FIN DE LA MODIFICATION ---
                 }
-
 
                 currently_processing.lock().await.remove(&opportunity_id);
             }
@@ -361,7 +369,16 @@ async fn rehydrate_if_clmm(pool: Pool, rpc_client: &Arc<ResilientRpcClient>) -> 
 }
 
 
-// MODIFIÉ : la fonction prend `Arc<Graph>` car le snapshot est immuable
+#[instrument(
+    name = "process_opportunity",
+    skip_all,
+    fields(
+        opportunity_id = format!("{}-{}", opportunity.pool_buy_from_key, opportunity.pool_sell_to_key),
+        profit_estimation_lamports = opportunity.profit_in_lamports,
+        outcome = "pending",
+        decision = "N/A"
+    )
+)]
 async fn process_opportunity(
     opportunity: ArbitrageOpportunity,
     graph: Arc<Graph>,
@@ -372,73 +389,153 @@ async fn process_opportunity(
     slot_metronome: Arc<SlotMetronome>,
     leader_schedule_tracker: Arc<LeaderScheduleTracker>,
     validator_intel: Arc<ValidatorIntelService>,
-) -> Result<()> {
+) {
+    let start_time = Instant::now();
+    let current_span = tracing::Span::current();
 
-    // --- PHASE 1: Estimation Locale (INCHANGÉE) ---
-    println!("\n--- [Phase 1] Estimation locale de l'opportunité ---");
-    let pool_buy_from = graph.pools.get(&opportunity.pool_buy_from_key).context("Pool (buy) non trouvé")?.clone();
-    let pool_sell_to = graph.pools.get(&opportunity.pool_sell_to_key).context("Pool (sell) non trouvé")?.clone();
-    let current_timestamp = slot_tracker.current().clock.unix_timestamp;
-    let quote_buy_details = pool_buy_from.get_quote_with_details(&opportunity.token_in_mint, opportunity.amount_in, current_timestamp)?;
-    let quote_sell_details = pool_sell_to.get_quote_with_details(&opportunity.token_intermediate_mint, quote_buy_details.amount_out, current_timestamp)?;
-    let profit_brut_estime = quote_sell_details.amount_out.saturating_sub(opportunity.amount_in);
-    if profit_brut_estime < 50000 { return Ok(()); }
-    println!("     -> Profit Brut Estimé (local) : {} lamports", profit_brut_estime);
-    let estimated_cus = cu_manager::estimate_arbitrage_cost(&pool_buy_from, quote_buy_details.ticks_crossed, &pool_sell_to, quote_sell_details.ticks_crossed);
-    println!("     -> Coût estimé en Compute Units: {}", estimated_cus);
-
-    // --- PHASE 2: Calcul des Protections (INCHANGÉE) ---
-    println!("\n--- [Phase 2] Calcul des protections ---");
-    let protections = protections::calculate_slippage_protections(
-        opportunity.amount_in,
-        profit_brut_estime,
-        pool_sell_to.clone(),
-        &opportunity.token_intermediate_mint,
-        current_timestamp,
-    )?;
-
-    // --- PHASE 3: Analyse de Routage et Décision (INCHANGÉE) ---
-    println!("\n--- [Phase 3] Analyse de routage et décision d'envoi ---");
-
-    let managed_lut_address = Pubkey::from_str(MANAGED_LUT_ADDRESS)?;
-    let lut_account_data = rpc_client.get_account_data(&managed_lut_address).await
-        .context(format!("Le compte de la LUT ({}) n'a pas été trouvé.", MANAGED_LUT_ADDRESS))?;
-    let lut_ref = AddressLookupTable::deserialize(&lut_account_data)?;
-    let owned_lookup_table = SdkAddressLookupTableAccount {
-        key: managed_lut_address,
-        addresses: lut_ref.addresses.to_vec(),
+    // --- PHASE 1: Estimation Locale ---
+    info!("Début du traitement de l'opportunité.");
+    let pool_buy_from = match graph.pools.get(&opportunity.pool_buy_from_key) {
+        Some(p) => p.clone(),
+        None => {
+            error!("Pool (buy) non trouvé dans le graphe.");
+            current_span.record("outcome", "InternalError");
+            metrics::TRANSACTION_OUTCOMES.with_label_values(&["InternalError"]).inc();
+            metrics::PROCESS_OPPORTUNITY_LATENCY.observe(start_time.elapsed().as_secs_f64()); // <-- AJOUTÉ
+            return;
+        }
     };
+    let pool_sell_to = match graph.pools.get(&opportunity.pool_sell_to_key) {
+        Some(p) => p.clone(),
+        None => {
+            error!("Pool (sell) non trouvé dans le graphe.");
+            current_span.record("outcome", "InternalError");
+            metrics::TRANSACTION_OUTCOMES.with_label_values(&["InternalError"]).inc();
+            metrics::PROCESS_OPPORTUNITY_LATENCY.observe(start_time.elapsed().as_secs_f64()); // <-- AJOUTÉ
+            return;
+        }
+    };
+
+    let current_timestamp = slot_tracker.current().clock.unix_timestamp;
+    let quote_buy_details = match pool_buy_from.get_quote_with_details(&opportunity.token_in_mint, opportunity.amount_in, current_timestamp) {
+        Ok(q) => q,
+        Err(e) => {
+            warn!(error = %e, "Échec du calcul de quote (buy). Abandon.");
+            current_span.record("outcome", "QuoteError");
+            metrics::TRANSACTION_OUTCOMES.with_label_values(&["QuoteError"]).inc();
+            metrics::PROCESS_OPPORTUNITY_LATENCY.observe(start_time.elapsed().as_secs_f64()); // <-- AJOUTÉ
+            return;
+        }
+    };
+    let quote_sell_details = match pool_sell_to.get_quote_with_details(&opportunity.token_intermediate_mint, quote_buy_details.amount_out, current_timestamp) {
+        Ok(q) => q,
+        Err(e) => {
+            warn!(error = %e, "Échec du calcul de quote (sell). Abandon.");
+            current_span.record("outcome", "QuoteError");
+            metrics::TRANSACTION_OUTCOMES.with_label_values(&["QuoteError"]).inc();
+            metrics::PROCESS_OPPORTUNITY_LATENCY.observe(start_time.elapsed().as_secs_f64()); // <-- AJOUTÉ
+            return;
+        }
+    };
+
+    let profit_brut_estime = quote_sell_details.amount_out.saturating_sub(opportunity.amount_in);
+    if profit_brut_estime < 50000 {
+        info!(profit = profit_brut_estime, "Abandon. Profit brut estimé insuffisant.");
+        current_span.record("outcome", "Abandoned_ProfitTooLow");
+        metrics::TRANSACTION_OUTCOMES.with_label_values(&["Abandoned_ProfitTooLow"]).inc();
+        metrics::PROCESS_OPPORTUNITY_LATENCY.observe(start_time.elapsed().as_secs_f64()); // <-- AJOUTÉ
+        return;
+    }
+    let estimated_cus = cu_manager::estimate_arbitrage_cost(&pool_buy_from, quote_buy_details.ticks_crossed, &pool_sell_to, quote_sell_details.ticks_crossed);
+    info!(profit_brut_estime, estimated_cus, "Estimation locale terminée.");
+
+    // --- PHASE 2: Calcul des Protections ---
+    let protections = match protections::calculate_slippage_protections(
+        opportunity.amount_in, profit_brut_estime, pool_sell_to.clone(),
+        &opportunity.token_intermediate_mint, current_timestamp,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(error = %e, "Échec du calcul des protections. Abandon.");
+            current_span.record("outcome", "ProtectionError");
+            metrics::TRANSACTION_OUTCOMES.with_label_values(&["ProtectionError"]).inc();
+            metrics::PROCESS_OPPORTUNITY_LATENCY.observe(start_time.elapsed().as_secs_f64()); // <-- AJOUTÉ
+            return;
+        }
+    };
+
+    // --- PHASE 3: Analyse de Routage et Décision ---
+    let managed_lut_address = match Pubkey::from_str(MANAGED_LUT_ADDRESS) {
+        Ok(addr) => addr,
+        Err(_) => {
+            error!("Adresse de LUT invalide dans le code source.");
+            return;
+        }
+    };
+    let lut_account_data = match rpc_client.get_account_data(&managed_lut_address).await {
+        Ok(data) => data,
+        Err(e) => {
+            error!(error = %e, "Le compte de la LUT n'a pas été trouvé.");
+            return;
+        }
+    };
+    let lut_ref = match AddressLookupTable::deserialize(&lut_account_data) {
+        Ok(table) => table,
+        Err(e) => {
+            error!(error = %e, "Échec de la désérialisation de la LUT.");
+            return;
+        }
+    };
+    let owned_lookup_table = SdkAddressLookupTableAccount { key: managed_lut_address, addresses: lut_ref.addresses.to_vec() };
 
     let current_slot = slot_tracker.current().clock.slot;
     let time_remaining_in_slot = slot_metronome.estimated_time_remaining_in_slot_ms();
-    let (target_slot, leader_identity) = if time_remaining_in_slot > BOT_PROCESSING_TIME_MS {
+    let (target_slot, leader_identity_opt) = if time_remaining_in_slot > BOT_PROCESSING_TIME_MS {
         (current_slot, leader_schedule_tracker.get_leader_for_slot(current_slot))
     } else {
         let next_slot = current_slot + 1;
         (next_slot, leader_schedule_tracker.get_leader_for_slot(next_slot))
     };
-    let leader_identity = leader_identity.context(format!("Leader introuvable pour le slot {}", target_slot))?;
 
-    // On prépare les variables pour la construction de la transaction finale
+    let leader_identity = match leader_identity_opt {
+        Some(identity) => identity,
+        None => {
+            error!(slot = target_slot, "Leader introuvable pour le slot cible. Abandon.");
+            current_span.record("outcome", "LeaderNotFound");
+            metrics::TRANSACTION_OUTCOMES.with_label_values(&["LeaderNotFound"]).inc();
+            metrics::PROCESS_OPPORTUNITY_LATENCY.observe(start_time.elapsed().as_secs_f64());
+            return;
+        }
+    };
+
     let mut final_tx: Option<VersionedTransaction> = None;
+    let mut is_jito_leader = false;
 
     if let Some(_validator_info) = validator_intel.get_validator_info(&leader_identity).await {
-        println!("     -> Leader cible (Slot {}): {} (✅ Jito)", target_slot, leader_identity);
+        is_jito_leader = true;
+        current_span.record("decision", "PrepareJito");
         let jito_tip = fee_manager.calculate_jito_tip(profit_brut_estime, JITO_TIP_PERCENT, estimated_cus);
         let profit_net_final = profit_brut_estime.saturating_sub(jito_tip);
 
         if profit_net_final > 5000 {
-            println!("  -> DÉCISION : PRÉPARER BUNDLE JITO. Profit net estimé: {} lamports", profit_net_final);
-            // <-- MODIFIÉ : On passe bien owned_lookup_table
-            let (tx, _) = transaction_builder::build_arbitrage_transaction(
+            info!(profit_net_final, jito_tip, "DÉCISION : PRÉPARER BUNDLE JITO.");
+            match transaction_builder::build_arbitrage_transaction(
                 &opportunity, graph, &rpc_client, &payer, &owned_lookup_table, &protections, estimated_cus, 0
-            ).await?;
-            final_tx = Some(tx);
+            ).await {
+                Ok((tx, _)) => final_tx = Some(tx),
+                Err(e) => {
+                    error!(error = %e, "Échec de la construction de la transaction Jito.");
+                    current_span.record("outcome", "BuildError");
+                    metrics::TRANSACTION_OUTCOMES.with_label_values(&["BuildError"]).inc();
+                }
+            }
         } else {
-            println!("  -> DÉCISION : Abandon. Profit Jito insuffisant.");
+            info!(profit_net_final, "DÉCISION : Abandon. Profit Jito insuffisant.");
+            current_span.record("outcome", "Abandoned");
+            metrics::TRANSACTION_OUTCOMES.with_label_values(&["Abandoned_JitoProfitTooLow"]).inc();
         }
     } else {
-        println!("     -> Leader cible (Slot {}): {} (❌ Non-Jito)", target_slot, leader_identity);
+        current_span.record("decision", "PrepareNormal");
         const OVERBID_PERCENT: u8 = 20;
         let accounts_in_tx = vec![opportunity.pool_buy_from_key, opportunity.pool_sell_to_key];
         let priority_fee_price_per_cu = fee_manager.calculate_priority_fee(&accounts_in_tx, OVERBID_PERCENT).await;
@@ -446,53 +543,88 @@ async fn process_opportunity(
         let profit_net_final = profit_brut_estime.saturating_sub(5000).saturating_sub(total_priority_fee);
 
         if profit_net_final > 5000 {
-            println!("  -> DÉCISION: PRÉPARER TRANSACTION NORMALE. Profit net estimé: {} lamports", profit_net_final);
-            // <-- MODIFIÉ : On passe bien owned_lookup_table
-            let (tx, _) = transaction_builder::build_arbitrage_transaction(
+            info!(profit_net_final, total_priority_fee, "DÉCISION: PRÉPARER TRANSACTION NORMALE.");
+            match transaction_builder::build_arbitrage_transaction(
                 &opportunity, graph, &rpc_client, &payer, &owned_lookup_table, &protections, estimated_cus, priority_fee_price_per_cu
-            ).await?;
-            final_tx = Some(tx);
+            ).await {
+                Ok((tx, _)) => final_tx = Some(tx),
+                Err(e) => {
+                    error!(error = %e, "Échec de la construction de la transaction normale.");
+                    current_span.record("outcome", "BuildError");
+                    metrics::TRANSACTION_OUTCOMES.with_label_values(&["BuildError"]).inc();
+                }
+            }
         } else {
-            println!("  -> DÉCISION : Abandon. Profit normal insuffisant.");
+            info!(profit_net_final, "DÉCISION : Abandon. Profit normal insuffisant.");
+            current_span.record("outcome", "Abandoned");
+            metrics::TRANSACTION_OUTCOMES.with_label_values(&["Abandoned_NormalProfitTooLow"]).inc();
         }
     }
 
-    // --- PHASE 4: Simulation de Vérification (NOUVEAU BLOC) ---
-    if let Some(tx_to_simulate) = final_tx {
-        println!("\n--- [Phase 4] Lancement de la simulation de vérification finale ---");
-
+    // --- PHASE 4: Simulation & Envoi ---
+    if let Some(tx_to_simulate) = final_tx { // Renommée pour la clarté
         let sim_config = RpcSimulateTransactionConfig {
-            sig_verify: false,
-            replace_recent_blockhash: true,
-            commitment: Some(rpc_client.commitment()),
-            encoding: Some(UiTransactionEncoding::Base64),
-            ..Default::default()
+            sig_verify: false, replace_recent_blockhash: true, commitment: Some(rpc_client.commitment()),
+            encoding: Some(UiTransactionEncoding::Base64), accounts: None, min_context_slot: None, inner_instructions: false,
         };
 
         match rpc_client.simulate_transaction_with_config(&tx_to_simulate, sim_config).await {
             Ok(sim_response) => {
                 let sim_value = sim_response.value;
                 if let Some(err) = sim_value.err {
-                    println!("  -> ❌ ÉCHEC DE LA SIMULATION FINALE : {:?}", err);
+                    warn!(error = ?err, "ÉCHEC DE LA SIMULATION FINALE.");
                     if let Some(logs) = sim_value.logs {
-                        println!("     Logs d'erreur :");
-                        logs.iter().for_each(|log| println!("       {}", log));
+                        for log in logs {
+                            warn!(log = log);
+                        }
                     }
+                    current_span.record("outcome", "SimFailure");
+                    metrics::TRANSACTION_OUTCOMES.with_label_values(&["SimFailure"]).inc();
                 } else {
-                    let real_profit = simulator::parse_profit_from_logs(&sim_value.logs.unwrap_or_default())
-                        .unwrap_or(0);
-                    println!("  -> ✅ SUCCÈS DE LA SIMULATION FINALE !");
-                    println!("     -> Profit réel simulé : {} lamports", real_profit);
-                    println!("     -> (L'envoi de la transaction se ferait ici)");
+                    info!("SUCCÈS DE LA SIMULATION FINALE !");
+                    current_span.record("outcome", "SimSuccess");
+                    metrics::TRANSACTION_OUTCOMES.with_label_values(&["SimSuccess"]).inc();
+
+                    // --- NOUVEAU BLOC DE SIMULATION D'ENVOI ET D'ANALYSE FINANCIÈRE ---
+                    if let Some(logs) = &sim_value.logs {
+                        if let Some(realized_profit) = simulator::parse_realized_profit_from_logs(logs) {
+                            // On caste en i64 pour permettre un slippage négatif (profit supérieur à l'estimation)
+                            let slippage = (profit_brut_estime as i64) - (realized_profit as i64);
+
+                            info!(realized_profit, slippage, "Analyse financière (basée sur la simulation) terminée.");
+
+                            // ENREGISTREMENT DES MÉTRIQUES FINANCIÈRES
+                            metrics::ARBITRAGE_PROFIT_REALIZED.observe(realized_profit as f64);
+                            metrics::ARBITRAGE_SLIPPAGE.observe(slippage as f64);
+                        }
+                    }
+
+                    // TODO: Activer la logique d'envoi de transaction réelle ici.
+                    // Le code ci-dessous est un placeholder.
+                    if is_jito_leader {
+                        info!("[PLACEHOLDER] La transaction Jito serait envoyée ici.");
+                        metrics::TRANSACTIONS_SENT.inc();
+                        current_span.record("decision", "JitoSent_Simulated");
+                        metrics::TRANSACTION_OUTCOMES.with_label_values(&["JitoSent_Simulated"]).inc();
+                    } else {
+                        info!("[PLACEHOLDER] La transaction normale serait envoyée ici.");
+                        metrics::TRANSACTIONS_SENT.inc();
+                        current_span.record("decision", "NormalSent_Simulated");
+                        metrics::TRANSACTION_OUTCOMES.with_label_values(&["NormalSent_Simulated"]).inc();
+                    }
+                    // --- FIN DU NOUVEAU BLOC ---
                 }
             },
             Err(e) => {
-                println!("  -> ❌ ERREUR RPC pendant la simulation finale : {}", e);
+                error!(error = %e, "ERREUR RPC pendant la simulation finale.");
+                current_span.record("outcome", "RpcError");
+                metrics::TRANSACTION_OUTCOMES.with_label_values(&["RpcError"]).inc();
             }
         }
     }
 
-    Ok(())
+    // Enregistrement final de la latence du traitement complet
+    metrics::PROCESS_OPPORTUNITY_LATENCY.observe(start_time.elapsed().as_secs_f64());
 }
 
 

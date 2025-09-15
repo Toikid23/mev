@@ -1,10 +1,16 @@
+# DANS : monitoring/prometheus/prometheus.yml
+
 global:
-  scrape_interval: 15s # Prometheus demandera les métriques toutes les 15 secondes.
+  scrape_interval: 15s
 
 scrape_configs:
   - job_name: 'mev-bot-dev-runner'
     static_configs:
-      # 'host.docker.internal' est une adresse "magique" fournie par Docker Desktop.
-      # Elle permet à un conteneur (Prometheus) de communiquer avec la machine
-      # qui l'héberge (votre environnement WSL2).
       - targets: ['host.docker.internal:9100']
+
+  # --- AJOUTEZ TOUT CE BLOC ---
+  - job_name: 'process-exporter'
+    static_configs:
+      # 'process-exporter' est le nom du service défini dans docker-compose.yml
+      - targets: ['process-exporter:9256']
+  # --- FIN DE L'AJOUT ---

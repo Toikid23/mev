@@ -10,6 +10,9 @@ use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 use crate::rpc::ResilientRpcClient;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts, QuoteResult};
+use crate::monitoring::metrics;
+use std::time::Instant;
+use tracing::debug;
 
 
 // La structure de données reste la même
@@ -118,6 +121,10 @@ impl PoolOperations for DecodedAmmPool {
     fn address(&self) -> Pubkey { self.address }
 
     fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<QuoteResult> {
+
+        let start_time = Instant::now();
+        debug!(amount_in, "Calcul de get_quote_with_details pour Raydium AMMv4");
+
         let (in_mint_fee_bps, out_mint_fee_bps, in_reserve, out_reserve) = if *token_in_mint == self.mint_a {
             (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps, self.reserve_a, self.reserve_b)
         } else {
@@ -140,6 +147,8 @@ impl PoolOperations for DecodedAmmPool {
         let fee_on_output = (amount_out_after_pool_fee * out_mint_fee_bps as u128) / 10000;
         let final_amount_out = amount_out_after_pool_fee.saturating_sub(fee_on_output);
 
+        metrics::GET_QUOTE_LATENCY.with_label_values(&["RaydiumAmmV4"]).observe(start_time.elapsed().as_secs_f64());
+
         // <-- MODIFIÉ : Encapsulation dans QuoteResult
         Ok(QuoteResult {
             amount_out: final_amount_out as u64,
@@ -154,6 +163,10 @@ impl PoolOperations for DecodedAmmPool {
         amount_out: u64,
         _current_timestamp: i64
     ) -> Result<u64> {
+
+        let start_time = Instant::now();
+        debug!(amount_out, "Calcul de get_required_input pour Raydium AMMv4");
+
         if amount_out == 0 { return Ok(0); }
 
         let (in_mint_fee_bps, out_mint_fee_bps, in_reserve, out_reserve) = if *token_out_mint == self.mint_b {
@@ -203,6 +216,8 @@ impl PoolOperations for DecodedAmmPool {
         } else {
             amount_in_after_transfer_fee
         };
+
+        metrics::GET_QUOTE_LATENCY.with_label_values(&["RaydiumAmmV4_required_input"]).observe(start_time.elapsed().as_secs_f64());
 
         Ok(required_amount_in as u64)
     }

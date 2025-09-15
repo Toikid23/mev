@@ -16,6 +16,9 @@ use crate::rpc::ResilientRpcClient;
 use super::config as whirlpool_config;
 use crate::state::global_cache::{CacheableData, GLOBAL_CACHE};
 use anyhow::Context;
+use crate::monitoring::metrics;
+use std::time::Instant;
+use tracing::debug;
 
 // --- STRUCTURE DE TRAVAIL "PROPRE" (MODIFIÉE) ---
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -365,6 +368,10 @@ impl PoolOperations for DecodedWhirlpoolPool {
 
     // NOUVELLE VERSION SYNCHRONE DE get_quote
     fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<QuoteResult> {
+
+        let start_time = Instant::now();
+        debug!(amount_in, "Calcul de get_quote_with_details pour Orca Whirlpool");
+
         let tick_arrays = self.tick_arrays.as_ref().ok_or_else(|| anyhow!("Pool is not hydrated."))?;
         if self.liquidity == 0 && tick_arrays.is_empty() { return Ok(QuoteResult::default()); }
 
@@ -419,6 +426,8 @@ impl PoolOperations for DecodedWhirlpoolPool {
         let fee_on_output = (total_amount_out * out_mint_fee_bps as u128) / 10000;
         let final_amount_out = total_amount_out.saturating_sub(fee_on_output);
 
+        metrics::GET_QUOTE_LATENCY.with_label_values(&["OrcaWhirlpool"]).observe(start_time.elapsed().as_secs_f64());
+
         // <-- MODIFIÉ : Encapsulation dans QuoteResult
         Ok(QuoteResult {
             amount_out: final_amount_out as u64,
@@ -429,6 +438,10 @@ impl PoolOperations for DecodedWhirlpoolPool {
 
     // NOUVELLE VERSION SYNCHRONE DE get_required_input
     fn get_required_input(&mut self, token_out_mint: &Pubkey, amount_out: u64, _current_timestamp: i64) -> Result<u64> {
+
+        let start_time = Instant::now();
+        debug!(amount_out, "Calcul de get_required_input pour Orca Whirlpool");
+
         let tick_arrays = self.tick_arrays.as_ref().ok_or_else(|| anyhow!("Pool is not hydrated."))?;
         if amount_out == 0 { return Ok(0); }
         if self.liquidity == 0 && tick_arrays.is_empty() { return Err(anyhow!("Pool has no liquidity.")); }
@@ -522,6 +535,9 @@ impl PoolOperations for DecodedWhirlpoolPool {
         };
 
         final_amount_in = final_amount_in.saturating_add(5);
+
+
+        metrics::GET_QUOTE_LATENCY.with_label_values(&["OrcaWhirlpool_required_input"]).observe(start_time.elapsed().as_secs_f64());
 
         Ok(final_amount_in as u64)
     }

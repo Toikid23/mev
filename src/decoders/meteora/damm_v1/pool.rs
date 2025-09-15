@@ -12,6 +12,9 @@ use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts, QuoteResult};
 use crate::decoders::pool_operations::find_input_by_binary_search;
 use crate::rpc::ResilientRpcClient;
+use crate::monitoring::metrics;
+use std::time::Instant;
+use tracing::debug;
 
 // --- CONSTANTES ---
 pub const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB");
@@ -305,6 +308,10 @@ impl PoolOperations for DecodedMeteoraSbpPool {
     fn address(&self) -> Pubkey { self.address }
 
     fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<QuoteResult> {
+
+        let start_time = Instant::now();
+        debug!(amount_in, "Calcul de get_quote_with_details pour Meteora DAMM V1");
+
         if !self.enabled || amount_in == 0 {
             return Ok(QuoteResult::default()); // Retourne un résultat vide
         }
@@ -379,6 +386,8 @@ impl PoolOperations for DecodedMeteoraSbpPool {
         let out_lp_to_burn = get_lp_for_tokens(amount_out_gross, unlocked_out_vault, out_vault_lp_supply);
         let final_amount_out = get_tokens_for_lp(out_lp_to_burn, unlocked_out_vault, out_vault_lp_supply);
 
+        metrics::GET_QUOTE_LATENCY.with_label_values(&["MeteoraDammV1"]).observe(start_time.elapsed().as_secs_f64());
+
 
         Ok(QuoteResult {
             amount_out: final_amount_out,
@@ -388,6 +397,9 @@ impl PoolOperations for DecodedMeteoraSbpPool {
     }
 
     fn get_required_input(&mut self, token_out_mint: &Pubkey, amount_out: u64, current_timestamp: i64) -> Result<u64> {
+        let start_time = Instant::now();
+        debug!(amount_out, "Calcul de get_required_input pour Meteora DAMM V1");
+
         if amount_out == 0 { return Ok(0); }
         if !self.enabled { return Err(anyhow!("Pool disabled")); }
 
@@ -422,9 +434,13 @@ impl PoolOperations for DecodedMeteoraSbpPool {
             self.get_quote(&token_in_mint, guess_input, current_timestamp)
         };
 
-        find_input_by_binary_search(quote_fn, amount_out, high_bound)
-    }
+        let result = find_input_by_binary_search(quote_fn, amount_out, high_bound);
 
+        // --- AJOUT JUSTE AVANT DE RETOURNER ---
+        metrics::GET_QUOTE_LATENCY.with_label_values(&["MeteoraDammV1_required_input"]).observe(start_time.elapsed().as_secs_f64());
+
+        result
+    }
     fn update_from_account_data(&mut self, account_pubkey: &Pubkey, account_data: &[u8]) -> Result<()> {
         // Les données d'un compte token SPL ont le solde (u64) à l'offset 64.
         if account_data.len() >= 72 {

@@ -13,6 +13,9 @@ use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts, QuoteResult};
 use super::math;
 use crate::decoders::pool_operations::find_input_by_binary_search;
+use crate::monitoring::metrics;
+use std::time::Instant;
+use tracing::debug;
 
 
 construct_uint! { pub struct U256(4); }
@@ -155,6 +158,10 @@ impl PoolOperations for DecodedMeteoraDammPool {
     fn address(&self) -> Pubkey { self.address }
 
     fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<QuoteResult> {
+
+        let start_time = Instant::now();
+        debug!(amount_in, "Calcul de get_quote_with_details pour Meteora DAMM V2");
+
         if self.liquidity == 0 { return Ok(QuoteResult::default()); }
         let a_to_b = *token_in_mint == self.mint_a;
         let (in_mint_fee_bps, out_mint_fee_bps) = if a_to_b {
@@ -203,6 +210,8 @@ impl PoolOperations for DecodedMeteoraDammPool {
         let fee_on_output = (amount_out_after_pool_fee as u128 * out_mint_fee_bps as u128) / 10000;
         let final_amount_out = amount_out_after_pool_fee.saturating_sub(fee_on_output as u64);
 
+        metrics::GET_QUOTE_LATENCY.with_label_values(&["MeteoraDammV2"]).observe(start_time.elapsed().as_secs_f64());
+
         // <-- MODIFIÉ : On encapsule le résultat final
         Ok(QuoteResult {
             amount_out: final_amount_out,
@@ -250,6 +259,10 @@ impl PoolOperations for DecodedMeteoraDammPool {
         amount_out: u64,
         current_timestamp: i64,
     ) -> Result<u64> {
+
+        let start_time = Instant::now();
+        debug!(amount_out, "Calcul de get_required_input pour Meteora DAMM V2");
+
         // 1. Logique spécifique au pool
         if amount_out == 0 { return Ok(0); }
         if self.liquidity == 0 { return Err(anyhow!("Pool has no liquidity")); }
@@ -275,7 +288,14 @@ impl PoolOperations for DecodedMeteoraDammPool {
         };
 
         // 4. Appel à l'utilitaire de recherche dynamique
-        find_input_by_binary_search(quote_fn, amount_out, high_bound)
+        // --- On capture le résultat avant de retourner ---
+        let result = find_input_by_binary_search(quote_fn, amount_out, high_bound);
+
+        // --- AJOUT JUSTE AVANT DE RETOURNER ---
+        metrics::GET_QUOTE_LATENCY.with_label_values(&["MeteoraDammV2_required_input"]).observe(start_time.elapsed().as_secs_f64());
+        // --- FIN DE L'AJOUT ---
+
+        result
     }
 
 
