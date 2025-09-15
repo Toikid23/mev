@@ -2,3 +2,5 @@
 .env
 jito_validators.json
 hotlist.json
+
+logs/bot.log
