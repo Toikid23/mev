@@ -36,7 +36,7 @@ impl<T> CacheEntry<T> {
 
 #[derive(Debug, Clone)]
 pub enum CacheableData {
-    PumpAmmGlobalConfig(pump_layouts::GlobalConfig),
+    PumpAmmGlobalConfig(Box<pump_layouts::GlobalConfig>), // <-- La suggestion
     RaydiumCpmmAmmConfig(CpmmDecodedConfig),
     RaydiumClmmAmmConfig(DecodedClmmConfig),
     OrcaWhirlpoolsConfig(DecodedWhirlpoolsConfig),

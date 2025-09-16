@@ -23,11 +23,11 @@ pub use pool_factory::PoolFactory;
 pub enum Pool {
     RaydiumAmmV4(raydium::amm_v4::DecodedAmmPool),
     RaydiumCpmm(raydium::cpmm::DecodedCpmmPool),
-    RaydiumClmm(raydium::clmm::DecodedClmmPool),
-    MeteoraDammV1(meteora::damm_v1::DecodedMeteoraSbpPool),
-    MeteoraDammV2(meteora::damm_v2::DecodedMeteoraDammPool),
-    MeteoraDlmm(meteora::dlmm::DecodedDlmmPool),
-    OrcaWhirlpool(orca::whirlpool::DecodedWhirlpoolPool),
+    RaydiumClmm(Box<raydium::clmm::DecodedClmmPool>), // Boxer les CLMMs aussi par précaution
+    MeteoraDammV1(Box<meteora::damm_v1::DecodedMeteoraSbpPool>), // <-- La suggestion
+    MeteoraDammV2(Box<meteora::damm_v2::DecodedMeteoraDammPool>),
+    MeteoraDlmm(Box<meteora::dlmm::DecodedDlmmPool>),
+    OrcaWhirlpool(Box<orca::whirlpool::DecodedWhirlpoolPool>),
     PumpAmm(pump::amm::DecodedPumpAmmPool),
 }
 
