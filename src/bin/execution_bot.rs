@@ -44,6 +44,7 @@ use spl_associated_token_account::instruction::create_associated_token_account;
 use solana_sdk::transaction::VersionedTransaction;
 use tracing::{info, warn, error, instrument};
 use mev::monitoring::metrics;
+use tokio::sync::mpsc;
 
 
 const MANAGED_LUT_ADDRESS: &str = "E5h798UBdK8V1L7MvRfi1ppr2vitPUUUUCVqvTyDgKXN";
@@ -275,76 +276,101 @@ impl DataProducer {
     }
 }
 
-// --- NOUVELLE ARCHITECTURE : LE CONSOMMATEUR (WORKER D'ANALYSE) ---
-async fn analysis_worker(
-    id: usize,
+
+async fn scout_worker(
     shared_graph: Arc<ArcSwap<Graph>>,
     mut update_receiver: watch::Receiver<()>,
+    opportunity_sender: mpsc::Sender<ArbitrageOpportunity>,
+) {
+    info!("[Scout] Démarrage du worker de recherche d'opportunités.");
+    loop {
+        // Attendre une notification de mise à jour du graphe
+        if update_receiver.changed().await.is_err() {
+            error!("[Scout] Le canal de notification est fermé. Arrêt.");
+            break;
+        }
+
+        let graph_snapshot = shared_graph.load_full();
+        if graph_snapshot.pools.is_empty() {
+            continue;
+        }
+
+        // Le scout fait le travail de recherche UNE SEULE FOIS
+        let opportunities = find_spatial_arbitrage(graph_snapshot.clone()).await;
+
+        if !opportunities.is_empty() {
+            info!("[Scout] Trouvé {} opportunités. Envoi aux workers d'analyse...", opportunities.len());
+            for opp in opportunities {
+                // Envoie chaque opportunité dans le canal
+                if let Err(e) = opportunity_sender.send(opp).await {
+                    error!("[Scout] Erreur d'envoi au canal des workers, ils se sont probablement arrêtés: {}", e);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+
+async fn analysis_worker(
+    id: usize,
+    // Note: Il reçoit maintenant la partie "réception" du canal mpsc
+    opportunity_receiver: Arc<Mutex<mpsc::Receiver<ArbitrageOpportunity>>>,
+    // Les autres dépendances restent les mêmes
+    shared_graph: Arc<ArcSwap<Graph>>,
     rpc_client: Arc<ResilientRpcClient>,
     payer: Keypair,
-    currently_processing: Arc<Mutex<HashSet<String>>>,
     slot_tracker: Arc<SlotTracker>,
     slot_metronome: Arc<SlotMetronome>,
     leader_schedule_tracker: Arc<LeaderScheduleTracker>,
     validator_intel: Arc<ValidatorIntelService>,
     fee_manager: FeeManager,
 ) {
-    println!("[Worker {}] Démarrage.", id);
+    info!("[Worker {}] Démarrage.", id);
+    // La boucle principale est maintenant beaucoup plus simple
     loop {
-        // Attendre une notification de mise à jour du graphe
-        if update_receiver.changed().await.is_err() {
-            println!("[Worker {}] Le canal de notification est fermé. Arrêt.", id);
-            break;
-        }
+        // Attend de recevoir une opportunité du canal.
+        // Le Mutex garantit qu'un seul worker à la fois essaie de prendre un message.
+        let opportunity = match opportunity_receiver.lock().await.recv().await {
+            Some(opp) => opp,
+            None => {
+                info!("[Worker {}] Le canal d'opportunités est fermé. Arrêt.", id);
+                break; // Le canal est fermé, on termine la boucle
+            }
+        };
+
+        // Une fois qu'on a une opportunité, on la traite.
+        // On n'a plus besoin du `currently_processing` Mutex.
 
         let graph_snapshot = shared_graph.load_full();
-        if graph_snapshot.pools.is_empty() { continue; }
 
-        let opportunities = find_spatial_arbitrage(graph_snapshot.clone()).await;
+        // Réhydratation des pools CLMM si nécessaire (cette logique reste)
+        let pool_buy_from_data = match graph_snapshot.pools.get(&opportunity.pool_buy_from_key) {
+            Some(p) => p.clone(),
+            None => continue,
+        };
+        let pool_sell_to_data = match graph_snapshot.pools.get(&opportunity.pool_sell_to_key) {
+            Some(p) => p.clone(),
+            None => continue,
+        };
 
-        if let Some(opp) = opportunities.into_iter().next() {
-            let mut pools = [opp.pool_buy_from_key.to_string(), opp.pool_sell_to_key.to_string()];
-            pools.sort();
-            let opportunity_id = format!("{}-{}", pools[0], pools[1]);
+        let rehydrated_buy = rehydrate_if_clmm(pool_buy_from_data, &rpc_client).await;
+        let rehydrated_sell = rehydrate_if_clmm(pool_sell_to_data, &rpc_client).await;
 
-            let is_already_processing = {
-                let mut processing_guard = currently_processing.lock().await;
-                if processing_guard.contains(&opportunity_id) { true } else { processing_guard.insert(opportunity_id.clone()); false }
-            };
+        if let (Ok(Some(new_buy)), Ok(Some(new_sell))) = (rehydrated_buy, rehydrated_sell) {
+            let mut temp_graph_for_processing = Graph::new();
+            temp_graph_for_processing.add_pool_to_graph(new_buy);
+            temp_graph_for_processing.add_pool_to_graph(new_sell);
 
-            if !is_already_processing {
-                // Pour la ré-hydratation, on prend une copie MUTABLE du pool depuis notre snapshot
-                let pool_buy_from_data = graph_snapshot.pools.get(&opp.pool_buy_from_key).unwrap().clone();
-                let pool_sell_to_data = graph_snapshot.pools.get(&opp.pool_sell_to_key).unwrap().clone();
-                let rehydrated_opp = opp.clone();
-
-                // On doit ré-hydrater les CLMMs si nécessaire avant de traiter
-                let rehydrated_buy = rehydrate_if_clmm(pool_buy_from_data, &rpc_client).await;
-                let rehydrated_sell = rehydrate_if_clmm(pool_sell_to_data, &rpc_client).await;
-
-                if let (Ok(Some(new_buy)), Ok(Some(new_sell))) = (rehydrated_buy, rehydrated_sell) {
-                    let mut temp_graph_for_processing = Graph::new();
-                    temp_graph_for_processing.add_pool_to_graph(new_buy);
-                    temp_graph_for_processing.add_pool_to_graph(new_sell);
-
-                    // --- MODIFIÉ ---
-                    process_opportunity(
-                        rehydrated_opp, Arc::new(temp_graph_for_processing), rpc_client.clone(), payer.insecure_clone(), &fee_manager,
-                        slot_tracker.clone(), slot_metronome.clone(), leader_schedule_tracker.clone(), validator_intel.clone()
-                    ).await;
-                    // --- FIN DE LA MODIFICATION ---
-
-                } else {
-                    // --- MODIFIÉ ---
-                    process_opportunity(
-                        opp, graph_snapshot.clone(), rpc_client.clone(), payer.insecure_clone(), &fee_manager,
-                        slot_tracker.clone(), slot_metronome.clone(), leader_schedule_tracker.clone(), validator_intel.clone()
-                    ).await;
-                    // --- FIN DE LA MODIFICATION ---
-                }
-
-                currently_processing.lock().await.remove(&opportunity_id);
-            }
+            process_opportunity(
+                opportunity, Arc::new(temp_graph_for_processing), rpc_client.clone(), payer.insecure_clone(), &fee_manager,
+                slot_tracker.clone(), slot_metronome.clone(), leader_schedule_tracker.clone(), validator_intel.clone()
+            ).await;
+        } else {
+            process_opportunity(
+                opportunity, graph_snapshot.clone(), rpc_client.clone(), payer.insecure_clone(), &fee_manager,
+                slot_tracker.clone(), slot_metronome.clone(), leader_schedule_tracker.clone(), validator_intel.clone()
+            ).await;
         }
     }
 }
@@ -630,7 +656,7 @@ async fn process_opportunity(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("--- Lancement de l'Execution Bot (Architecture Producteur-Consommateur) ---");
+    println!("--- Lancement de l'Execution Bot (Architecture Scout-Worker) ---");
     dotenvy::dotenv().ok();
 
     // --- Initialisation (inchangée) ---
@@ -640,7 +666,6 @@ async fn main() -> Result<()> {
     println!("[Init] Le bot utilisera la LUT gérée à l'adresse: {}", MANAGED_LUT_ADDRESS);
     let geyser_url = env::var("GEYSER_GRPC_URL").context("GEYSER_GRPC_URL requis")?;
     let validators_app_token = env::var("VALIDATORS_APP_API_KEY").context("VALIDATORS_APP_API_KEY requis")?;
-    // AFFICHER l'adresse de la LUT au démarrage pour le débogage
     println!("[Init] Le bot utilisera la LUT gérée à l'adresse: {}", MANAGED_LUT_ADDRESS);
 
     println!("[Init] Services de suivi de la blockchain...");
@@ -660,7 +685,10 @@ async fn main() -> Result<()> {
     let hot_graph = Arc::new(ArcSwap::new(Arc::new(Graph::new())));
     let (update_tx, update_rx) = watch::channel(());
     let shared_hotlist = Arc::new(tokio::sync::RwLock::new(HashSet::<Pubkey>::new()));
-    let currently_processing = Arc::new(Mutex::new(HashSet::<String>::new()));
+
+    // --- NOUVEAU : Création du canal (UNE SEULE FOIS) ---
+    let (opportunity_tx, opportunity_rx) = mpsc::channel::<ArbitrageOpportunity>(1024);
+    let shared_opportunity_rx = Arc::new(Mutex::new(opportunity_rx));
 
     // Tâche 1 : Mettre à jour la `shared_hotlist` depuis le fichier (inchangé)
     let hotlist_updater_clone = shared_hotlist.clone();
@@ -687,14 +715,21 @@ async fn main() -> Result<()> {
         producer.run().await;
     });
 
-    // Tâche 4 : Les Workers d'analyse (Consommateurs)
+    // --- NOUVEAU : Tâche 4 - Le Scout ---
+    let scout_graph = hot_graph.clone();
+    let scout_rx = update_rx.clone();
+    tokio::spawn(async move {
+        // Cette variable `opportunity_tx` est maintenant celle du premier (et unique) canal
+        scout_worker(scout_graph, scout_rx, opportunity_tx).await;
+    });
+
+    // --- MODIFIÉ : Tâche 5 - Les Workers d'analyse ---
     println!("[Init] Démarrage de {} workers d'analyse...", ANALYSIS_WORKER_COUNT);
     for i in 0..ANALYSIS_WORKER_COUNT {
+        let worker_rx = shared_opportunity_rx.clone(); // Clone l'Arc, pas le receiver
         let worker_graph = hot_graph.clone();
-        let worker_rx = update_rx.clone();
         let worker_rpc = rpc_client.clone();
         let worker_payer = Keypair::try_from(payer.to_bytes().as_slice())?;
-        let worker_processing = currently_processing.clone();
         let worker_slot_tracker = slot_tracker.clone();
         let worker_slot_metronome = slot_metronome.clone();
         let worker_leader_schedule = leader_schedule_tracker.clone();
@@ -703,14 +738,13 @@ async fn main() -> Result<()> {
 
         tokio::spawn(async move {
             analysis_worker(
-                i + 1, worker_graph, worker_rx, worker_rpc, worker_payer,
-                worker_processing, worker_slot_tracker, worker_slot_metronome,
+                i + 1, worker_rx, worker_graph, worker_rpc, worker_payer,
+                worker_slot_tracker, worker_slot_metronome,
                 worker_leader_schedule, worker_validator_intel, worker_fee_manager,
             ).await;
         });
     }
 
-    // Le thread principal peut maintenant soit attendre, soit effectuer d'autres tâches (ex: monitoring)
     println!("[Bot] Architecture démarrée. Le bot est opérationnel.");
     std::future::pending::<()>().await;
 
