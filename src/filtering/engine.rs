@@ -1,12 +1,11 @@
 // DANS : src/filtering/engine.rs
 
 use crate::{
-    decoders::{Pool, PoolOperations},
+    decoders::{PoolOperations},
     filtering::cache::PoolCache,
-    decoders::{raydium, orca, meteora, pump},
 };
 use crate::graph_engine::Graph;
-use anyhow::{anyhow, Result};
+use anyhow::{Result};
 use solana_sdk::pubkey::Pubkey;
 use std::{
     collections::{HashMap, HashSet},
@@ -17,6 +16,7 @@ use tokio::sync::mpsc;
 use crate::rpc::ResilientRpcClient;
 use std::str::FromStr;
 use std::sync::Arc;
+use crate::decoders::PoolFactory;
 
 // --- CONSTANTES DE CONFIGURATION DU FILTRAGE ---
 // Un pool est "chaud" s'il a eu au moins 5 transactions...
@@ -39,12 +39,16 @@ lazy_static::lazy_static! {
 
 pub struct FilteringEngine {
     rpc_client: Arc<ResilientRpcClient>,
+    pool_factory: PoolFactory, // <-- AJOUTEZ CE CHAMP
 }
 
 impl FilteringEngine {
     pub fn new(rpc_url: String) -> Self {
+        let rpc_client = Arc::new(ResilientRpcClient::new(rpc_url, 3, 500));
+        let pool_factory = PoolFactory::new(rpc_client.clone()); // <-- INSTANCIEZ LA FACTORY
         Self {
-            rpc_client: Arc::new(ResilientRpcClient::new(rpc_url, 3, 500)),
+            rpc_client,
+            pool_factory, // <-- STOCKEZ-LA
         }
     }
 
@@ -136,7 +140,7 @@ impl FilteringEngine {
     /// Décode, hydrate et vérifie si le pool a une liquidité minimale.
     async fn hydrate_and_check_liquidity(&self, identity: &super::PoolIdentity) -> Result<bool> {
         let account = self.rpc_client.get_account(&identity.address).await?;
-        let raw_pool = self.decode_raw_pool(&identity.address, &account.data, &account.owner)?;
+        let raw_pool = self.pool_factory.decode_raw_pool(&identity.address, &account.data, &account.owner)?;
         let hydrated_pool = Graph::hydrate_pool(raw_pool, &self.rpc_client).await?;
 
         // Approximation de la liquidité : on vérifie juste que les réserves ne sont pas nulles.
@@ -145,17 +149,4 @@ impl FilteringEngine {
         Ok(reserve_a > 0 && reserve_b > 0)
     }
 
-    fn decode_raw_pool(&self, address: &Pubkey, data: &[u8], owner: &Pubkey) -> Result<Pool> {
-        match *owner {
-            id if id == raydium::amm_v4::RAYDIUM_AMM_V4_PROGRAM_ID => raydium::amm_v4::decode_pool(address, data).map(Pool::RaydiumAmmV4),
-            id if id == Pubkey::from_str("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C").unwrap() => raydium::cpmm::decode_pool(address, data).map(Pool::RaydiumCpmm),
-            id if id == Pubkey::from_str("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK").unwrap() => raydium::clmm::decode_pool(address, data, &id).map(Pool::RaydiumClmm),
-            id if id == Pubkey::from_str("Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB").unwrap() => meteora::damm_v1::decode_pool(address, data).map(Pool::MeteoraDammV1),
-            id if id == Pubkey::from_str("cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG").unwrap() => meteora::damm_v2::decode_pool(address, data).map(Pool::MeteoraDammV2),
-            id if id == Pubkey::from_str("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo").unwrap() => meteora::dlmm::decode_lb_pair(address, data, &id).map(Pool::MeteoraDlmm),
-            id if id == Pubkey::from_str("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc").unwrap() => orca::whirlpool::decode_pool(address, data).map(Pool::OrcaWhirlpool),
-            id if id == pump::amm::PUMP_PROGRAM_ID => pump::amm::decode_pool(address, data).map(Pool::PumpAmm),
-            _ => Err(anyhow!("Programme propriétaire inconnu pour le décodage : {}", owner)),
-        }
-    }
 }

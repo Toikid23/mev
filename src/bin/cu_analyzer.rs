@@ -4,7 +4,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use anyhow::{anyhow, Result};
 use mev::config::Config;
 use mev::decoders::pool_operations::{PoolOperations, UserSwapAccounts};
-use mev::decoders::{orca, pump, raydium, meteora, Pool};
+use mev::decoders::{Pool};
 use mev::rpc::ResilientRpcClient;
 use solana_sdk::{
     message::VersionedMessage, pubkey::Pubkey, signature::Keypair, signer::Signer,
@@ -14,6 +14,8 @@ use spl_associated_token_account::get_associated_token_address_with_program_id;
 use solana_client::rpc_config::RpcSimulateTransactionConfig;
 use solana_transaction_status::UiTransactionEncoding;
 use std::str::FromStr;
+use mev::decoders::PoolFactory; // <-- AJOUTEZ CET IMPORT
+use std::sync::Arc;
 
 /// Structure pour stocker le résultat d'une analyse.
 struct AnalysisResult {
@@ -147,7 +149,8 @@ fn get_mint_b_decimals(pool: &Pool) -> u8 {
 
 /// Charge, hydrate un pool et lance l'analyse.
 async fn analyze_pool(
-    rpc_client: &ResilientRpcClient,
+    rpc_client: &ResilientRpcClient, // <-- Gardez celui-ci pour la simulation
+    pool_factory: &PoolFactory, // <-- AJOUTEZ CE PARAMÈTRE
     payer: &Keypair,
     pool_address: &str,
     input_mint_address: &str,
@@ -155,21 +158,11 @@ async fn analyze_pool(
 ) -> Result<u64> {
     let pool_pubkey = Pubkey::from_str(pool_address)?;
     let input_mint_pubkey = Pubkey::from_str(input_mint_address)?;
-    let account = rpc_client.get_account(&pool_pubkey).await?;
 
-    let raw_pool = match account.owner {
-        id if id == raydium::amm_v4::RAYDIUM_AMM_V4_PROGRAM_ID => raydium::amm_v4::decode_pool(&pool_pubkey, &account.data).map(Pool::RaydiumAmmV4),
-        id if id == Pubkey::from_str("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C").unwrap() => raydium::cpmm::decode_pool(&pool_pubkey, &account.data).map(Pool::RaydiumCpmm),
-        id if id == Pubkey::from_str("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK").unwrap() => raydium::clmm::decode_pool(&pool_pubkey, &account.data, &id).map(Pool::RaydiumClmm),
-        id if id == Pubkey::from_str("Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB").unwrap() => meteora::damm_v1::decode_pool(&pool_pubkey, &account.data).map(Pool::MeteoraDammV1),
-        id if id == Pubkey::from_str("cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG").unwrap() => meteora::damm_v2::decode_pool(&pool_pubkey, &account.data).map(Pool::MeteoraDammV2),
-        id if id == Pubkey::from_str("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo").unwrap() => meteora::dlmm::decode_lb_pair(&pool_pubkey, &account.data, &account.owner).map(Pool::MeteoraDlmm),
-        id if id == Pubkey::from_str("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc").unwrap() => orca::whirlpool::decode_pool(&pool_pubkey, &account.data).map(Pool::OrcaWhirlpool),
-        id if id == pump::amm::PUMP_PROGRAM_ID => pump::amm::decode_pool(&pool_pubkey, &account.data).map(Pool::PumpAmm),
-        _ => Err(anyhow!("Programme propriétaire inconnu: {}", account.owner)),
-    }?;
-
-    let hydrated_pool = mev::graph_engine::Graph::hydrate_pool(raw_pool, rpc_client).await?;
+    // --- BLOC REMPLACÉ ---
+    // Toute la logique "match account.owner" est remplacée par cet appel unique :
+    let hydrated_pool = pool_factory.create_and_hydrate_pool(&pool_pubkey).await?;
+    // --- FIN DU REMPLACEMENT ---
 
     let (mint_a, mint_b) = hydrated_pool.get_mints();
 
@@ -193,8 +186,9 @@ async fn main() -> Result<()> {
     // ... (contenu de la fonction main inchangé)
     println!("--- Lancement de l'Analyseur de Compute Units ---");
     let config = Config::load()?;
-    let rpc_client = ResilientRpcClient::new(config.solana_rpc_url, 3, 500);
+    let rpc_client = Arc::new(ResilientRpcClient::new(config.solana_rpc_url, 3, 500));
     let payer = Keypair::from_base58_string(&config.payer_private_key);
+    let pool_factory = PoolFactory::new(rpc_client.clone());
     println!("Utilisation du portefeuille : {}", payer.pubkey());
 
     let wsol_mint = "So11111111111111111111111111111111111111112";
@@ -212,7 +206,15 @@ async fn main() -> Result<()> {
 
     let mut results = Vec::new();
     for (name, pool_address, input_mint, amount_in) in pools_to_test {
-        let result = analyze_pool(&rpc_client, &payer, pool_address, input_mint, amount_in).await;
+        // --- MODIFICATION : Passer la factory à la fonction d'analyse ---
+        let result = analyze_pool(
+            &rpc_client, // On passe toujours l'Arc rpc_client pour la simulation
+            &pool_factory, // On passe la factory
+            &payer,
+            pool_address,
+            input_mint,
+            amount_in
+        ).await;
         results.push(AnalysisResult { name: name.to_string(), result });
     }
 

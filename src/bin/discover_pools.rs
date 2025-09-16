@@ -1,23 +1,25 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result};
 use mev::{
     config::Config,
     data_pipeline::manual_pools::get_manual_pool_list,
-    decoders::{orca, meteora, pump, raydium, Pool},
     graph_engine::Graph,
     rpc::ResilientRpcClient,
 };
 use solana_sdk::pubkey::Pubkey;
 use std::io::Write;
 use std::str::FromStr;
+use mev::decoders::PoolFactory;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     println!("--- Lancement du Constructeur de Cache (Mode Manuel) ---");
     let config = Config::load()?;
-    let rpc_client = ResilientRpcClient::new(config.solana_rpc_url, 3, 500);
+    let rpc_client = Arc::new(ResilientRpcClient::new(config.solana_rpc_url, 3, 500));
+    let pool_factory = PoolFactory::new(rpc_client.clone());
 
     let manual_pool_addresses_str = get_manual_pool_list();
     if manual_pool_addresses_str.is_empty() {
@@ -36,18 +38,7 @@ async fn main() -> Result<()> {
     for (index, account_opt) in accounts_data.into_iter().enumerate() {
         let address = pool_pubkeys[index];
         if let Some(account) = account_opt {
-            let decoded_pool_result = match account.owner {
-                id if id == Pubkey::from_str("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8").unwrap() => raydium::amm_v4::decode_pool(&address, &account.data).map(Pool::RaydiumAmmV4),
-                id if id == Pubkey::from_str("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C").unwrap() => raydium::cpmm::decode_pool(&address, &account.data).map(Pool::RaydiumCpmm),
-                id if id == Pubkey::from_str("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK").unwrap() => raydium::clmm::decode_pool(&address, &account.data, &id).map(Pool::RaydiumClmm),
-                id if id == Pubkey::from_str("Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB").unwrap() => meteora::damm_v1::decode_pool(&address, &account.data).map(Pool::MeteoraDammV1),
-                id if id == Pubkey::from_str("cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG").unwrap() => meteora::damm_v2::decode_pool(&address, &account.data).map(Pool::MeteoraDammV2),
-                id if id == Pubkey::from_str("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo").unwrap() => meteora::dlmm::decode_lb_pair(&address, &account.data, &account.owner).map(Pool::MeteoraDlmm),
-                id if id == Pubkey::from_str("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc").unwrap() => orca::whirlpool::decode_pool(&address, &account.data).map(Pool::OrcaWhirlpool),
-                id if id == Pubkey::from_str("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA").unwrap() => pump::amm::decode_pool(&address, &account.data).map(Pool::PumpAmm),
-                _ => Err(anyhow!("Programme propriétaire inconnu: {}", account.owner)),
-            };
-            if let Ok(pool) = decoded_pool_result {
+            if let Ok(pool) = pool_factory.decode_raw_pool(&address, &account.data, &account.owner) {
                 unhydrated_pools.push(pool);
             }
         }

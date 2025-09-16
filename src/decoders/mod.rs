@@ -12,9 +12,11 @@ pub mod orca;
 pub mod meteora;
 pub mod spl_token_decoders;
 pub mod pump;
+pub mod pool_factory;
 
 // --- 2. Importer le trait ---
 pub use pool_operations::PoolOperations;
+pub use pool_factory::PoolFactory;
 
 // --- 3. Définir l'enum unifié avec les BONS NOMS ---
 #[derive(Debug, Clone, Serialize, Deserialize)]
