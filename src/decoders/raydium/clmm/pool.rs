@@ -1,4 +1,4 @@
-// src/decoders/raydium/clmm/pool.rs
+// DANS : src/decoders/raydium/clmm/pool.rs
 
 use crate::decoders::spl_token_decoders;
 use anyhow::{anyhow, bail, Result};
@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts, QuoteResult};
 use crate::decoders::raydium::clmm::full_math::MulDiv;
 use crate::decoders::spl_token_decoders::mint::{calculate_transfer_fee, calculate_gross_amount_before_transfer_fee};
-use crate::decoders::orca::whirlpool::math::U256;
+// Pas besoin d'importer U256 ici, car il n'est pas utilisé directement.
 use crate::rpc::ResilientRpcClient;
 use crate::state::global_cache::{CacheableData, GLOBAL_CACHE};
 use anyhow::Context;
@@ -24,7 +24,8 @@ use crate::monitoring::metrics;
 use std::time::Instant;
 use tracing::debug;
 
-// --- STRUCTURES (Inchangées) ---
+// ... (Les structs DecodedClmmPool, PoolState, RewardInfo ne changent pas) ...
+// ... (Les fonctions decode_pool et hydrate ne changent pas) ...
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecodedClmmPool {
     pub address: Pubkey,
@@ -54,106 +55,6 @@ pub struct DecodedClmmPool {
     pub last_swap_timestamp: i64,
 }
 
-impl DecodedClmmPool {
-    pub fn fee_as_percent(&self) -> f64 {
-        self.trade_fee_rate as f64 / 1_000_000.0 * 100.0
-    }
-
-    // Cette fonction est la version "aller" correcte.
-    fn calculate_swap_quote_internal(&self, amount_in: u64, is_base_input: bool) -> Result<(u64, u32, u64)> { // (amount_out, ticks_crossed, fee)
-        let tick_arrays = self.tick_arrays.as_ref().ok_or_else(|| anyhow!("Pool is not hydrated."))?;
-        if tick_arrays.is_empty() || self.liquidity == 0 {
-            return Ok((0, 0, 0));
-        }
-
-        const FEE_RATE_DENOMINATOR_VALUE: u64 = 1_000_000;
-        let fee_amount = amount_in.mul_div_ceil(
-            self.trade_fee_rate as u64,
-            FEE_RATE_DENOMINATOR_VALUE
-        ).ok_or_else(|| anyhow!("Math overflow"))?;
-
-        let mut amount_remaining = amount_in.saturating_sub(fee_amount) as u128;
-
-        let mut total_amount_out: u128 = 0;
-        let mut current_sqrt_price = self.sqrt_price_x64;
-        let mut current_tick_index = self.tick_current;
-        let mut current_liquidity = self.liquidity;
-        let mut tick_arrays_crossed = HashSet::new();
-        let mut ticks_crossed_count = 0u32; // <-- NOTRE COMPTEUR
-
-        while amount_remaining > 0 {
-            let current_tick_array_start_index = tick_array::get_start_tick_index(current_tick_index, self.tick_spacing);
-            tick_arrays_crossed.insert(tick_array::get_tick_array_address(&self.address, current_tick_array_start_index, &self.program_id));
-
-            if current_liquidity > 0 {
-                let (next_tick_index, next_liquidity_net) = match find_next_initialized_tick(self, current_tick_index, is_base_input, tick_arrays) {
-                    Ok(result) => result,
-                    Err(_) => (if is_base_input { math::MIN_TICK } else { math::MAX_TICK }, 0)
-                };
-
-                if next_tick_index != current_tick_index {
-                    ticks_crossed_count += 1; // <-- ON INCRÉMENTE
-                }
-
-                let sqrt_price_target = math::tick_to_sqrt_price_x64(next_tick_index);
-                let (next_sqrt_price, amount_in_step, amount_out_step) = compute_swap_step_without_fee(current_sqrt_price, sqrt_price_target, current_liquidity, amount_remaining, is_base_input)?;
-                if amount_in_step == 0 { break; }
-
-                amount_remaining = amount_remaining.saturating_sub(amount_in_step);
-                total_amount_out = total_amount_out.saturating_add(amount_out_step);
-                current_sqrt_price = next_sqrt_price;
-
-                if current_sqrt_price == sqrt_price_target {
-                    current_liquidity = (current_liquidity as i128 + next_liquidity_net) as u128;
-                    current_tick_index = if is_base_input { next_tick_index - 1 } else { next_tick_index };
-                } else {
-                    current_tick_index = math::get_tick_at_sqrt_price(current_sqrt_price)?;
-                }
-            } else {
-                break;
-            }
-        }
-        // <-- MODIFIÉ : On retourne les 3 valeurs
-        Ok((total_amount_out as u64, ticks_crossed_count, fee_amount))
-    }
-
-    /// Trouve les N prochains TickArrays initialisés dans la direction du swap.
-    fn get_next_initialized_tick_arrays(&self, is_base_input: bool, count: usize) -> Vec<Pubkey> {
-        let tick_arrays = self.tick_arrays.as_ref().unwrap();
-        let mut result = Vec::new();
-
-        if is_base_input { // Le prix baisse, on cherche des index plus petits
-            for (_, array_state) in tick_arrays.iter().rev() {
-                if array_state.start_tick_index <= self.tick_current {
-                    result.push(tick_array::get_tick_array_address(
-                        &self.address,
-                        array_state.start_tick_index,
-                        &self.program_id,
-                    ));
-                    if result.len() >= count {
-                        break;
-                    }
-                }
-            }
-        } else { // Le prix monte, on cherche des index plus grands
-            for (_, array_state) in tick_arrays.iter() {
-                if array_state.start_tick_index >= self.tick_current {
-                    result.push(tick_array::get_tick_array_address(
-                        &self.address,
-                        array_state.start_tick_index,
-                        &self.program_id,
-                    ));
-                    if result.len() >= count {
-                        break;
-                    }
-                }
-            }
-        }
-        result
-    }
-}
-
-// ... Le reste du fichier (structs PoolState, RewardInfo, decode_pool, hydrate) ne change pas ...
 #[repr(C, packed)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 struct PoolState {
@@ -237,89 +138,58 @@ pub fn decode_pool(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Result
         mint_b_max_transfer_fee: 0,
         trade_fee_rate: 0, min_tick: -443636, max_tick: 443636,
         tick_arrays: None,
-        mint_a_program: spl_token::id(), // Valeur par défaut
+        mint_a_program: spl_token::id(),
         mint_b_program: spl_token::id(),
         last_swap_timestamp: 0,
     })
 }
 pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &ResilientRpcClient) -> Result<()> {
-    // --- DÉBUT DE LA NOUVELLE LOGIQUE DE CACHE ---
-
-    // 1. Tenter de récupérer la config CLMM depuis le cache.
+    // La logique de cache reste inchangée
     let cached_config = GLOBAL_CACHE.get(&pool.amm_config);
-
     let decoded_config = if let Some(CacheableData::RaydiumClmmAmmConfig(config)) = cached_config {
-        println!("[Cache] HIT pour Raydium CLMM Config: {}", pool.amm_config);
         config
     } else {
-        println!("[Cache] MISS pour Raydium CLMM Config: {}. Fetching via RPC...", pool.amm_config);
-        // 2. Cache MISS: Faire l'appel RPC uniquement pour la config.
-        let config_account_data = rpc_client
-            .get_account_data(&pool.amm_config)
-            .await
-            .context("Échec de la récupération du AmmConfig pour Raydium CLMM")?;
-
+        let config_account_data = rpc_client.get_account_data(&pool.amm_config).await.context("Échec de la récupération du AmmConfig pour Raydium CLMM")?;
         let new_config = config::decode_config(&config_account_data)?;
-
-        // 3. Mettre à jour le cache.
-        GLOBAL_CACHE.put(
-            pool.amm_config,
-            CacheableData::RaydiumClmmAmmConfig(new_config.clone()),
-        );
+        GLOBAL_CACHE.put(pool.amm_config, CacheableData::RaydiumClmmAmmConfig(new_config.clone()));
         new_config
     };
-
-    // Assigner la config (du cache ou du RPC) au pool.
     pool.tick_spacing = decoded_config.tick_spacing;
     pool.trade_fee_rate = decoded_config.trade_fee_rate;
 
-    // --- FIN DE LA LOGIQUE DE CACHE ---
-
-
-    // Le tokio::join! est maintenant allégé : on ne récupère plus la config.
+    // Le reste de l'hydratation reste inchangé
     let bitmap_ext_address = tickarray_bitmap_extension::get_bitmap_extension_address(&pool.address, &pool.program_id);
-
     let (mint_a_res, mint_b_res, pool_state_res, bitmap_ext_res) = tokio::join!(
-        rpc_client.get_account(&pool.mint_a), // On récupère le compte complet au lieu de juste les data
-        rpc_client.get_account(&pool.mint_b), // Idem ici
+        rpc_client.get_account(&pool.mint_a),
+        rpc_client.get_account(&pool.mint_b),
         rpc_client.get_account_data(&pool.address),
         rpc_client.get_account(&bitmap_ext_address)
     );
-
-
     let mint_a_account = mint_a_res?;
     let decoded_mint_a = spl_token_decoders::mint::decode_mint(&pool.mint_a, &mint_a_account.data)?;
     pool.mint_a_decimals = decoded_mint_a.decimals;
     pool.mint_a_transfer_fee_bps = decoded_mint_a.transfer_fee_basis_points;
     pool.mint_a_max_transfer_fee = decoded_mint_a.max_transfer_fee;
-    pool.mint_a_program = mint_a_account.owner; // <-- On remplit la vraie valeur ici
-
+    pool.mint_a_program = mint_a_account.owner;
     let mint_b_account = mint_b_res?;
     let decoded_mint_b = spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_account.data)?;
     pool.mint_b_decimals = decoded_mint_b.decimals;
     pool.mint_b_transfer_fee_bps = decoded_mint_b.transfer_fee_basis_points;
     pool.mint_b_max_transfer_fee = decoded_mint_b.max_transfer_fee;
-    pool.mint_b_program = mint_b_account.owner; // <-- Et ici
-
+    pool.mint_b_program = mint_b_account.owner;
     let pool_state_data = pool_state_res?;
     const POOL_STATE_DISCRIMINATOR: [u8; 8] = [247, 237, 227, 245, 215, 195, 222, 70];
     if pool_state_data.get(..8) != Some(&POOL_STATE_DISCRIMINATOR) { bail!("Invalid PoolState discriminator during hydration."); }
     let data_slice = &pool_state_data[8..];
     if data_slice.len() < size_of::<PoolState>() { bail!("PoolState data is too short."); }
     let pool_state_struct: &PoolState = from_bytes(&data_slice[..size_of::<PoolState>()]);
-
     let default_bitmap = pool_state_struct.tick_array_bitmap;
     let extension_bitmap_words = if let Ok(account) = bitmap_ext_res {
         tickarray_bitmap_extension::decode_tick_array_bitmap_extension(&account.data)?.bitmap_words
-    } else {
-        Vec::new()
-    };
-
-    // ... Le reste de la fonction pour l'hydratation des tick arrays ne change pas ...
+    } else { Vec::new() };
     let mut addresses_to_fetch = HashSet::new();
     let multiplier = (TICK_ARRAY_SIZE as i32) * (pool.tick_spacing as i32);
     let ticks_in_one_bitmap = 512 * multiplier;
-
     for (word_index, &word) in default_bitmap.iter().enumerate() {
         if word == 0 { continue; }
         for bit_index in 0..64 {
@@ -332,7 +202,6 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &ResilientRpcClient
             }
         }
     }
-
     let negative_pages_len = 14 * 8;
     for (word_index_flat, &word) in extension_bitmap_words.iter().enumerate() {
         if word == 0 { continue; }
@@ -348,19 +217,16 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &ResilientRpcClient
                     let bit_pos_in_page = (pos_idx % 8) * 64 + bit_index;
                     ticks_in_one_bitmap * (page_index as i32 + 1) + (bit_pos_in_page as i32 * multiplier)
                 };
-
                 if start_tick_index >= math::MIN_TICK && start_tick_index <= math::MAX_TICK {
                     addresses_to_fetch.insert(tick_array::get_tick_array_address(&pool.address, start_tick_index, &pool.program_id));
                 }
             }
         }
     }
-
     if addresses_to_fetch.is_empty() {
         pool.tick_arrays = Some(BTreeMap::new());
         return Ok(());
     }
-
     let accounts_results = rpc_client.get_multiple_accounts(&addresses_to_fetch.into_iter().collect::<Vec<_>>()).await?;
     let mut tick_arrays = BTreeMap::new();
     for account_opt in accounts_results {
@@ -371,129 +237,157 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &ResilientRpcClient
         }
     }
     pool.tick_arrays = Some(tick_arrays);
-
     Ok(())
 }
 
-
+// L'implémentation de DecodedClmmPool et le reste du fichier ne changent pas,
+// car la logique interne de `calculate_swap_quote_internal` et `get_required_input`
+// est déjà correcte et s'appuie sur le module `math` que nous venons de corriger.
+impl DecodedClmmPool {
+    // ... (contenu identique)
+    pub fn fee_as_percent(&self) -> f64 { self.trade_fee_rate as f64 / 1_000_000.0 * 100.0 }
+    fn calculate_swap_quote_internal(&self, amount_in: u64, is_base_input: bool) -> Result<(u64, u32, u64)> {
+        let tick_arrays = self.tick_arrays.as_ref().ok_or_else(|| anyhow!("Pool is not hydrated."))?;
+        if tick_arrays.is_empty() || self.liquidity == 0 { return Ok((0, 0, 0)); }
+        const FEE_RATE_DENOMINATOR_VALUE: u64 = 1_000_000;
+        let fee_amount = amount_in.mul_div_ceil(self.trade_fee_rate as u64, FEE_RATE_DENOMINATOR_VALUE).ok_or_else(|| anyhow!("Math overflow"))?;
+        let mut amount_remaining = amount_in.saturating_sub(fee_amount) as u128;
+        let mut total_amount_out: u128 = 0;
+        let mut current_sqrt_price = self.sqrt_price_x64;
+        let mut current_tick_index = self.tick_current;
+        let mut current_liquidity = self.liquidity;
+        let mut tick_arrays_crossed = HashSet::new();
+        let mut ticks_crossed_count = 0u32;
+        while amount_remaining > 0 {
+            let current_tick_array_start_index = tick_array::get_start_tick_index(current_tick_index, self.tick_spacing);
+            tick_arrays_crossed.insert(tick_array::get_tick_array_address(&self.address, current_tick_array_start_index, &self.program_id));
+            if current_liquidity > 0 {
+                let (next_tick_index, next_liquidity_net) = match find_next_initialized_tick(self, current_tick_index, is_base_input, tick_arrays) {
+                    Ok(result) => result,
+                    Err(_) => (if is_base_input { math::MIN_TICK } else { math::MAX_TICK }, 0)
+                };
+                if next_tick_index != current_tick_index { ticks_crossed_count += 1; }
+                let sqrt_price_target = math::tick_to_sqrt_price_x64(next_tick_index);
+                let (next_sqrt_price, amount_in_step, amount_out_step) = compute_swap_step_without_fee(current_sqrt_price, sqrt_price_target, current_liquidity, amount_remaining, is_base_input)?;
+                if amount_in_step == 0 { break; }
+                amount_remaining = amount_remaining.saturating_sub(amount_in_step);
+                total_amount_out = total_amount_out.saturating_add(amount_out_step);
+                current_sqrt_price = next_sqrt_price;
+                if current_sqrt_price == sqrt_price_target {
+                    current_liquidity = (current_liquidity as i128 + next_liquidity_net) as u128;
+                    current_tick_index = if is_base_input { next_tick_index - 1 } else { next_tick_index };
+                } else {
+                    current_tick_index = math::get_tick_at_sqrt_price(current_sqrt_price)?;
+                }
+            } else {
+                break;
+            }
+        }
+        Ok((total_amount_out as u64, ticks_crossed_count, fee_amount))
+    }
+    fn get_next_initialized_tick_arrays(&self, is_base_input: bool, count: usize) -> Vec<Pubkey> {
+        let tick_arrays = self.tick_arrays.as_ref().unwrap();
+        let mut result = Vec::new();
+        if is_base_input {
+            for (_, array_state) in tick_arrays.iter().rev() {
+                if array_state.start_tick_index <= self.tick_current {
+                    result.push(tick_array::get_tick_array_address(&self.address, array_state.start_tick_index, &self.program_id));
+                    if result.len() >= count { break; }
+                }
+            }
+        } else {
+            for (_, array_state) in tick_arrays.iter() {
+                if array_state.start_tick_index >= self.tick_current {
+                    result.push(tick_array::get_tick_array_address(&self.address, array_state.start_tick_index, &self.program_id));
+                    if result.len() >= count { break; }
+                }
+            }
+        }
+        result
+    }
+}
 #[async_trait]
 impl PoolOperations for DecodedClmmPool {
-    fn get_mints(&self) -> (Pubkey, Pubkey) {
-        (self.mint_a, self.mint_b)
-    }
-
-    fn get_vaults(&self) -> (Pubkey, Pubkey) {
-        (self.vault_a, self.vault_b)
-    }
-
+    fn get_mints(&self) -> (Pubkey, Pubkey) { (self.mint_a, self.mint_b) }
+    fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
     fn get_reserves(&self) -> (u64, u64) {
         if let Some(tick_arrays) = &self.tick_arrays {
             let mut total_liquidity: u128 = 0;
-            // On somme la liquidité brute de tous les ticks initialisés dans tous les arrays chargés.
             for (_, tick_array_state) in tick_arrays.iter() {
                 for tick in tick_array_state.ticks.iter() {
                     total_liquidity = total_liquidity.saturating_add(tick.liquidity_gross);
                 }
             }
-
-            // On estime les réserves totales en se basant sur la liquidité totale et le prix actuel.
-            // C'est une approximation, mais elle est basée sur l'ensemble de la liquidité du pool.
-            let price_x64 = U256::from(self.sqrt_price_x64);
-            let liquidity_u256 = U256::from(total_liquidity);
-            let q64 = U256::one() << 64;
+            // On qualifie pleinement les types pour éviter toute ambiguïté
+            let price_x64 = ruint::aliases::U256::from(self.sqrt_price_x64);
+            let liquidity_u256 = ruint::aliases::U256::from(total_liquidity);
+            let q64 = ruint::aliases::U256::from(1u128) << 64; // Préciser 1u128 pour être sûr
 
             if price_x64.is_zero() { return (0, 0); }
 
-            let estimated_reserve_a = (liquidity_u256 * q64 / price_x64).as_u64();
-            let estimated_reserve_b = ((liquidity_u256 * price_x64) >> 64).as_u64();
+            // LA SOLUTION : On crée des variables intermédiaires pour aider le compilateur
+            let temp_a: ruint::aliases::U256 = liquidity_u256 * q64 / price_x64;
+            let estimated_reserve_a: u64 = temp_a.try_into().unwrap_or(0);
+
+            let temp_b: ruint::aliases::U256 = (liquidity_u256 * price_x64) >> 64;
+            let estimated_reserve_b: u64 = temp_b.try_into().unwrap_or(0);
 
             (estimated_reserve_a, estimated_reserve_b)
         } else {
-            // Si le pool n'a pas été hydraté, on ne peut rien dire.
             (0, 0)
         }
     }
 
     fn address(&self) -> Pubkey { self.address }
-
     fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<QuoteResult> {
-
         let start_time = Instant::now();
         debug!(amount_in, "Calcul de get_quote_with_details pour Raydium CLMM");
-
         let is_base_input = *token_in_mint == self.mint_a;
         let (in_mint_fee_bps, in_mint_max_fee, out_mint_fee_bps, out_mint_max_fee) = if is_base_input {
             (self.mint_a_transfer_fee_bps, self.mint_a_max_transfer_fee, self.mint_b_transfer_fee_bps, self.mint_b_max_transfer_fee)
         } else {
             (self.mint_b_transfer_fee_bps, self.mint_b_max_transfer_fee, self.mint_a_transfer_fee_bps, self.mint_a_max_transfer_fee)
         };
-
         let fee_on_input = calculate_transfer_fee(amount_in, in_mint_fee_bps, in_mint_max_fee)?;
         let net_amount_in = amount_in.saturating_sub(fee_on_input);
-
-        // On appelle la fonction interne qui retourne maintenant toutes les infos
         let (gross_amount_out, ticks_crossed, trade_fee) = self.calculate_swap_quote_internal(net_amount_in, is_base_input)?;
-
         let fee_on_output = calculate_transfer_fee(gross_amount_out, out_mint_fee_bps, out_mint_max_fee)?;
-
         metrics::GET_QUOTE_LATENCY.with_label_values(&["RaydiumCLMM"]).observe(start_time.elapsed().as_secs_f64());
-
-        Ok(QuoteResult {
-            amount_out: gross_amount_out.saturating_sub(fee_on_output),
-            fee: trade_fee,
-            ticks_crossed,
-        })
+        Ok(QuoteResult { amount_out: gross_amount_out.saturating_sub(fee_on_output), fee: trade_fee, ticks_crossed, })
     }
-
-
     fn get_required_input(&mut self, token_out_mint: &Pubkey, amount_out: u64, _current_timestamp: i64) -> Result<u64> {
-
         let start_time = Instant::now();
         debug!(amount_out, "Calcul de get_required_input pour Raydium CLMM");
-
         if amount_out == 0 { return Ok(0); }
         let tick_arrays = self.tick_arrays.as_ref().ok_or_else(|| anyhow!("Pool not hydrated."))?;
-        if tick_arrays.is_empty() || self.liquidity == 0 {
-            return Err(anyhow!("Not enough liquidity in pool (no tick arrays)."));
-        }
-
+        if tick_arrays.is_empty() || self.liquidity == 0 { return Err(anyhow!("Not enough liquidity in pool (no tick arrays).")); }
         let is_base_output = *token_out_mint == self.mint_a;
         let is_base_input = !is_base_output;
-
         let (in_mint_fee_bps, in_mint_max_fee, out_mint_fee_bps, out_mint_max_fee) = if is_base_input {
             (self.mint_a_transfer_fee_bps, self.mint_a_max_transfer_fee, self.mint_b_transfer_fee_bps, self.mint_b_max_transfer_fee)
         } else {
             (self.mint_b_transfer_fee_bps, self.mint_b_max_transfer_fee, self.mint_a_transfer_fee_bps, self.mint_a_max_transfer_fee)
         };
-
         let gross_amount_out_target = calculate_gross_amount_before_transfer_fee(amount_out, out_mint_fee_bps, out_mint_max_fee)? as u128;
-
-        // --- LA CORRECTION EST ICI ---
         let mut mutable_gross_amount_out_target = gross_amount_out_target;
-
         let mut total_amount_in_net: u128 = 0;
         let mut current_sqrt_price = self.sqrt_price_x64;
         let mut current_tick_index = self.tick_current;
         let mut current_liquidity = self.liquidity;
-
         while mutable_gross_amount_out_target > 0 {
             if current_liquidity == 0 { return Err(anyhow!("Not enough liquidity to reach target amount out.")); }
-
             let (next_tick_index, next_liquidity_net) = match find_next_initialized_tick(self, current_tick_index, is_base_input, tick_arrays) {
                 Ok(result) => result,
                 Err(_) => (if is_base_input { math::MIN_TICK } else { math::MAX_TICK }, 0)
             };
             let sqrt_price_target = math::tick_to_sqrt_price_x64(next_tick_index);
-
             let amount_out_available_in_step = (if is_base_output {
                 math::get_amount_x(sqrt_price_target, current_sqrt_price, current_liquidity, false)?
             } else {
                 math::get_amount_y(current_sqrt_price, sqrt_price_target, current_liquidity, false)?
             }) as u128;
-
             let amount_out_chunk = mutable_gross_amount_out_target.min(amount_out_available_in_step);
             if amount_out_chunk == 0 && mutable_gross_amount_out_target > 0 { break; }
-
             let (prev_sqrt_price, amount_in_step_net) = if is_base_output {
                 let starting_sqrt_price = math::get_sqrt_price_from_amount_x_out(current_sqrt_price, current_liquidity, amount_out_chunk);
                 let required_y = math::get_amount_y(starting_sqrt_price, current_sqrt_price, current_liquidity, true)?;
@@ -503,11 +397,9 @@ impl PoolOperations for DecodedClmmPool {
                 let required_x = math::get_amount_x(current_sqrt_price, starting_sqrt_price, current_liquidity, true)?;
                 (starting_sqrt_price, required_x as u128)
             };
-
             total_amount_in_net = total_amount_in_net.saturating_add(amount_in_step_net);
             mutable_gross_amount_out_target = mutable_gross_amount_out_target.saturating_sub(amount_out_chunk);
             current_sqrt_price = prev_sqrt_price;
-
             if current_sqrt_price == sqrt_price_target && next_liquidity_net != 0 {
                 current_liquidity = (current_liquidity as i128 + next_liquidity_net) as u128;
                 current_tick_index = if is_base_input { next_tick_index - 1 } else { next_tick_index };
@@ -515,71 +407,35 @@ impl PoolOperations for DecodedClmmPool {
                 current_tick_index = math::get_tick_at_sqrt_price(current_sqrt_price)?;
             }
         }
-
         const FEE_RATE_DENOMINATOR_VALUE: u64 = 1_000_000;
-        let amount_in_after_transfer_fee = (total_amount_in_net as u64).mul_div_ceil(
-            FEE_RATE_DENOMINATOR_VALUE,
-            FEE_RATE_DENOMINATOR_VALUE - self.trade_fee_rate as u64
-        ).ok_or_else(|| anyhow!("Math overflow"))?;
-
-        // 1. On stocke le résultat du calcul dans une variable `result`
+        let amount_in_after_transfer_fee = (total_amount_in_net as u64).mul_div_ceil(FEE_RATE_DENOMINATOR_VALUE, FEE_RATE_DENOMINATOR_VALUE - self.trade_fee_rate as u64).ok_or_else(|| anyhow!("Math overflow"))?;
         let result = calculate_gross_amount_before_transfer_fee(amount_in_after_transfer_fee, in_mint_fee_bps, in_mint_max_fee);
-
-        // 2. MAINTENANT, on peut enregistrer la métrique
         metrics::GET_QUOTE_LATENCY.with_label_values(&["RaydiumCLMM_required_input"]).observe(start_time.elapsed().as_secs_f64());
-
-        // 3. Et enfin, on retourne le résultat qu'on a stocké
         result
     }
-
-
     fn update_from_account_data(&mut self, _account_pubkey: &Pubkey, account_data: &[u8]) -> Result<()> {
-        // On réutilise notre décodeur spécifique à Raydium CLMM.
         let updated_pool = super::decode_pool(&self.address, account_data, &self.program_id)?;
-
-        // On met à jour les champs critiques qui changent à chaque swap.
         self.sqrt_price_x64 = updated_pool.sqrt_price_x64;
         self.liquidity = updated_pool.liquidity;
         self.tick_current = updated_pool.tick_current;
-
         Ok(())
     }
-
-
-    fn create_swap_instruction(
-        &self,
-        token_in_mint: &Pubkey,
-        amount_in: u64,
-        min_amount_out: u64,
-        user_accounts: &UserSwapAccounts,
-    ) -> Result<Instruction> {
+    fn create_swap_instruction(&self, token_in_mint: &Pubkey, amount_in: u64, min_amount_out: u64, user_accounts: &UserSwapAccounts) -> Result<Instruction> {
         let is_base_input = *token_in_mint == self.mint_a;
         let mut tick_arrays = self.get_next_initialized_tick_arrays(is_base_input, 3);
-        if tick_arrays.is_empty() {
-            bail!("Impossible de trouver des tick_arrays initialisés pour le swap CLMM.");
-        }
-        while tick_arrays.len() < 3 {
-            tick_arrays.push(*tick_arrays.last().unwrap());
-        }
-
-        let sqrt_price_limit = if is_base_input {
-            4295128739_u128
-        } else {
-            79226673515401279992447579055_u128
-        };
-
+        if tick_arrays.is_empty() { bail!("Impossible de trouver des tick_arrays initialisés pour le swap CLMM."); }
+        while tick_arrays.len() < 3 { tick_arrays.push(*tick_arrays.last().unwrap()); }
+        let sqrt_price_limit = if is_base_input { 4295128739_u128 } else { 79226673515401279992447579055_u128 };
         let mut instruction_data: Vec<u8> = vec![43, 4, 237, 11, 26, 201, 30, 98];
         instruction_data.extend_from_slice(&amount_in.to_le_bytes());
         instruction_data.extend_from_slice(&min_amount_out.to_le_bytes());
         instruction_data.extend_from_slice(&sqrt_price_limit.to_le_bytes());
         instruction_data.push(u8::from(is_base_input));
-
-        let (input_vault, output_vault, input_vault_mint, output_vault_mint) = if is_base_input {
+        let (input_vault, output_vault, input_mint, output_mint) = if is_base_input {
             (self.vault_a, self.vault_b, self.mint_a, self.mint_b)
         } else {
             (self.vault_b, self.vault_a, self.mint_b, self.mint_a)
         };
-
         let mut accounts = vec![
             AccountMeta { pubkey: user_accounts.owner, is_signer: true, is_writable: false },
             AccountMeta { pubkey: self.amm_config, is_signer: false, is_writable: false },
@@ -592,37 +448,20 @@ impl PoolOperations for DecodedClmmPool {
             AccountMeta { pubkey: spl_token::id(), is_signer: false, is_writable: false },
             AccountMeta { pubkey: spl_token_2022::id(), is_signer: false, is_writable: false },
             AccountMeta { pubkey: spl_memo::id(), is_signer: false, is_writable: false },
-            AccountMeta { pubkey: input_vault_mint, is_signer: false, is_writable: false },
-            AccountMeta { pubkey: output_vault_mint, is_signer: false, is_writable: false },
+            AccountMeta { pubkey: input_mint, is_signer: false, is_writable: false },
+            AccountMeta { pubkey: output_mint, is_signer: false, is_writable: false },
         ];
-
         let tick_array_bitmap_extension = tickarray_bitmap_extension::get_bitmap_extension_address(&self.address, &self.program_id);
         accounts.push(AccountMeta { pubkey: tick_array_bitmap_extension, is_signer: false, is_writable: true });
-
-        for key in tick_arrays {
-            accounts.push(AccountMeta { pubkey: key, is_signer: false, is_writable: true });
-        }
-
-        Ok(Instruction {
-            program_id: self.program_id,
-            accounts,
-            data: instruction_data,
-        })
+        for key in tick_arrays { accounts.push(AccountMeta { pubkey: key, is_signer: false, is_writable: true }); }
+        Ok(Instruction { program_id: self.program_id, accounts, data: instruction_data, })
     }
 }
-
-// Nouvelle fonction helper qui ne gère pas les frais
-fn compute_swap_step_without_fee(
-    sqrt_price_current_x64: u128,
-    sqrt_price_target_x64: u128,
-    liquidity: u128,
-    amount_remaining: u128,
-    is_base_input: bool,
-) -> Result<(u128, u128, u128)> {
+// Le reste des fonctions (compute_swap_step_without_fee, find_next_initialized_tick) ne change pas.
+fn compute_swap_step_without_fee(sqrt_price_current_x64: u128, sqrt_price_target_x64: u128, liquidity: u128, amount_remaining: u128, is_base_input: bool) -> Result<(u128, u128, u128)> {
     let sqrt_price_next_x64: u128;
     let amount_in: u128;
     let amount_out: u128;
-
     if is_base_input {
         let amount_in_to_reach_target = math::get_amount_x(sqrt_price_target_x64, sqrt_price_current_x64, liquidity, true)? as u128;
         if amount_remaining >= amount_in_to_reach_target {
@@ -646,59 +485,39 @@ fn compute_swap_step_without_fee(
     }
     Ok((sqrt_price_next_x64, amount_in, amount_out))
 }
-
-
-fn find_next_initialized_tick<'a>(
-    pool: &'a DecodedClmmPool,
-    current_tick: i32,
-    is_base_input: bool, // true = zero_for_one (cherche vers le bas)
-    tick_arrays: &'a BTreeMap<i32, TickArrayState>,
-) -> Result<(i32, i128)> {
+fn find_next_initialized_tick<'a>(pool: &'a DecodedClmmPool, current_tick: i32, is_base_input: bool, tick_arrays: &'a BTreeMap<i32, TickArrayState>) -> Result<(i32, i128)> {
     let tick_spacing = pool.tick_spacing as i32;
-
     if is_base_input {
         let current_array_start_index = tick_array::get_start_tick_index(current_tick, pool.tick_spacing);
         let mut tick_offset_in_array = (current_tick - current_array_start_index) / tick_spacing;
-
         if let Some(array_state) = tick_arrays.get(&current_array_start_index) {
             while tick_offset_in_array >= 0 {
                 let tick_state = &array_state.ticks[tick_offset_in_array as usize];
-                if tick_state.liquidity_gross > 0 {
-                    return Ok((tick_state.tick, tick_state.liquidity_net));
-                }
+                if tick_state.liquidity_gross > 0 { return Ok((tick_state.tick, tick_state.liquidity_net)); }
                 tick_offset_in_array -= 1;
             }
         }
-
         for (_, array_state) in tick_arrays.range(..current_array_start_index).rev() {
             for i in (0..TICK_ARRAY_SIZE).rev() {
                 let tick_state = &array_state.ticks[i];
-                if tick_state.liquidity_gross > 0 {
-                    return Ok((tick_state.tick, tick_state.liquidity_net));
-                }
+                if tick_state.liquidity_gross > 0 { return Ok((tick_state.tick, tick_state.liquidity_net)); }
             }
         }
     } else {
         let current_array_start_index = tick_array::get_start_tick_index(current_tick, pool.tick_spacing);
         let mut tick_offset_in_array = ((current_tick - current_array_start_index) / tick_spacing) + 1;
-
         if let Some(array_state) = tick_arrays.get(&current_array_start_index) {
             while tick_offset_in_array < TICK_ARRAY_SIZE as i32 {
                 let tick_state = &array_state.ticks[tick_offset_in_array as usize];
-                if tick_state.liquidity_gross > 0 {
-                    return Ok((tick_state.tick, tick_state.liquidity_net));
-                }
+                if tick_state.liquidity_gross > 0 { return Ok((tick_state.tick, tick_state.liquidity_net)); }
                 tick_offset_in_array += 1;
             }
         }
-
         for (start_index, array_state) in tick_arrays.range(current_array_start_index + 1..) {
             if *start_index > current_array_start_index + (TICK_ARRAY_SIZE as i32 * tick_spacing) { break; }
             for i in 0..TICK_ARRAY_SIZE {
                 let tick_state = &array_state.ticks[i];
-                if tick_state.liquidity_gross > 0 {
-                    return Ok((tick_state.tick, tick_state.liquidity_net));
-                }
+                if tick_state.liquidity_gross > 0 { return Ok((tick_state.tick, tick_state.liquidity_net)); }
             }
         }
     }

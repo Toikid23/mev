@@ -40,7 +40,6 @@ fixed = "1.29.0"
 spl-math = "0.3.0"
 dotenvy = "0.15"
 envy = "0.4.2"
-uint = "0.10.0"
 num-integer = "0.1.46"
 futures = "0.3.31"
 anchor-spl = "0.31.1"
@@ -55,6 +54,7 @@ solana-address-lookup-table-program = { git = "https://github.com/solana-program
 spl-stake-pool = "2.0.3"
 solana-sdk-ids = "2.2.1"
 mimalloc = { version = "0.1.48", default-features = false}
+ruint = { version = "1.16.0", features = ["serde"]}
 
 
 
