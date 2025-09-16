@@ -5,7 +5,7 @@ use anyhow::{anyhow, bail, Result};
 use bytemuck::{Pod, Zeroable};
 use crate::rpc::ResilientRpcClient;
 use solana_sdk::pubkey::Pubkey;
-use uint::construct_uint;
+use ruint::aliases::U256;
 use solana_sdk::instruction::{Instruction, AccountMeta};
 use spl_token;
 use serde::{Serialize, Deserialize};
@@ -17,8 +17,6 @@ use crate::monitoring::metrics;
 use std::time::Instant;
 use tracing::debug;
 
-
-construct_uint! { pub struct U256(4); }
 
 pub const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG");
 pub const POOL_STATE_DISCRIMINATOR: [u8; 8] = [241, 154, 109, 4, 17, 177, 109, 188];
@@ -139,18 +137,18 @@ impl PoolOperations for DecodedMeteoraDammPool {
     fn get_vaults(&self) -> (Pubkey, Pubkey) { (self.vault_a, self.vault_b) }
 
     fn get_reserves(&self) -> (u64, u64) {
-        // Pour DAMM V2, on peut faire une estimation des réserves effectives
-        // en utilisant la liquidité et le prix actuels.
-        let price_x64 = U256::from(self.sqrt_price);
-        let liquidity_u256 = U256::from(self.liquidity);
-        let q64 = U256::one() << 64;
+        let price_x64: U256 = U256::from(self.sqrt_price);
+        let liquidity_u256: U256 = U256::from(self.liquidity);
+        let q64: U256 = U256::ONE << 64;
 
         if price_x64.is_zero() { return (0, 0); }
 
-        // Formules inversées : amount_a = L / sqrt(P), amount_b = L * sqrt(P)
-        // C'est une approximation de la liquidité "autour" du prix actuel.
-        let estimated_reserve_a = (liquidity_u256 * q64 / price_x64).as_u64();
-        let estimated_reserve_b = ((liquidity_u256 * price_x64) >> 64).as_u64();
+        // LA CORRECTION : On utilise une variable intermédiaire pour spécifier le type.
+        let temp_a: U256 = liquidity_u256 * q64 / price_x64;
+        let estimated_reserve_a = temp_a.try_into().unwrap_or(0);
+
+        let temp_b: U256 = (liquidity_u256 * price_x64) >> 64;
+        let estimated_reserve_b = temp_b.try_into().unwrap_or(0);
 
         (estimated_reserve_a, estimated_reserve_b)
     }

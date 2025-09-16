@@ -14,12 +14,12 @@ const REFRESH_INTERVAL_MINS: u64 = 60; // Rafraîchir toutes les heures
 struct ValidatorApiResponse {
     account: String, // Identity Pubkey
     vote_account: String,
-    jito: bool,
+    _jito: bool,
     data_center_key: Option<String>, // Contient la localisation comme "12345-US-Ashburn"
     active_stake: u64,
     skipped_slot_score: i32,
-    skipped_after_score: i32,
-    vote_latency_score: i32,
+    _skipped_after_score: i32,
+    _vote_latency_score: i32,
     // Ajoutez d'autres champs de l'API ici si vous en avez besoin
 }
 

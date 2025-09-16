@@ -1,5 +1,4 @@
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+// DANS : src/bin/monitoring_runner
 
 use anyhow::Result;
 use std::time::{Duration, Instant};
@@ -54,7 +53,7 @@ async fn main() -> Result<()> {
 
     let mut iteration_count: u64 = 0;
     loop {
-        let start_time = Instant::now();
+        let _start_time = Instant::now();
 
         // Étape 3: Exécuter notre logique de test
         perform_dev_run_cycle(iteration_count).await;

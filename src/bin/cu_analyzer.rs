@@ -13,7 +13,6 @@ use solana_sdk::{
 use spl_associated_token_account::get_associated_token_address_with_program_id;
 use solana_client::rpc_config::RpcSimulateTransactionConfig;
 use solana_transaction_status::UiTransactionEncoding;
-use spl_associated_token_account::get_associated_token_address;
 use std::str::FromStr;
 
 /// Structure pour stocker le résultat d'une analyse.
