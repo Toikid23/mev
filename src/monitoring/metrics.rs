@@ -21,11 +21,6 @@ lazy_static! {
     pub static ref TRANSACTIONS_SENT: IntCounter = register_int_counter!(
         "mev_transactions_sent_total", "Nombre de transactions envoyées (Jito ou Normal)"
     ).unwrap();
-    pub static ref TRANSACTION_OUTCOMES: IntCounterVec = register_int_counter_vec!(
-        "mev_transaction_outcomes_total",
-        "Résultats des transactions après décision",
-        &["outcome"] // Labels: "SimSuccess", "SimFailure", "RpcError", "JitoSent", "NormalSent", "Abandoned"
-    ).unwrap();
 
     // --- Performance & Latence (Pour les problèmes "invisibles") ---
     pub static ref PROCESS_OPPORTUNITY_LATENCY: Histogram = register_histogram!(
@@ -69,6 +64,14 @@ lazy_static! {
 
     pub static ref ARBITRAGE_SLIPPAGE: Histogram = register_histogram!(
         "mev_arbitrage_slippage_lamports", "Distribution du slippage (différence entre profit estimé et réel)"
+    ).unwrap();
+
+    pub static ref TRANSACTION_OUTCOMES: IntCounterVec = register_int_counter_vec!(
+        "mev_transaction_outcomes_total",
+        "Résultats des transactions après décision",
+        // --- MODIFICATION ICI ---
+        &["outcome", "pool_pair"] // Labels: "SimSuccess", "pool1-pool2"
+        // --- FIN DE LA MODIFICATION ---
     ).unwrap();
 
 }
