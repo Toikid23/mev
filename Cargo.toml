@@ -94,3 +94,7 @@ path = "src/bin/census_runner.rs"
 [[bin]]
 name = "filtering_bot"
 path = "src/bin/filtering_bot.rs"
+
+[[bin]]
+name = "dev_runner"
+path = "src/bin/dev_runner.rs"
