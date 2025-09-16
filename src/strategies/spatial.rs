@@ -6,6 +6,7 @@ use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
 use std::sync::Arc;
 use anyhow::{Result};
+use crate::execution::cu_manager;
 
 #[derive(Debug, Clone)]
 pub struct ArbitrageOpportunity {
@@ -43,30 +44,37 @@ pub async fn find_spatial_arbitrage(
         let mut best_buyer: Option<(u64, Pubkey)> = None;
 
         for pool_key in pool_keys {
-            // <-- MODIFIÉ : Accès direct au pool_data
             let pool_data = match graph.pools.get(pool_key) {
                 Some(p) => p,
                 None => continue,
             };
 
-            if let Ok(cost_to_buy_b) = pool_data.get_quote(mint_a, PRICE_CHECK_AMOUNT, 0) {
-                if cost_to_buy_b > 0 {
-                    if best_seller.is_none() || cost_to_buy_b < best_seller.unwrap().0 {
-                        best_seller = Some((cost_to_buy_b, *pool_key));
+            // On essaie d'acheter le token B avec 0.1 token A
+            if let Ok(quote_result_a_to_b) = pool_data.get_quote_with_details(mint_a, PRICE_CHECK_AMOUNT, 0) {
+                if quote_result_a_to_b.amount_out > 0 {
+                    // On calcule un "prix" : combien de A faut-il pour 1 B
+                    let price_a_per_b = (PRICE_CHECK_AMOUNT as u128 * 1_000_000) / quote_result_a_to_b.amount_out as u128;
+                    if best_seller.is_none() || price_a_per_b < best_seller.unwrap().0 as u128 {
+                        best_seller = Some((price_a_per_b as u64, *pool_key));
                     }
                 }
             }
 
-            if let Ok(revenue_from_selling_b) = pool_data.get_quote(mint_b, PRICE_CHECK_AMOUNT, 0) {
-                if best_buyer.is_none() || revenue_from_selling_b > best_buyer.unwrap().0 {
-                    best_buyer = Some((revenue_from_selling_b, *pool_key));
+            // On essaie de vendre 0.1 token B pour du token A
+            if let Ok(quote_result_b_to_a) = pool_data.get_quote_with_details(mint_b, PRICE_CHECK_AMOUNT, 0) {
+                // On calcule un "prix" : combien de A on reçoit pour 1 B
+                let price_a_per_b = (quote_result_b_to_a.amount_out as u128 * 1_000_000) / PRICE_CHECK_AMOUNT as u128;
+                if best_buyer.is_none() || price_a_per_b > best_buyer.unwrap().0 as u128 {
+                    best_buyer = Some((price_a_per_b as u64, *pool_key));
                 }
             }
         }
 
-        if let (Some((_sell_price, sell_key)), Some((buy_price, buy_key))) = (best_seller, best_buyer) {
-            if sell_key != buy_key && buy_price > PRICE_CHECK_AMOUNT {
-                // <-- BLOC CORRIGÉ : Accès direct aux pools pour l'optimiseur
+        if let (Some((sell_price_norm, sell_key)), Some((buy_price_norm, buy_key))) = (best_seller, best_buyer) {
+            if sell_key != buy_key && buy_price_norm > sell_price_norm {
+                let initial_profit_estimate_percent = (buy_price_norm as f64 - sell_price_norm as f64) / sell_price_norm as f64;
+
+                // --- OPTIMISATION : EARLY REJECTION AVEC FRAIS PRÉCIS ---
                 let mut pool_buy_from = match graph.pools.get(&sell_key) {
                     Some(p) => p.clone(),
                     None => continue,
@@ -76,14 +84,32 @@ pub async fn find_spatial_arbitrage(
                     None => continue,
                 };
 
-                if let Some(final_opportunity) = find_optimal_arbitrage(&mut pool_buy_from, &mut pool_sell_to, *mint_a, *mint_b) {
-                    if final_opportunity.profit_in_lamports >= MINIMUM_PROFIT_LAMPS {
-                        opportunities.push(final_opportunity);
+                // On estime les CUs basés sur 1 tick traversé (estimation conservatrice)
+                let estimated_cus = cu_manager::estimate_arbitrage_cost(&pool_buy_from, 1, &pool_sell_to, 1);
+
+                // On estime les deux types de coûts de transaction
+                const ESTIMATED_PRIORITY_FEE_PER_CU: u64 = 5000; // Estimation agressive mais réaliste
+                let estimated_rpc_cost = (estimated_cus * ESTIMATED_PRIORITY_FEE_PER_CU) / 1_000_000;
+
+                const JITO_TIP_PERCENT: u64 = 20;
+                // Le profit initial est un pourcentage, on l'applique au montant de notre test.
+                let estimated_profit_on_test = (PRICE_CHECK_AMOUNT as f64 * initial_profit_estimate_percent) as u64;
+                let estimated_jito_tip = (estimated_profit_on_test as u128 * JITO_TIP_PERCENT as u128 / 100) as u64;
+
+                // On prend le coût le plus élevé des deux comme notre seuil
+                let transaction_cost_threshold = std::cmp::max(estimated_rpc_cost, estimated_jito_tip);
+
+                // Si le profit estimé sur notre petit trade de test est déjà inférieur au coût de la tx, on abandonne
+                if estimated_profit_on_test > transaction_cost_threshold {
+                    if let Some(final_opportunity) = find_optimal_arbitrage(&mut pool_buy_from, &mut pool_sell_to, *mint_a, *mint_b) {
+                        if final_opportunity.profit_in_lamports >= MINIMUM_PROFIT_LAMPS {
+                            opportunities.push(final_opportunity);
+                        }
                     }
                 }
+                // --- FIN DE L'OPTIMISATION ---
             }
         }
-
     }
     if !opportunities.is_empty() {
         println!("[MEM_METRICS] spatial.rs - opportunities length: {}", opportunities.len());
@@ -150,8 +176,11 @@ where
     let mut max_profit: i128 = 0;
     let mut best_input: u64 = 0;
 
-    for _ in 0..100 {
-        if low_bound > high_bound {
+    // --- LA MODIFICATION EST ICI ---
+    // On boucle tant que l'intervalle de recherche est significatif.
+    // 1000 lamports est une précision largement suffisante.
+    for _ in 0..32 { // On garde une limite de 32 itérations comme sécurité absolue
+        if low_bound > high_bound || (high_bound - low_bound) < 1000 {
             break;
         }
 
@@ -160,14 +189,8 @@ where
 
         if m1 >= m2 { break; }
 
-        let profit1 = match profit_fn(m1) {
-            Ok(p) => p,
-            Err(_) => i128::MIN,
-        };
-        let profit2 = match profit_fn(m2) {
-            Ok(p) => p,
-            Err(_) => i128::MIN,
-        };
+        let profit1 = profit_fn(m1).unwrap_or(i128::MIN);
+        let profit2 = profit_fn(m2).unwrap_or(i128::MIN);
 
         if profit1 > max_profit {
             max_profit = profit1;
@@ -179,11 +202,12 @@ where
         }
 
         if profit1 < profit2 {
-            low_bound = m1;
+            low_bound = m1 + 1; // On explore la partie droite
         } else {
-            high_bound = m2;
+            high_bound = m2 - 1; // On explore la partie gauche
         }
     }
+    // --- FIN DE LA MODIFICATION ---
 
     if max_profit > 0 {
         Some((best_input, max_profit))
