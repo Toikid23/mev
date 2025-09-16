@@ -23,6 +23,7 @@ use mev::{
     },
     strategies::spatial::{find_spatial_arbitrage, ArbitrageOpportunity},
 };
+use mev::execution::sender::{ArbitrageSendInfo, TransactionSender, UnifiedSender};
 use chrono::Utc;
 use solana_address_lookup_table_program::state::AddressLookupTable;
 use solana_sdk::{
@@ -328,6 +329,7 @@ async fn analysis_worker(
     leader_schedule_tracker: Arc<LeaderScheduleTracker>,
     validator_intel: Arc<ValidatorIntelService>,
     fee_manager: FeeManager,
+    sender: Arc<dyn TransactionSender>,
 ) {
     info!("[Worker {}] Démarrage.", id);
     // La boucle principale est maintenant beaucoup plus simple
@@ -367,17 +369,18 @@ async fn analysis_worker(
 
             process_opportunity(
                 opportunity, Arc::new(temp_graph_for_processing), rpc_client.clone(), payer.insecure_clone(), &fee_manager,
-                slot_tracker.clone(), slot_metronome.clone(), leader_schedule_tracker.clone(), validator_intel.clone()
+                slot_tracker.clone(), slot_metronome.clone(), leader_schedule_tracker.clone(), validator_intel.clone(),
+                sender.as_ref() // <-- ARGUMENT MANQUANT AJOUTÉ
             ).await;
         } else {
             process_opportunity(
                 opportunity, graph_snapshot.clone(), rpc_client.clone(), payer.insecure_clone(), &fee_manager,
-                slot_tracker.clone(), slot_metronome.clone(), leader_schedule_tracker.clone(), validator_intel.clone()
+                slot_tracker.clone(), slot_metronome.clone(), leader_schedule_tracker.clone(), validator_intel.clone(),
+                sender.as_ref() // <-- ARGUMENT MANQUANT AJOUTÉ
             ).await;
         }
     }
 }
-
 // Helper pour réhydrater uniquement les pools qui en ont besoin (CLMMs)
 async fn rehydrate_if_clmm(pool: Pool, rpc_client: &Arc<ResilientRpcClient>) -> Result<Option<Pool>> {
     match pool {
@@ -418,6 +421,7 @@ async fn process_opportunity(
     slot_metronome: Arc<SlotMetronome>,
     leader_schedule_tracker: Arc<LeaderScheduleTracker>,
     validator_intel: Arc<ValidatorIntelService>,
+    sender: &dyn TransactionSender,
 ) {
     let start_time = Instant::now();
     let current_span = tracing::Span::current();
@@ -575,42 +579,67 @@ async fn process_opportunity(
             metrics::TRANSACTION_OUTCOMES.with_label_values(&["Abandoned_NormalProfitTooLow", &pool_pair_id]).inc();
         }
     }
-    if let Some(tx_to_simulate) = final_tx {
-        let sim_config = RpcSimulateTransactionConfig {sig_verify: false, replace_recent_blockhash: true, commitment: Some(rpc_client.commitment()), encoding: Some(UiTransactionEncoding::Base64), accounts: None, min_context_slot: None, inner_instructions: false,};
-        match rpc_client.simulate_transaction_with_config(&tx_to_simulate, sim_config).await {
-            Ok(sim_response) => {
-                let sim_value = sim_response.value;
-                if let Some(err) = sim_value.err {
-                    warn!(error = ?err, "ÉCHEC DE LA SIMULATION FINALE.");
-                    if let Some(logs) = sim_value.logs { for log in logs { warn!(log = log); } }
-                    current_span.record("outcome", "SimFailure");
-                    metrics::TRANSACTION_OUTCOMES.with_label_values(&["SimFailure", &pool_pair_id]).inc();
-                } else {
-                    info!("SUCCÈS DE LA SIMULATION FINALE !");
-                    current_span.record("outcome", "SimSuccess");
-                    metrics::TRANSACTION_OUTCOMES.with_label_values(&["SimSuccess", &pool_pair_id]).inc();
-                    if let Some(logs) = &sim_value.logs {
-                        if let Some(realized_profit) = simulator::parse_realized_profit_from_logs(logs) {
-                            let slippage = (profit_brut_estime as i64) - (realized_profit as i64);
-                            info!(realized_profit, slippage, "Analyse financière (basée sur la simulation) terminée.");
-                            metrics::ARBITRAGE_PROFIT_REALIZED.observe(realized_profit as f64);
-                            metrics::ARBITRAGE_SLIPPAGE.observe(slippage as f64);
-                        }
-                    }
-                    if is_jito_leader {
-                        info!("[PLACEHOLDER] La transaction Jito serait envoyée ici.");
-                        metrics::TRANSACTIONS_SENT.inc();
-                        current_span.record("decision", "JitoSent_Simulated");
-                        metrics::TRANSACTION_OUTCOMES.with_label_values(&["JitoSent_Simulated", &pool_pair_id]).inc();
-                    } else {
-                        info!("[PLACEHOLDER] La transaction normale serait envoyée ici.");
-                        metrics::TRANSACTIONS_SENT.inc();
-                        current_span.record("decision", "NormalSent_Simulated");
-                        metrics::TRANSACTION_OUTCOMES.with_label_values(&["NormalSent_Simulated", &pool_pair_id]).inc();
+
+    if let Some(final_tx) = final_tx {
+        let sim_config = RpcSimulateTransactionConfig {
+            sig_verify: false,
+            replace_recent_blockhash: true,
+            commitment: Some(rpc_client.commitment()),
+            encoding: Some(UiTransactionEncoding::Base64),
+            accounts: None,
+            min_context_slot: None,
+            inner_instructions: false,
+        };
+
+        match rpc_client.simulate_transaction_with_config(&final_tx, sim_config).await {
+            Ok(sim_response) if sim_response.value.err.is_none() => {
+                info!("SUCCÈS DE LA SIMULATION FINALE ! Passage à l'envoi.");
+                current_span.record("outcome", "SimSuccess_And_Sending");
+                metrics::TRANSACTION_OUTCOMES.with_label_values(&["SimSuccess", &pool_pair_id]).inc();
+
+                // On extrait les infos de la simulation
+                if let Some(logs) = &sim_response.value.logs {
+                    if let Some(realized_profit) = simulator::parse_realized_profit_from_logs(logs) {
+                        let slippage = (profit_brut_estime as i64) - (realized_profit as i64);
+                        info!(realized_profit, slippage, "Analyse financière (simulation) terminée.");
+                        metrics::ARBITRAGE_PROFIT_REALIZED.observe(realized_profit as f64);
+                        metrics::ARBITRAGE_SLIPPAGE.observe(slippage as f64);
                     }
                 }
-            },
-            Err(e) => {
+
+                // On prépare les informations pour le sender
+                let send_info = ArbitrageSendInfo {
+                    transaction: final_tx.clone(),
+                    is_jito_leader,
+                    jito_tip: if is_jito_leader { Some(fee_manager.calculate_jito_tip(profit_brut_estime, JITO_TIP_PERCENT, estimated_cus)) } else { None },
+                    estimated_profit: profit_brut_estime,
+                };
+
+                // On envoie via notre service abstrait !
+                match sender.send_transaction(send_info).await {
+                    Ok(signature) => {
+                        info!(signature = %signature, "Transaction envoyée avec succès !");
+                        metrics::TRANSACTIONS_SENT.inc();
+                        let outcome = if is_jito_leader { "JitoSent_Success" } else { "NormalSent_Success" };
+                        current_span.record("decision", outcome);
+                        metrics::TRANSACTION_OUTCOMES.with_label_values(&[outcome, &pool_pair_id]).inc();
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Échec de l'envoi de la transaction.");
+                        let outcome = if is_jito_leader { "JitoSent_Failure" } else { "NormalSent_Failure" };
+                        current_span.record("outcome", outcome);
+                        metrics::TRANSACTION_OUTCOMES.with_label_values(&[outcome, &pool_pair_id]).inc();
+                    }
+                }
+
+            }
+            Ok(sim_response) => { // La simulation a retourné une erreur
+                warn!(error = ?sim_response.value.err, "ÉCHEC DE LA SIMULATION FINALE.");
+                if let Some(logs) = sim_response.value.logs { for log in logs { warn!(log = log); } }
+                current_span.record("outcome", "SimFailure");
+                metrics::TRANSACTION_OUTCOMES.with_label_values(&["SimFailure", &pool_pair_id]).inc();
+            }
+            Err(e) => { // L'appel RPC de simulation a échoué
                 error!(error = %e, "ERREUR RPC pendant la simulation finale.");
                 current_span.record("outcome", "RpcError");
                 metrics::TRANSACTION_OUTCOMES.with_label_values(&["RpcError", &pool_pair_id]).inc();
@@ -626,15 +655,22 @@ async fn main() -> Result<()> {
     println!("--- Lancement de l'Execution Bot (Architecture Scout-Worker) ---");
     dotenvy::dotenv().ok();
 
-    // --- Initialisation (inchangée) ---
+    // --- Initialisation ---
     let config = Config::load()?;
     let payer = Keypair::from_base58_string(&config.payer_private_key);
     let rpc_client = Arc::new(ResilientRpcClient::new(config.solana_rpc_url.clone(), 3, 500));
-    println!("[Init] Le bot utilisera la LUT gérée à l'adresse: {}", MANAGED_LUT_ADDRESS);
     let geyser_url = env::var("GEYSER_GRPC_URL").context("GEYSER_GRPC_URL requis")?;
     let validators_app_token = env::var("VALIDATORS_APP_API_KEY").context("VALIDATORS_APP_API_KEY requis")?;
     println!("[Init] Le bot utilisera la LUT gérée à l'adresse: {}", MANAGED_LUT_ADDRESS);
 
+    // --- Instanciation du service d'envoi unifié ---
+    // Mettez `dry_run: true` pour tester localement sans rien envoyer.
+    // Mettez `dry_run: false` sur votre bare metal pour envoyer réellement les transactions.
+    let sender: Arc<dyn TransactionSender> = Arc::new(UnifiedSender::new(rpc_client.clone(), true));
+    println!("[Init] Service d'envoi de transactions configuré (Mode: Dry Run).");
+
+
+    // --- Services de suivi de la blockchain ---
     println!("[Init] Services de suivi de la blockchain...");
     let validator_intel_service = Arc::new(ValidatorIntelService::new(validators_app_token.clone()).await?);
     validator_intel_service.start(validators_app_token);
@@ -648,27 +684,25 @@ async fn main() -> Result<()> {
     ensure_pump_user_account_exists(&rpc_client, &payer).await?;
     let main_graph = Arc::new(load_main_graph_from_cache()?);
 
-    // --- NOUVELLE ARCHITECTURE ---
+    // --- Architecture ---
     let hot_graph = Arc::new(ArcSwap::new(Arc::new(Graph::new())));
     let (update_tx, update_rx) = watch::channel(());
     let shared_hotlist = Arc::new(tokio::sync::RwLock::new(HashSet::<Pubkey>::new()));
-
-    // --- NOUVEAU : Création du canal (UNE SEULE FOIS) ---
     let (opportunity_tx, opportunity_rx) = mpsc::channel::<ArbitrageOpportunity>(1024);
     let shared_opportunity_rx = Arc::new(Mutex::new(opportunity_rx));
 
-    // Tâche 1 : Mettre à jour la `shared_hotlist` depuis le fichier (inchangé)
+    // Tâche 1 : Hotlist Updater
     let hotlist_updater_clone = shared_hotlist.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(2));
         loop { interval.tick().await; if let Ok(list) = read_hotlist() { *hotlist_updater_clone.write().await = list; } }
     });
 
-    // Tâche 2 : Le FeeManager (inchangé)
+    // Tâche 2 : FeeManager
     let fee_manager = FeeManager::new(rpc_client.clone());
     fee_manager.start(shared_hotlist.clone());
 
-    // Tâche 3 : Le Producteur de données
+    // Tâche 3 : Data Producer
     let producer = DataProducer {
         geyser_grpc_url: geyser_url.clone(),
         shared_graph: hot_graph.clone(),
@@ -682,18 +716,17 @@ async fn main() -> Result<()> {
         producer.run().await;
     });
 
-    // --- NOUVEAU : Tâche 4 - Le Scout ---
+    // Tâche 4 : Scout
     let scout_graph = hot_graph.clone();
     let scout_rx = update_rx.clone();
     tokio::spawn(async move {
-        // Cette variable `opportunity_tx` est maintenant celle du premier (et unique) canal
         scout_worker(scout_graph, scout_rx, opportunity_tx).await;
     });
 
-    // --- MODIFIÉ : Tâche 5 - Les Workers d'analyse ---
+    // Tâche 5 : Workers d'analyse
     println!("[Init] Démarrage de {} workers d'analyse...", ANALYSIS_WORKER_COUNT);
     for i in 0..ANALYSIS_WORKER_COUNT {
-        let worker_rx = shared_opportunity_rx.clone(); // Clone l'Arc, pas le receiver
+        let worker_rx = shared_opportunity_rx.clone();
         let worker_graph = hot_graph.clone();
         let worker_rpc = rpc_client.clone();
         let worker_payer = Keypair::try_from(payer.to_bytes().as_slice())?;
@@ -702,12 +735,14 @@ async fn main() -> Result<()> {
         let worker_leader_schedule = leader_schedule_tracker.clone();
         let worker_validator_intel = validator_intel_service.clone();
         let worker_fee_manager = fee_manager.clone();
+        let worker_sender = sender.clone(); // On clone l'Arc du sender pour le worker
 
         tokio::spawn(async move {
             analysis_worker(
                 i + 1, worker_rx, worker_graph, worker_rpc, worker_payer,
                 worker_slot_tracker, worker_slot_metronome,
                 worker_leader_schedule, worker_validator_intel, worker_fee_manager,
+                worker_sender, // On passe le sender cloné
             ).await;
         });
     }
