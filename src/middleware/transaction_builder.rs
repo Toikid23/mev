@@ -36,6 +36,7 @@ impl Middleware for TransactionBuilder {
     }
 
     async fn process(&self, context: &mut ExecutionContext) -> Result<bool> {
+        // --- Début de la logique (inchangée) ---
         let current_slot = self.slot_tracker.current().clock.slot;
         let time_remaining_in_slot = self.slot_metronome.estimated_time_remaining_in_slot_ms();
 
@@ -57,7 +58,7 @@ impl Middleware for TransactionBuilder {
 
         let managed_lut_address = Pubkey::from_str(MANAGED_LUT_ADDRESS).unwrap();
         let lut_account_data = match context.rpc_client.get_account_data(&managed_lut_address).await {
-            Result::Ok(data) => data, // Utilisez Result::Ok
+            Result::Ok(data) => data,
             Err(e) => {
                 error!(error = %e, "Le compte de la LUT n'a pas été trouvé.");
                 return Ok(false);
@@ -69,11 +70,12 @@ impl Middleware for TransactionBuilder {
             addresses: lut_ref.addresses.to_vec(),
         };
 
-        let mut final_tx = None;
         let estimated_profit = context.estimated_profit.unwrap();
         let estimated_cus = context.estimated_cus.unwrap();
+        // --- Fin de la logique inchangée ---
 
-        if let Some(_validator_info) = self.validator_intel.get_validator_info(&leader_identity).await {
+        // --- DÉBUT DE LA LOGIQUE CORRIGÉE ---
+        let build_result = if let Some(_validator_info) = self.validator_intel.get_validator_info(&leader_identity).await {
             context.is_jito_leader = true;
             context.span.record("decision", "PrepareJito");
             let jito_tip = self.fee_manager.calculate_jito_tip(estimated_profit, JITO_TIP_PERCENT, estimated_cus);
@@ -82,17 +84,10 @@ impl Middleware for TransactionBuilder {
             if profit_net_final > 5000 {
                 info!(profit_net_final, jito_tip, "DÉCISION : PRÉPARER BUNDLE JITO.");
                 context.jito_tip = Some(jito_tip);
-                match transaction_builder::build_arbitrage_transaction(
+                transaction_builder::build_arbitrage_transaction(
                     &context.opportunity, context.graph_snapshot.clone(), &context.rpc_client, &context.payer,
                     &owned_lookup_table, context.protections.as_ref().unwrap(), estimated_cus, 0,
-                ).await {
-                    Result::Ok((tx, _)) => final_tx = Some(tx), // Utilisez Result::Ok
-                    Err(e) => {
-                        error!(error = %e, "Échec de la construction de la transaction Jito.");
-                        metrics::TRANSACTION_OUTCOMES.with_label_values(&["BuildError", &context.pool_pair_id]).inc();
-                        return Ok(false);
-                    }
-                }
+                ).await
             } else {
                 info!(profit_net_final, "DÉCISION : Abandon. Profit Jito insuffisant.");
                 metrics::TRANSACTION_OUTCOMES.with_label_values(&["Abandoned_JitoProfitTooLow", &context.pool_pair_id]).inc();
@@ -108,25 +103,29 @@ impl Middleware for TransactionBuilder {
 
             if profit_net_final > 5000 {
                 info!(profit_net_final, total_priority_fee, "DÉCISION: PRÉPARER TRANSACTION NORMALE.");
-                match transaction_builder::build_arbitrage_transaction(
+                transaction_builder::build_arbitrage_transaction(
                     &context.opportunity, context.graph_snapshot.clone(), &context.rpc_client, &context.payer,
                     &owned_lookup_table, context.protections.as_ref().unwrap(), estimated_cus, priority_fee_price_per_cu,
-                ).await {
-                    Result::Ok((tx, _)) => final_tx = Some(tx), // Utilisez Result::Ok
-                    Err(e) => {
-                        error!(error = %e, "Échec de la construction de la transaction normale.");
-                        metrics::TRANSACTION_OUTCOMES.with_label_values(&["BuildError", &context.pool_pair_id]).inc();
-                        return Ok(false);
-                    }
-                }
+                ).await
             } else {
                 info!(profit_net_final, "DÉCISION : Abandon. Profit normal insuffisant.");
                 metrics::TRANSACTION_OUTCOMES.with_label_values(&["Abandoned_NormalProfitTooLow", &context.pool_pair_id]).inc();
                 return Ok(false);
             }
-        }
+        };
 
-        context.final_tx = final_tx;
-        Ok(true) // Continuer
+        match build_result {
+            Result::Ok((tx, _)) => {
+                context.final_tx = Some(tx);
+                Ok(true) // Succès, on continue au prochain middleware (simulation)
+            }
+            Err(e) => {
+                error!(error = %e, "Échec de la construction de la transaction.");
+                metrics::TRANSACTION_OUTCOMES.with_label_values(&["BuildError", &context.pool_pair_id]).inc();
+                Ok(false) // Erreur, on arrête le pipeline
+            }
+        }
+        // Il n'y a plus rien après ce match.
+        // --- FIN DE LA LOGIQUE CORRIGÉE ---
     }
 }

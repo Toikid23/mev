@@ -5,14 +5,10 @@ use anyhow::{anyhow, Result, Context, bail};
 use arc_swap::ArcSwap;
 use futures_util::{StreamExt, sink::SinkExt};
 use mev::decoders::PoolOperations;
-use solana_client::rpc_config::RpcSimulateTransactionConfig;
-use solana_transaction_status::UiTransactionEncoding;
-use mev::execution::cu_manager;
-use std::str::FromStr;
 use mev::{
     config::Config,
     decoders::Pool,
-    execution::{fee_manager::FeeManager, protections, simulator, transaction_builder},
+    execution::fee_manager::FeeManager,
     graph_engine::Graph,
     rpc::ResilientRpcClient,
     state::{
@@ -24,18 +20,16 @@ use mev::{
     strategies::spatial::{find_spatial_arbitrage, ArbitrageOpportunity},
 };
 use mev::middleware::{
-    self, // Importe le module
     ExecutionContext, Pipeline,
     quote_validator::QuoteValidator,
     protection_calculator::ProtectionCalculator,
     transaction_builder::TransactionBuilder,
     final_simulator::FinalSimulator,
 };
-use mev::execution::sender::{ArbitrageSendInfo, TransactionSender, UnifiedSender};
+use mev::execution::sender::{TransactionSender, UnifiedSender};
 use chrono::Utc;
-use solana_address_lookup_table_program::state::AddressLookupTable;
 use solana_sdk::{
-    message::AddressLookupTableAccount as SdkAddressLookupTableAccount, pubkey::Pubkey,
+    pubkey::Pubkey,
     signature::Keypair, signer::Signer, transaction::Transaction,
 };
 use std::{
@@ -54,7 +48,7 @@ use yellowstone_grpc_proto::prelude::{
 };
 use spl_associated_token_account::instruction::create_associated_token_account;
 use solana_sdk::transaction::VersionedTransaction;
-use tracing::{info, warn, error, instrument};
+use tracing::{info, error};
 use mev::monitoring::metrics;
 use tokio::sync::mpsc;
 
@@ -321,6 +315,25 @@ async fn scout_worker(
     }
 }
 
+// Helper pour réhydrater uniquement les pools qui en ont besoin (CLMMs)
+async fn rehydrate_if_clmm(pool: Pool, rpc_client: &Arc<ResilientRpcClient>) -> Result<Option<Pool>> {
+    match pool {
+        Pool::RaydiumClmm(mut p) => {
+            mev::decoders::raydium::clmm::hydrate(&mut p, rpc_client).await?;
+            Ok(Some(Pool::RaydiumClmm(p)))
+        }
+        Pool::OrcaWhirlpool(mut p) => {
+            mev::decoders::orca::whirlpool::hydrate(&mut p, rpc_client).await?;
+            Ok(Some(Pool::OrcaWhirlpool(p)))
+        }
+        Pool::MeteoraDlmm(mut p) => {
+            mev::decoders::meteora::dlmm::hydrate(&mut p, rpc_client).await?;
+            Ok(Some(Pool::MeteoraDlmm(p)))
+        }
+        _ => Ok(None), // Les autres pools n'ont pas besoin de ré-hydratation
+    }
+}
+
 
 async fn analysis_worker(
     id: usize,
@@ -337,22 +350,18 @@ async fn analysis_worker(
 ) {
     info!("[Worker {}] Démarrage.", id);
 
-    // --- NOUVEAU : On construit le pipeline UNE SEULE FOIS ---
-    let pipeline = Pipeline::new(
-        vec![
-            Box::new(QuoteValidator),
-            Box::new(ProtectionCalculator),
-            Box::new(TransactionBuilder {
-                slot_tracker: slot_tracker.clone(),
-                slot_metronome: slot_metronome.clone(),
-                leader_schedule_tracker: leader_schedule_tracker.clone(),
-                validator_intel: validator_intel.clone(),
-                fee_manager: fee_manager.clone(),
-            }),
-            Box::new(FinalSimulator::new(sender.clone())),
-        ],
-        sender.clone(),
-    );
+    let pipeline = Pipeline::new(vec![
+        Box::new(QuoteValidator),
+        Box::new(ProtectionCalculator),
+        Box::new(TransactionBuilder {
+            slot_tracker: slot_tracker.clone(),
+            slot_metronome: slot_metronome.clone(),
+            leader_schedule_tracker: leader_schedule_tracker.clone(),
+            validator_intel: validator_intel.clone(),
+            fee_manager: fee_manager.clone(),
+        }),
+        Box::new(FinalSimulator::new(sender.clone())),
+    ]);
 
     loop {
         let opportunity = match opportunity_receiver.lock().await.recv().await {
@@ -364,8 +373,42 @@ async fn analysis_worker(
         };
 
         let start_time = Instant::now();
+        let graph_for_processing: Arc<Graph>; // Le type final sera un Arc<Graph>
 
-        // --- NOUVEAU : On crée le span et le contexte pour chaque opportunité ---
+        // --- DÉBUT DE LA LOGIQUE DE RÉHYDRATATION CORRIGÉE ---
+        let original_graph_snapshot = shared_graph.load_full();
+
+        let pool_buy_from_data = match original_graph_snapshot.pools.get(&opportunity.pool_buy_from_key) {
+            Some(p) => p.clone(),
+            None => continue,
+        };
+        let pool_sell_to_data = match original_graph_snapshot.pools.get(&opportunity.pool_sell_to_key) {
+            Some(p) => p.clone(),
+            None => continue,
+        };
+
+        let rehydrated_buy_result = rehydrate_if_clmm(pool_buy_from_data, &rpc_client).await;
+        let rehydrated_sell_result = rehydrate_if_clmm(pool_sell_to_data, &rpc_client).await;
+
+        // On vérifie si AU MOINS UNE réhydratation a eu lieu
+        if matches!(rehydrated_buy_result, Ok(Some(_))) || matches!(rehydrated_sell_result, Ok(Some(_))) {
+            // Si oui, on clone le graphe pour le modifier
+            let mut mutable_graph = (*original_graph_snapshot).clone();
+
+            if let Ok(Some(new_buy)) = rehydrated_buy_result {
+                mutable_graph.update_pool_in_graph(&opportunity.pool_buy_from_key, new_buy);
+            }
+            if let Ok(Some(new_sell)) = rehydrated_sell_result {
+                mutable_graph.update_pool_in_graph(&opportunity.pool_sell_to_key, new_sell);
+            }
+            // On met notre graphe modifié dans un nouvel Arc
+            graph_for_processing = Arc::new(mutable_graph);
+        } else {
+            // Si aucune réhydratation, on clone simplement le pointeur Arc (très rapide)
+            graph_for_processing = original_graph_snapshot.clone();
+        }
+        // --- FIN DE LA LOGIQUE DE RÉHYDRATATION CORRIGÉE ---
+
         let span = tracing::info_span!(
             "process_opportunity",
             opportunity_id = format!("{}-{}", opportunity.pool_buy_from_key, opportunity.pool_sell_to_key),
@@ -373,22 +416,21 @@ async fn analysis_worker(
             outcome = "pending",
             decision = "N/A"
         );
-        let _enter = span.enter(); // Le span est actif pour la durée de ce scope
+        let _enter = span.enter();
 
-        let graph_snapshot = shared_graph.load_full();
         let current_timestamp = slot_tracker.current().clock.unix_timestamp;
 
         let context = ExecutionContext::new(
             opportunity,
-            graph_snapshot,
+            graph_for_processing, // On passe notre Arc<Graph> final
             payer.insecure_clone(),
             rpc_client.clone(),
             current_timestamp,
             span.clone(),
         );
 
-        // --- NOUVEAU : On lance le pipeline ---
         pipeline.run(context).await;
+
         metrics::PROCESS_OPPORTUNITY_LATENCY.observe(start_time.elapsed().as_secs_f64());
     }
 }

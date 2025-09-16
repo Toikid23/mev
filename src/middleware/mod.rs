@@ -5,17 +5,15 @@ pub mod final_simulator;
 
 use crate::decoders::Pool;
 use crate::execution::protections::SwapProtections;
-use crate::execution::sender::TransactionSender;
 use crate::graph_engine::Graph;
 use crate::rpc::ResilientRpcClient;
 use crate::strategies::spatial::ArbitrageOpportunity;
 use anyhow::Result;
 use async_trait::async_trait;
-use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Keypair;
 use solana_sdk::transaction::VersionedTransaction;
 use std::sync::Arc;
-use tracing::{info, warn, error, Span};
+use tracing::{info, error, Span};
 
 /// Le Contexte est un objet qui transporte toutes les données nécessaires
 /// à travers les différentes étapes (middlewares) du pipeline de traitement.
@@ -90,12 +88,11 @@ pub trait Middleware: Send + Sync {
 /// Le Pipeline exécute une série de middlewares en séquence.
 pub struct Pipeline {
     middlewares: Vec<Box<dyn Middleware>>,
-    sender: Arc<dyn TransactionSender>,
 }
 
 impl Pipeline {
-    pub fn new(middlewares: Vec<Box<dyn Middleware>>, sender: Arc<dyn TransactionSender>) -> Self {
-        Self { middlewares, sender }
+    pub fn new(middlewares: Vec<Box<dyn Middleware>>) -> Self { // <-- VÉRIFIEZ QUE LE CONSTRUCTEUR N'A QU'UN ARGUMENT
+        Self { middlewares }
     }
 
     pub async fn run(&self, mut context: ExecutionContext) {
