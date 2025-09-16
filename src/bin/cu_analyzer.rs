@@ -1,4 +1,5 @@
-// DANS : src/bin/cu_analyzer.rs
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::{anyhow, Result};
 use mev::config::Config;

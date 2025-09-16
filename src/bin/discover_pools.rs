@@ -1,4 +1,5 @@
-// DANS : src/bin/discover_pools.rs
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::{anyhow, Result};
 use mev::{

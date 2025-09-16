@@ -1,4 +1,5 @@
-// src/main.rs
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() {
     println!("--- MEV Scalpel Bot - Starting ---");

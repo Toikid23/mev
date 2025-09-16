@@ -54,6 +54,7 @@ chrono = "0.4.41"
 solana-address-lookup-table-program = { git = "https://github.com/solana-program/address-lookup-table", package = "solana-address-lookup-table-program" }
 spl-stake-pool = "2.0.3"
 solana-sdk-ids = "2.2.1"
+mimalloc = { version = "0.1.48", default-features = false}
 
 
 
@@ -98,3 +99,11 @@ path = "src/bin/filtering_bot.rs"
 [[bin]]
 name = "dev_runner"
 path = "src/bin/dev_runner.rs"
+
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+opt-level = 3
+strip = "debuginfo"

@@ -1,4 +1,5 @@
-// DANS : src/bin/filtering_bot.rs
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::Result;
 use mev::{

@@ -1,4 +1,5 @@
-// DANS : src/bin/dev_runner.rs (Restauration du Banc d'Essai des Décodeurs)
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::Result;
 use solana_sdk::signature::Keypair;

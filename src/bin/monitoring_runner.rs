@@ -1,4 +1,5 @@
-// DANS : src/bin/monitoring_runner
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::Result;
 use std::time::{Duration, Instant};

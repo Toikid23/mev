@@ -1,4 +1,5 @@
-// DANS : src/bin/census_runner.rs
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::Result;
 use mev::{config::Config, filtering::census, rpc::ResilientRpcClient}; // <-- MODIFIÉ

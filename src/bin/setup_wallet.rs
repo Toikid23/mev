@@ -1,4 +1,5 @@
-// DANS : src/bin/setup_wallet.rs (VERSION UNIVERSELLE)
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::{bail, Result};
 use mev::config::Config;

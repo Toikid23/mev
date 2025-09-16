@@ -1,4 +1,5 @@
-// DANS : src/bin/lut_analyzer.rs
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::Result;
 use mev::{config::Config, rpc::ResilientRpcClient};

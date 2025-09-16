@@ -1,3 +1,6 @@
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use anyhow::{anyhow, Result, Context, bail};
 use arc_swap::ArcSwap;
 use futures_util::{StreamExt, sink::SinkExt};
