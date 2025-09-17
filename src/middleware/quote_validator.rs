@@ -88,6 +88,7 @@ impl Middleware for QuoteValidator {
         context.pool_buy_from = Some(pool_buy_from);
         context.pool_sell_to = Some(pool_sell_to);
         context.estimated_profit = Some(profit_brut_estime);
+        context.intermediate_amount_out = Some(quote_buy_details.amount_out);
         context.estimated_cus = Some(estimated_cus);
 
         Ok(true)

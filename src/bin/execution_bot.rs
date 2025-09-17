@@ -357,6 +357,7 @@ async fn rehydrate_if_clmm(pool: Pool, rpc_client: &Arc<ResilientRpcClient>) -> 
 }
 
 
+#[derive(Clone)] // On dit à Rust comment cloner cette structure
 struct WorkerDependencies {
     rpc_client: Arc<ResilientRpcClient>,
     slot_tracker: Arc<SlotTracker>,
@@ -367,28 +368,25 @@ struct WorkerDependencies {
     sender: Arc<dyn TransactionSender>,
 }
 
-
 async fn analysis_worker(
     id: usize,
     opportunity_receiver: Arc<Mutex<mpsc::Receiver<ArbitrageOpportunity>>>,
     shared_graph: Arc<ArcSwap<Graph>>,
     payer: Keypair,
-    deps: WorkerDependencies, // <-- MODIFIÉ : La longue liste est remplacée par `deps`
+    deps: WorkerDependencies,
 ) {
     info!("[Worker {}] Démarrage.", id);
 
-    // On utilise les dépendances de `deps` pour construire le pipeline
     let pipeline = Pipeline::new(vec![
         Box::new(QuoteValidator),
         Box::new(ProtectionCalculator),
-        Box::new(TransactionBuilder {
-            // <-- MODIFIÉ : On accède aux champs via `deps.`
-            slot_tracker: deps.slot_tracker.clone(),
-            slot_metronome: deps.slot_metronome.clone(),
-            leader_schedule_tracker: deps.leader_schedule_tracker.clone(),
-            validator_intel: deps.validator_intel.clone(),
-            fee_manager: deps.fee_manager.clone(),
-        }),
+        Box::new(TransactionBuilder::new(
+            deps.slot_tracker.clone(),
+            deps.slot_metronome.clone(),
+            deps.leader_schedule_tracker.clone(),
+            deps.validator_intel.clone(),
+            deps.fee_manager.clone(),
+        )),
         Box::new(FinalSimulator::new(deps.sender.clone())),
     ]);
 
@@ -535,37 +533,38 @@ async fn main() -> Result<()> {
         scout_worker(scout_graph, scout_rx, opportunity_tx).await;
     });
 
-    // Tâche 5 : Workers d'analyse
+    // --- Tâche 5 : Workers d'analyse (VERSION CORRIGÉE ET SIMPLIFIÉE) ---
     println!("[Init] Démarrage de {} workers d'analyse...", ANALYSIS_WORKER_COUNT);
+
+    // 1. On crée UN SEUL groupe de dépendances.
+    let worker_deps = WorkerDependencies {
+        rpc_client: rpc_client.clone(),
+        slot_tracker: slot_tracker.clone(),
+        slot_metronome: slot_metronome.clone(),
+        leader_schedule_tracker: leader_schedule_tracker.clone(),
+        validator_intel: validator_intel_service.clone(),
+        fee_manager: fee_manager.clone(),
+        sender: sender.clone(),
+    };
+
     for i in 0..ANALYSIS_WORKER_COUNT {
+        // 2. On clone les dépendances pour chaque worker. C'est une opération légère.
+        let deps_for_worker = worker_deps.clone();
+
         let worker_rx = shared_opportunity_rx.clone();
         let worker_graph = hot_graph.clone();
         let worker_payer = Keypair::try_from(payer.to_bytes().as_slice())?;
 
-        // --- DÉBUT DE LA CORRECTION ---
-        // 1. On crée la structure qui regroupe toutes les dépendances
-        let worker_deps = WorkerDependencies {
-            rpc_client: rpc_client.clone(),
-            slot_tracker: slot_tracker.clone(),
-            slot_metronome: slot_metronome.clone(),
-            leader_schedule_tracker: leader_schedule_tracker.clone(),
-            validator_intel: validator_intel_service.clone(),
-            fee_manager: fee_manager.clone(),
-            sender: sender.clone(),
-        };
-
         tokio::spawn(async move {
-            // 2. On appelle la fonction avec la nouvelle signature (5 arguments)
             analysis_worker(
                 i + 1,
                 worker_rx,
                 worker_graph,
                 worker_payer,
-                worker_deps, // On passe la structure en un seul bloc
+                deps_for_worker, // On déplace la copie dans le worker
             )
                 .await;
         });
-        // --- FIN DE LA CORRECTION ---
     }
 
     println!("[Bot] Architecture démarrée. Le bot est opérationnel.");
