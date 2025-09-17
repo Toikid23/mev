@@ -19,6 +19,7 @@ use anyhow::Context;
 use crate::monitoring::metrics;
 use std::time::Instant;
 use tracing::debug;
+use std::sync::{Arc, RwLock};
 
 // --- STRUCTURE DE TRAVAIL "PROPRE" (MODIFIÉE) ---
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +52,8 @@ pub struct DecodedWhirlpoolPool {
     // --- CHAMP AJOUTÉ POUR LES TICKS ---
     // Un BTreeMap est parfait pour stocker les tick arrays de manière ordonnée.
     pub tick_arrays: Option<BTreeMap<i32, tick_array::TickArrayData>>,
+    #[serde(skip)]
+    pub quote_lookup_table: Option<Arc<RwLock<BTreeMap<u64, QuoteResult>>>>,
     pub mint_a_program: Pubkey,
     pub mint_b_program: Pubkey,
     pub last_swap_timestamp: i64,
@@ -106,6 +109,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedWhirlpoolPool
         mint_a_decimals: 0, mint_b_decimals: 0,
         mint_a_transfer_fee_bps: 0, mint_b_transfer_fee_bps: 0,
         tick_arrays: None, // Initialisé à None
+        quote_lookup_table: None,
         mint_a_program: spl_token::id(), // Valeur par défaut
         mint_b_program: spl_token::id(),
         last_swap_timestamp: 0,
@@ -341,6 +345,28 @@ impl DecodedWhirlpoolPool {
     // Fonctions utilitaires
     pub fn fee_as_percent(&self) -> f64 { self.fee_rate as f64 / 10_000.0 }
 
+    /// Pré-calcule les quotes pour une gamme de montants et peuple la table de lookup.
+    pub fn populate_quote_lookup_table(&mut self, is_base_input: bool) {
+        if self.tick_arrays.is_none() { return; }
+
+        let mut table = BTreeMap::new();
+        let decimals = if is_base_input { self.mint_a_decimals } else { self.mint_b_decimals };
+        let token_in_mint = if is_base_input { self.mint_a } else { self.mint_b };
+
+        // Plage de pré-calcul
+        for i in 1..=2000 {
+            let amount_in_ui = i as f64 * 0.01;
+            let amount_in = (amount_in_ui * 10f64.powi(decimals as i32)) as u64;
+
+            // On appelle la méthode de quote existante (qui est déjà synchrone)
+            // Note: on passe 0 comme timestamp car il n'est pas utilisé par la logique de quote de Whirlpool.
+            if let Ok(quote_result) = self.get_quote_with_details(&token_in_mint, amount_in, 0) {
+                table.insert(amount_in, quote_result);
+            }
+        }
+        self.quote_lookup_table = Some(Arc::new(RwLock::new(table)));
+    }
+
 }
 
 #[async_trait]
@@ -362,9 +388,30 @@ impl PoolOperations for DecodedWhirlpoolPool {
 
     // NOUVELLE VERSION SYNCHRONE DE get_quote
     fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<QuoteResult> {
+        // --- LOGIQUE DE CACHE ---
+        if let Some(table_arc) = &self.quote_lookup_table {
+            let table = table_arc.read().unwrap();
+            if let Some(quote) = table.get(&amount_in) {
+                return Ok(*quote);
+            }
+            if let Some((&lower_in, lower_quote)) = table.range(..amount_in).next_back() {
+                if let Some((&upper_in, upper_quote)) = table.range(amount_in..).next() {
+                    if upper_in > lower_in {
+                        let ratio = (amount_in - lower_in) as f64 / (upper_in - lower_in) as f64;
+                        let interpolated_out = lower_quote.amount_out as f64 + ratio * (upper_quote.amount_out as f64 - lower_quote.amount_out as f64);
+                        return Ok(QuoteResult {
+                            amount_out: interpolated_out as u64,
+                            fee: lower_quote.fee,
+                            ticks_crossed: lower_quote.ticks_crossed.max(upper_quote.ticks_crossed),
+                        });
+                    }
+                }
+            }
+        }
+
 
         let start_time = Instant::now();
-        debug!(amount_in, "Calcul de get_quote_with_details pour Orca Whirlpool");
+        debug!(amount_in, "Calcul de get_quote_with_details pour Orca Whirlpool (Fallback)");
 
         let tick_arrays = self.tick_arrays.as_ref().ok_or_else(|| anyhow!("Pool is not hydrated."))?;
         if self.liquidity == 0 && tick_arrays.is_empty() { return Ok(QuoteResult::default()); }
@@ -420,9 +467,8 @@ impl PoolOperations for DecodedWhirlpoolPool {
         let fee_on_output = (total_amount_out * out_mint_fee_bps as u128) / 10000;
         let final_amount_out = total_amount_out.saturating_sub(fee_on_output);
 
-        metrics::GET_QUOTE_LATENCY.with_label_values(&["OrcaWhirlpool"]).observe(start_time.elapsed().as_secs_f64());
+        metrics::GET_QUOTE_LATENCY.with_label_values(&["OrcaWhirlpool_Fallback"]).observe(start_time.elapsed().as_secs_f64());
 
-        // <-- MODIFIÉ : Encapsulation dans QuoteResult
         Ok(QuoteResult {
             amount_out: final_amount_out as u64,
             fee: pool_fee as u64,

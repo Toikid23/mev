@@ -16,6 +16,8 @@ use crate::decoders::pool_operations::find_input_by_binary_search;
 use crate::monitoring::metrics;
 use std::time::Instant;
 use tracing::debug;
+use std::sync::{Arc, RwLock};
+use std::collections::BTreeMap;
 
 
 pub const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG");
@@ -41,6 +43,8 @@ pub struct DecodedMeteoraDammPool {
     pub mint_b_program: Pubkey,
     pub pool_fees: onchain_layouts::PoolFeesStruct,
     pub activation_point: u64,
+    #[serde(skip)]
+    pub quote_lookup_table: Option<Arc<RwLock<BTreeMap<u64, QuoteResult>>>>,
     pub last_swap_timestamp: i64,
 }
 
@@ -49,6 +53,24 @@ impl DecodedMeteoraDammPool {
         let base_fee = self.pool_fees.base_fee.cliff_fee_numerator;
         if base_fee == 0 { return 0.0; }
         (base_fee as f64 / 1_000_000_000.0) * 100.0
+    }
+
+    /// Pré-calcule les quotes pour Meteora DAMM V2.
+    pub fn populate_quote_lookup_table(&mut self, is_base_input: bool) {
+        let mut table = BTreeMap::new();
+        let decimals = if is_base_input { self.mint_a_decimals } else { self.mint_b_decimals };
+        let token_in_mint = if is_base_input { self.mint_a } else { self.mint_b };
+
+        // Plage de pré-calcul
+        for i in 1..=2000 {
+            let amount_in_ui = i as f64 * 0.01;
+            let amount_in = (amount_in_ui * 10f64.powi(decimals as i32)) as u64;
+
+            if let Ok(quote_result) = self.get_quote_with_details(&token_in_mint, amount_in, 0) {
+                table.insert(amount_in, quote_result);
+            }
+        }
+        self.quote_lookup_table = Some(Arc::new(RwLock::new(table)));
     }
 }
 
@@ -99,6 +121,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedMeteoraDammPo
         mint_a_transfer_fee_bps: 0, mint_b_transfer_fee_bps: 0,
         mint_a_program: spl_token::id(),
         mint_b_program: spl_token::id(),
+        quote_lookup_table: None,
         last_swap_timestamp: 0,
     })
 }
@@ -156,9 +179,31 @@ impl PoolOperations for DecodedMeteoraDammPool {
     fn address(&self) -> Pubkey { self.address }
 
     fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<QuoteResult> {
+        // --- LOGIQUE DE CACHE ---
+        if current_timestamp == 0 {
+            if let Some(table_arc) = &self.quote_lookup_table {
+                let table = table_arc.read().unwrap();
+                // ... (logique d'interpolation identique aux autres)
+                if let Some(quote) = table.get(&amount_in) { return Ok(*quote); }
+                if let Some((&lower_in, lower_quote)) = table.range(..amount_in).next_back() {
+                    if let Some((&upper_in, upper_quote)) = table.range(amount_in..).next() {
+                        if upper_in > lower_in {
+                            let ratio = (amount_in - lower_in) as f64 / (upper_in - lower_in) as f64;
+                            let interpolated_out = lower_quote.amount_out as f64 + ratio * (upper_quote.amount_out as f64 - lower_quote.amount_out as f64);
+                            return Ok(QuoteResult {
+                                amount_out: interpolated_out as u64,
+                                fee: lower_quote.fee,
+                                ticks_crossed: lower_quote.ticks_crossed.max(upper_quote.ticks_crossed),
+                            });
+                        }
+                    }
+                }
+            }
+        }
 
+        // --- FALLBACK ---
         let start_time = Instant::now();
-        debug!(amount_in, "Calcul de get_quote_with_details pour Meteora DAMM V2");
+        debug!(amount_in, "Calcul de get_quote_with_details pour Meteora DAMM V2 (Fallback)");
 
         if self.liquidity == 0 { return Ok(QuoteResult::default()); }
         let a_to_b = *token_in_mint == self.mint_a;
@@ -208,14 +253,14 @@ impl PoolOperations for DecodedMeteoraDammPool {
         let fee_on_output = (amount_out_after_pool_fee as u128 * out_mint_fee_bps as u128) / 10000;
         let final_amount_out = amount_out_after_pool_fee.saturating_sub(fee_on_output as u64);
 
-        metrics::GET_QUOTE_LATENCY.with_label_values(&["MeteoraDammV2"]).observe(start_time.elapsed().as_secs_f64());
+        metrics::GET_QUOTE_LATENCY.with_label_values(&["MeteoraDammV2_Fallback"]).observe(start_time.elapsed().as_secs_f64());
 
-        // <-- MODIFIÉ : On encapsule le résultat final
         Ok(QuoteResult {
             amount_out: final_amount_out,
             fee: lp_fee as u64,
-            ticks_crossed: 1, // Estimation, car le calcul est global
+            ticks_crossed: 1, // Estimation
         })
+
     }
 
     /// Calcule le montant d'entrée requis pour obtenir un montant de sortie spécifié.

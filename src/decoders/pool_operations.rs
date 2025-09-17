@@ -4,12 +4,12 @@ use async_trait::async_trait;
 
 
 
-// NOUVEAU : Une structure pour un retour détaillé de get_quote
-#[derive(Default)]
+
+
+#[derive(Debug, Clone, Copy, Default)] // Ajout de Copy et Default
 pub struct QuoteResult {
     pub amount_out: u64,
     pub fee: u64,
-    // Pour les CLMMs, le nombre de ticks/bins traversés
     pub ticks_crossed: u32,
 }
 

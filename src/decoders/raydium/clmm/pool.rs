@@ -23,6 +23,7 @@ use anyhow::Context;
 use crate::monitoring::metrics;
 use std::time::Instant;
 use tracing::debug;
+use std::sync::{Arc, RwLock};
 
 // ... (Les structs DecodedClmmPool, PoolState, RewardInfo ne changent pas) ...
 // ... (Les fonctions decode_pool et hydrate ne changent pas) ...
@@ -50,6 +51,8 @@ pub struct DecodedClmmPool {
     pub min_tick: i32,
     pub max_tick: i32,
     pub tick_arrays: Option<BTreeMap<i32, TickArrayState>>,
+    #[serde(skip)]
+    pub quote_lookup_table: Option<Arc<RwLock<BTreeMap<u64, QuoteResult>>>>,
     pub mint_a_program: Pubkey,
     pub mint_b_program: Pubkey,
     pub last_swap_timestamp: i64,
@@ -138,6 +141,7 @@ pub fn decode_pool(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Result
         mint_b_max_transfer_fee: 0,
         trade_fee_rate: 0, min_tick: -443636, max_tick: 443636,
         tick_arrays: None,
+        quote_lookup_table: None,
         mint_a_program: spl_token::id(),
         mint_b_program: spl_token::id(),
         last_swap_timestamp: 0,
@@ -304,6 +308,33 @@ impl DecodedClmmPool {
         }
         result
     }
+
+    /// Pré-calcule les quotes pour une gamme de montants et peuple la table de lookup.
+    /// Ceci est appelé une fois après l'hydratation pour les pools "chauds".
+    pub fn populate_quote_lookup_table(&mut self, is_base_input: bool) {
+        if self.tick_arrays.is_none() { return; }
+
+        let mut table = BTreeMap::new();
+        let decimals = if is_base_input { self.mint_a_decimals } else { self.mint_b_decimals };
+
+        // On pré-calcule de 0.01 à 20.0 par pas de 0.01
+        // (La plage peut être ajustée en fonction des montants d'arbitrage typiques)
+        for i in 1..=2000 {
+            let amount_in_ui = i as f64 * 0.01;
+            let amount_in = (amount_in_ui * 10f64.powi(decimals as i32)) as u64;
+
+            // On appelle directement la logique de calcul interne
+            if let Ok(quote_result) = self.calculate_swap_quote_internal(amount_in, is_base_input) {
+                let result_struct = QuoteResult {
+                    amount_out: quote_result.0,
+                    ticks_crossed: quote_result.1,
+                    fee: quote_result.2,
+                };
+                table.insert(amount_in, result_struct);
+            }
+        }
+        self.quote_lookup_table = Some(Arc::new(RwLock::new(table)));
+    }
 }
 #[async_trait]
 impl PoolOperations for DecodedClmmPool {
@@ -339,20 +370,56 @@ impl PoolOperations for DecodedClmmPool {
 
     fn address(&self) -> Pubkey { self.address }
     fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<QuoteResult> {
-        let start_time = Instant::now();
-        debug!(amount_in, "Calcul de get_quote_with_details pour Raydium CLMM");
         let is_base_input = *token_in_mint == self.mint_a;
+
+        // --- LOGIQUE DE CACHE ---
+        if let Some(table_arc) = &self.quote_lookup_table {
+            let table = table_arc.read().unwrap();
+            // Cas 1: Hit exact
+            if let Some(quote) = table.get(&amount_in) {
+                return Ok(*quote);
+            }
+            // Cas 2: Interpolation
+            if let Some((&lower_in, lower_quote)) = table.range(..amount_in).next_back() {
+                if let Some((&upper_in, upper_quote)) = table.range(amount_in..).next() {
+                    if upper_in > lower_in {
+                        let ratio = (amount_in - lower_in) as f64 / (upper_in - lower_in) as f64;
+                        let interpolated_out = lower_quote.amount_out as f64 + ratio * (upper_quote.amount_out as f64 - lower_quote.amount_out as f64);
+                        return Ok(QuoteResult {
+                            amount_out: interpolated_out as u64,
+                            fee: lower_quote.fee, // Le fee est moins sensible, on prend la borne inf
+                            ticks_crossed: lower_quote.ticks_crossed.max(upper_quote.ticks_crossed), // On prend le pire cas
+                        });
+                    }
+                }
+            }
+        }
+
+        // --- FALLBACK sur le calcul complet ---
+        let start_time = Instant::now();
+        debug!(amount_in, "Calcul de get_quote_with_details pour Raydium CLMM (Fallback)");
+
         let (in_mint_fee_bps, in_mint_max_fee, out_mint_fee_bps, out_mint_max_fee) = if is_base_input {
             (self.mint_a_transfer_fee_bps, self.mint_a_max_transfer_fee, self.mint_b_transfer_fee_bps, self.mint_b_max_transfer_fee)
         } else {
             (self.mint_b_transfer_fee_bps, self.mint_b_max_transfer_fee, self.mint_a_transfer_fee_bps, self.mint_a_max_transfer_fee)
         };
-        let fee_on_input = calculate_transfer_fee(amount_in, in_mint_fee_bps, in_mint_max_fee)?;
+
+        let fee_on_input = spl_token_decoders::mint::calculate_transfer_fee(amount_in, in_mint_fee_bps, in_mint_max_fee)?;
         let net_amount_in = amount_in.saturating_sub(fee_on_input);
+
         let (gross_amount_out, ticks_crossed, trade_fee) = self.calculate_swap_quote_internal(net_amount_in, is_base_input)?;
-        let fee_on_output = calculate_transfer_fee(gross_amount_out, out_mint_fee_bps, out_mint_max_fee)?;
-        metrics::GET_QUOTE_LATENCY.with_label_values(&["RaydiumCLMM"]).observe(start_time.elapsed().as_secs_f64());
-        Ok(QuoteResult { amount_out: gross_amount_out.saturating_sub(fee_on_output), fee: trade_fee, ticks_crossed, })
+
+        let fee_on_output = spl_token_decoders::mint::calculate_transfer_fee(gross_amount_out, out_mint_fee_bps, out_mint_max_fee)?;
+        let final_amount_out = gross_amount_out.saturating_sub(fee_on_output);
+
+        metrics::GET_QUOTE_LATENCY.with_label_values(&["RaydiumCLMM_Fallback"]).observe(start_time.elapsed().as_secs_f64());
+
+        Ok(QuoteResult {
+            amount_out: final_amount_out,
+            fee: trade_fee,
+            ticks_crossed,
+        })
     }
     fn get_required_input(&mut self, token_out_mint: &Pubkey, amount_out: u64, _current_timestamp: i64) -> Result<u64> {
         let start_time = Instant::now();

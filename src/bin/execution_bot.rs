@@ -181,11 +181,33 @@ impl DataProducer {
                 if !processed_pools.contains(&pool_address) && !graph_clone.pools.contains_key(&pool_address) {
                     if let Some(unhydrated_pool) = self.main_graph.pools.get(&pool_address) {
                         match Graph::hydrate_pool(unhydrated_pool.clone(), &self.rpc_client).await {
-                            Ok(hydrated_pool) => {
+                            Ok(mut hydrated_pool) => {
                                 if let Err(e) = ensure_atas_exist_for_pool(&self.rpc_client, &self.payer, &hydrated_pool).await {
                                     eprintln!("[Producer/Onboard] ERREUR ATA pour {}: {}", pool_address, e);
                                     continue;
                                 }
+
+                                // --- MISE À JOUR DU BLOC DE PEUPLEMENT ---
+                                match &mut hydrated_pool {
+                                    Pool::RaydiumClmm(p) => {
+                                        p.populate_quote_lookup_table(true);
+                                        p.populate_quote_lookup_table(false);
+                                    }
+                                    Pool::OrcaWhirlpool(p) => {
+                                        p.populate_quote_lookup_table(true);
+                                        p.populate_quote_lookup_table(false);
+                                    }
+                                    Pool::MeteoraDlmm(p) => {
+                                        p.populate_quote_lookup_table(true);
+                                        p.populate_quote_lookup_table(false);
+                                    }
+                                    Pool::MeteoraDammV2(p) => {
+                                        p.populate_quote_lookup_table(true);
+                                        p.populate_quote_lookup_table(false);
+                                    }
+                                    _ => {} // Ne rien faire pour les autres types
+                                }
+
                                 graph_clone.add_pool_to_graph(hydrated_pool);
                                 println!("[Producer/Onboard] Nouveau pool {} ajouté au hot graph.", pool_address);
                                 processed_pools.insert(pool_address);

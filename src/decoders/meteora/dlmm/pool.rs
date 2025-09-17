@@ -16,6 +16,7 @@ use crate::rpc::ResilientRpcClient;
 use crate::monitoring::metrics;
 use std::time::Instant;
 use tracing::debug;
+use std::sync::{Arc, RwLock};
 
 // ... (Les constantes PROGRAM_ID, MAX_BIN_PER_ARRAY, etc. ne changent pas) ...
 pub const PROGRAM_ID: Pubkey = pubkey!("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo");
@@ -47,6 +48,8 @@ pub struct DecodedDlmmPool {
     pub parameters: onchain_layouts::StaticParameters,
     pub v_parameters: onchain_layouts::VariableParameters,
     pub hydrated_bin_arrays: Option<BTreeMap<i64, DecodedBinArray>>,
+    #[serde(skip)]
+    pub quote_lookup_table: Option<Arc<RwLock<BTreeMap<u64, QuoteResult>>>>,
     pub last_swap_timestamp: i64,
 }
 
@@ -128,6 +131,27 @@ impl DecodedDlmmPool {
 
         Ok((total_amount_out as u64, bins_crossed))
     }
+
+    pub fn populate_quote_lookup_table(&mut self, is_base_input: bool) {
+        if self.hydrated_bin_arrays.is_none() { return; }
+
+        let mut table = BTreeMap::new();
+        let decimals = if is_base_input { self.mint_a_decimals } else { self.mint_b_decimals };
+        let token_in_mint = if is_base_input { self.mint_a } else { self.mint_b };
+
+        // Plage de pré-calcul
+        for i in 1..=2000 {
+            let amount_in_ui = i as f64 * 0.01;
+            let amount_in = (amount_in_ui * 10f64.powi(decimals as i32)) as u64;
+
+            // On passe un timestamp de 0 car il est utilisé pour les frais dynamiques.
+            // Pour un cache, il est acceptable de le calculer avec un timestamp "neutre".
+            if let Ok(quote_result) = self.get_quote_with_details(&token_in_mint, amount_in, 0) {
+                table.insert(amount_in, quote_result);
+            }
+        }
+        self.quote_lookup_table = Some(Arc::new(RwLock::new(table)));
+    }
 }
 
 #[async_trait]
@@ -144,9 +168,34 @@ impl PoolOperations for DecodedDlmmPool {
 
     // VERSION SYNCHRONE AMÉLIORÉE
     fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<QuoteResult> {
+        // --- LOGIQUE DE CACHE ---
+        // Le timestamp peut affecter les frais, donc le cache est moins précis ici,
+        // mais reste une excellente approximation rapide. On n'utilise pas le cache si le timestamp est pertinent.
+        if current_timestamp == 0 { // On utilise le cache que pour les calculs "statiques"
+            if let Some(table_arc) = &self.quote_lookup_table {
+                let table = table_arc.read().unwrap();
+                if let Some(quote) = table.get(&amount_in) {
+                    return Ok(*quote);
+                }
+                if let Some((&lower_in, lower_quote)) = table.range(..amount_in).next_back() {
+                    if let Some((&upper_in, upper_quote)) = table.range(amount_in..).next() {
+                        if upper_in > lower_in {
+                            let ratio = (amount_in - lower_in) as f64 / (upper_in - lower_in) as f64;
+                            let interpolated_out = lower_quote.amount_out as f64 + ratio * (upper_quote.amount_out as f64 - lower_quote.amount_out as f64);
+                            return Ok(QuoteResult {
+                                amount_out: interpolated_out as u64,
+                                fee: lower_quote.fee,
+                                ticks_crossed: lower_quote.ticks_crossed.max(upper_quote.ticks_crossed),
+                            });
+                        }
+                    }
+                }
+            }
+        }
 
+        // --- FALLBACK sur le calcul complet ---
         let start_time = Instant::now();
-        debug!(amount_in, "Calcul de get_quote_with_details pour Meteora DLMM");
+        debug!(amount_in, "Calcul de get_quote_with_details pour Meteora DLMM (Fallback)");
 
         let swap_for_y = *token_in_mint == self.mint_a;
         let (in_mint_fee_bps, in_mint_max_fee, out_mint_fee_bps, out_mint_max_fee) = if swap_for_y {
@@ -163,7 +212,7 @@ impl PoolOperations for DecodedDlmmPool {
         let fee_on_output = calculate_transfer_fee(gross_amount_out, out_mint_fee_bps, out_mint_max_fee)?;
         let final_amount_out = gross_amount_out.saturating_sub(fee_on_output);
 
-        metrics::GET_QUOTE_LATENCY.with_label_values(&["MeteoraDLMM"]).observe(start_time.elapsed().as_secs_f64());
+        metrics::GET_QUOTE_LATENCY.with_label_values(&["MeteoraDLMM_Fallback"]).observe(start_time.elapsed().as_secs_f64());
 
         Ok(QuoteResult {
             amount_out: final_amount_out,
@@ -334,6 +383,7 @@ pub fn decode_lb_pair(address: &Pubkey, data: &[u8], program_id: &Pubkey) -> Res
         mint_a_program: spl_token::id(),
         mint_b_program: spl_token::id(),
         hydrated_bin_arrays: None,
+        quote_lookup_table: None,
         last_swap_timestamp: 0,
     })
 }
