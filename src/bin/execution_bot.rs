@@ -1,18 +1,50 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use mev::execution::cu_manager;
-use anyhow::{anyhow, Result, Context, bail};
+// --- CORRECTION : Imports nettoyés et corrigés ---
+use anyhow::{anyhow, bail, Context, Result};
 use arc_swap::ArcSwap;
-use futures_util::{StreamExt, sink::SinkExt};
-use mev::decoders::PoolOperations;
+use chrono::Utc;
+use futures_util::{sink::SinkExt, StreamExt};
+use spl_associated_token_account::instruction::create_associated_token_account;
+use solana_sdk::{
+    pubkey::Pubkey, signature::Keypair, signer::Signer, transaction::Transaction,
+    transaction::VersionedTransaction,
+};
+use std::{
+    collections::{HashMap, HashSet},
+    env, fs,
+    io::Read,
+    sync::{Arc, RwLock},
+    time::{Duration, Instant},
+};
+use tokio::sync::{mpsc, Mutex, watch};
+use tracing::{error, info};
+use yellowstone_grpc_client::GeyserGrpcClient;
+use yellowstone_grpc_proto::prelude::{
+    subscribe_update::UpdateOneof, CommitmentLevel, SubscribeRequest,
+    SubscribeRequestFilterAccounts,
+};
+
 use mev::{
     config::Config,
-    decoders::Pool,
-    execution::fee_manager::FeeManager,
+    decoders::{Pool, PoolOperations, meteora, orca, raydium},
+    execution::{
+        cu_manager,
+        fee_manager::FeeManager,
+        sender::{TransactionSender, UnifiedSender},
+        transaction_builder::ArbitrageInstructionsTemplate, // Correct path
+    },
     graph_engine::Graph,
+    middleware::{
+        final_simulator::FinalSimulator, protection_calculator::ProtectionCalculator,
+        quote_validator::QuoteValidator, transaction_builder::TransactionBuilder,
+        ExecutionContext, Pipeline,
+    },
+    monitoring::metrics,
     rpc::ResilientRpcClient,
     state::{
+        balance_tracker,
         leader_schedule::LeaderScheduleTracker,
         slot_metronome::SlotMetronome,
         slot_tracker::SlotTracker,
@@ -20,45 +52,9 @@ use mev::{
     },
     strategies::spatial::{find_spatial_arbitrage, ArbitrageOpportunity},
 };
-use mev::state::balance_tracker;
-use mev::middleware::{
-    ExecutionContext, Pipeline,
-    quote_validator::QuoteValidator,
-    protection_calculator::ProtectionCalculator,
-    transaction_builder::TransactionBuilder,
-    final_simulator::FinalSimulator,
-};
-use mev::execution::sender::{TransactionSender, UnifiedSender};
-use chrono::Utc;
-use solana_sdk::{
-    pubkey::Pubkey,
-    signature::Keypair, signer::Signer, transaction::Transaction,
-};
-use std::{
-    collections::{HashMap, HashSet},
-    env,
-    fs,
-    io::Read,
-    sync::Arc,
-    time::{Duration, Instant},
-};
-use tokio::sync::{Mutex, watch}; // <-- NOUVEL IMPORT
-use yellowstone_grpc_client::GeyserGrpcClient;
-use yellowstone_grpc_proto::prelude::{
-    subscribe_update::UpdateOneof, CommitmentLevel, SubscribeRequest,
-    SubscribeRequestFilterAccounts,
-};
-use spl_associated_token_account::instruction::create_associated_token_account;
-use solana_sdk::transaction::VersionedTransaction;
-use tracing::{info, error};
-use mev::monitoring::metrics;
-use tokio::sync::mpsc;
-
-
 
 const MANAGED_LUT_ADDRESS: &str = "E5h798UBdK8V1L7MvRfi1ppr2vitPUUUUCVqvTyDgKXN";
-
-const ANALYSIS_WORKER_COUNT: usize = 4; // <-- NOUVEAU : Nombre de workers d'analyse
+const ANALYSIS_WORKER_COUNT: usize = 4;
 
 
 // Les fonctions helpers (read_hotlist, load_main_graph_from_cache, etc.) restent les mêmes.
@@ -132,11 +128,10 @@ async fn ensure_atas_exist_for_pool(rpc_client: &Arc<ResilientRpcClient>, payer:
 }
 
 
-// --- NOUVELLE ARCHITECTURE : LE PRODUCTEUR DE DONNÉES ---
 struct DataProducer {
     geyser_grpc_url: String,
     shared_graph: Arc<ArcSwap<Graph>>,
-    main_graph: Arc<Graph>, // Le graphe de référence, en lecture seule
+    main_graph: Arc<Graph>,
     shared_hotlist: Arc<tokio::sync::RwLock<HashSet<Pubkey>>>,
     update_notifier: watch::Sender<()>,
     rpc_client: Arc<ResilientRpcClient>,
@@ -146,12 +141,10 @@ struct DataProducer {
 impl DataProducer {
     async fn run(&self) {
         println!("[Producer] Démarrage du service de mise à jour du graphe.");
-        // On fusionne la logique de l'Onboarding Manager et du GeyserUpdater ici.
         let geyser_task = self.run_geyser_listener();
         let onboarding_task = self.run_onboarding_manager();
-
-        // On exécute les deux tâches en parallèle.
-        tokio::join!(geyser_task, onboarding_task);
+        let pre_hydration_task = self.run_clmm_pre_hydrator();
+        tokio::join!(geyser_task, onboarding_task, pre_hydration_task);
     }
 
     // Tâche pour intégrer les nouveaux pools de la hotlist
@@ -289,6 +282,70 @@ impl DataProducer {
         }
         Err(anyhow!("Stream Geyser terminé."))
     }
+
+    async fn run_clmm_pre_hydrator(&self) {
+        let mut interval = tokio::time::interval(Duration::from_secs(2));
+        loop {
+            interval.tick().await;
+
+            let old_graph = self.shared_graph.load_full();
+            if old_graph.pools.is_empty() {
+                continue;
+            }
+            let mut new_graph = (*old_graph).clone();
+            let mut graph_was_updated = false;
+            let mut hydration_futures = Vec::new();
+
+            for (pool_key, pool) in new_graph.pools.iter() {
+                let is_clmm = matches!(pool, Pool::RaydiumClmm(_) | Pool::OrcaWhirlpool(_) | Pool::MeteoraDlmm(_) | Pool::MeteoraDammV2(_));
+                if is_clmm {
+                    let pool_clone = pool.clone();
+                    let rpc_client_clone = self.rpc_client.clone();
+                    let key_clone = *pool_key;
+
+                    hydration_futures.push(tokio::spawn(async move {
+                        // On réutilise la même logique d'hydratation que dans les décodeurs
+                        let hydrated_pool_result: Result<Pool, anyhow::Error> = async {
+                            match pool_clone {
+                                Pool::RaydiumClmm(mut p) => {
+                                    raydium::clmm::hydrate(&mut p, &rpc_client_clone).await?;
+                                    Ok(Pool::RaydiumClmm(p))
+                                },
+                                Pool::OrcaWhirlpool(mut p) => {
+                                    orca::whirlpool::hydrate(&mut p, &rpc_client_clone).await?;
+                                    Ok(Pool::OrcaWhirlpool(p))
+                                },
+                                Pool::MeteoraDlmm(mut p) => {
+                                    meteora::dlmm::hydrate(&mut p, &rpc_client_clone).await?;
+                                    Ok(Pool::MeteoraDlmm(p))
+                                },
+                                Pool::MeteoraDammV2(mut p) => {
+                                    meteora::damm_v2::hydrate(&mut p, &rpc_client_clone).await?;
+                                    Ok(Pool::MeteoraDammV2(p))
+                                }
+                                _ => unreachable!(),
+                            }
+                        }.await;
+                        (key_clone, hydrated_pool_result)
+                    }));
+                }
+            }
+
+            let results = futures_util::future::join_all(hydration_futures).await;
+
+            for result in results {
+                if let Ok((key, Ok(hydrated_pool))) = result {
+                    new_graph.update_pool_in_graph(&key, hydrated_pool);
+                    graph_was_updated = true;
+                }
+            }
+
+            if graph_was_updated {
+                self.shared_graph.store(Arc::new(new_graph));
+                let _ = self.update_notifier.send(());
+            }
+        }
+    }
 }
 
 
@@ -358,24 +415,6 @@ async fn scout_worker(
     }
 }
 
-// Helper pour réhydrater uniquement les pools qui en ont besoin (CLMMs)
-async fn rehydrate_if_clmm(pool: Pool, rpc_client: &Arc<ResilientRpcClient>) -> Result<Option<Pool>> {
-    match pool {
-        Pool::RaydiumClmm(mut p) => {
-            mev::decoders::raydium::clmm::hydrate(&mut p, rpc_client).await?;
-            Ok(Some(Pool::RaydiumClmm(p)))
-        }
-        Pool::OrcaWhirlpool(mut p) => {
-            mev::decoders::orca::whirlpool::hydrate(&mut p, rpc_client).await?;
-            Ok(Some(Pool::OrcaWhirlpool(p)))
-        }
-        Pool::MeteoraDlmm(mut p) => {
-            mev::decoders::meteora::dlmm::hydrate(&mut p, rpc_client).await?;
-            Ok(Some(Pool::MeteoraDlmm(p)))
-        }
-        _ => Ok(None), // Les autres pools n'ont pas besoin de ré-hydratation
-    }
-}
 
 
 #[derive(Clone)] // On dit à Rust comment cloner cette structure
@@ -388,6 +427,7 @@ struct WorkerDependencies {
     fee_manager: FeeManager,
     sender: Arc<dyn TransactionSender>,
     config: Config,
+    template_cache: Arc<RwLock<HashMap<String, ArbitrageInstructionsTemplate>>>,
 }
 
 async fn analysis_worker(
@@ -408,6 +448,8 @@ async fn analysis_worker(
             deps.leader_schedule_tracker.clone(),
             deps.validator_intel.clone(),
             deps.fee_manager.clone(),
+            // --- ON PASSE LE CACHE DE TEMPLATES ICI ---
+            deps.template_cache.clone(),
         )),
         Box::new(FinalSimulator::new(deps.sender.clone())),
     ]);
@@ -423,35 +465,9 @@ async fn analysis_worker(
 
         let start_time = Instant::now();
 
-        // --- DÉBUT DE LA LOGIQUE DE RÉHYDRATATION CORRIGÉE AVEC `deps` ---
-        let original_graph_snapshot = shared_graph.load_full();
-
-        let pool_buy_from_data = match original_graph_snapshot.pools.get(&opportunity.pool_buy_from_key) {
-            Some(p) => p.clone(),
-            None => continue,
-        };
-        let pool_sell_to_data = match original_graph_snapshot.pools.get(&opportunity.pool_sell_to_key) {
-            Some(p) => p.clone(),
-            None => continue,
-        };
-
-        // <-- MODIFIÉ : On utilise `deps.rpc_client`
-        let rehydrated_buy_result = rehydrate_if_clmm(pool_buy_from_data, &deps.rpc_client).await;
-        let rehydrated_sell_result = rehydrate_if_clmm(pool_sell_to_data, &deps.rpc_client).await;
-
-        let graph_for_processing: Arc<Graph> = if matches!(rehydrated_buy_result, Ok(Some(_))) || matches!(rehydrated_sell_result, Ok(Some(_))) {
-            let mut mutable_graph = (*original_graph_snapshot).clone();
-            if let Ok(Some(new_buy)) = rehydrated_buy_result {
-                mutable_graph.update_pool_in_graph(&opportunity.pool_buy_from_key, new_buy);
-            }
-            if let Ok(Some(new_sell)) = rehydrated_sell_result {
-                mutable_graph.update_pool_in_graph(&opportunity.pool_sell_to_key, new_sell);
-            }
-            Arc::new(mutable_graph)
-        } else {
-            original_graph_snapshot.clone()
-        };
-        // --- FIN DE LA LOGIQUE DE RÉHYDRATATION ---
+        // --- TOUTE LA LOGIQUE DE RÉHYDRATATION EST SUPPRIMÉE ---
+        // Le graphe est déjà pré-hydraté par le DataProducer.
+        let graph_for_processing = shared_graph.load_full();
 
         let span = tracing::info_span!(
             "process_opportunity",
@@ -462,14 +478,12 @@ async fn analysis_worker(
         );
         let _enter = span.enter();
 
-        // <-- MODIFIÉ : On utilise `deps.slot_tracker`
         let current_timestamp = deps.slot_tracker.current().clock.unix_timestamp;
 
         let context = ExecutionContext::new(
             opportunity,
-            graph_for_processing,
+            graph_for_processing.clone(), // On clone simplement l'Arc
             payer.insecure_clone(),
-            // <-- MODIFIÉ : On utilise `deps.rpc_client`
             deps.rpc_client.clone(),
             current_timestamp,
             span.clone(),
@@ -481,7 +495,6 @@ async fn analysis_worker(
         metrics::PROCESS_OPPORTUNITY_LATENCY.observe(start_time.elapsed().as_secs_f64());
     }
 }
-
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -563,6 +576,8 @@ async fn main() -> Result<()> {
     // --- Tâche 5 : Workers d'analyse (VERSION CORRIGÉE ET SIMPLIFIÉE) ---
     println!("[Init] Démarrage de {} workers d'analyse...", ANALYSIS_WORKER_COUNT);
 
+    let template_cache = Arc::new(RwLock::new(HashMap::new()));
+
     // 1. On crée UN SEUL groupe de dépendances.
     let worker_deps = WorkerDependencies {
         rpc_client: rpc_client.clone(),
@@ -573,6 +588,7 @@ async fn main() -> Result<()> {
         fee_manager: fee_manager.clone(),
         sender: sender.clone(),
         config: config.clone(),
+        template_cache: template_cache.clone(),
     };
 
     for i in 0..ANALYSIS_WORKER_COUNT {

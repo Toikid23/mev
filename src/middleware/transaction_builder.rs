@@ -4,6 +4,7 @@ use crate::state::{
     leader_schedule::LeaderScheduleTracker, slot_metronome::SlotMetronome,
     slot_tracker::SlotTracker, validator_intel::ValidatorIntelService,
 };
+
 use solana_sdk::signature::Signer;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -38,6 +39,7 @@ impl TransactionBuilder {
         leader_schedule_tracker: Arc<LeaderScheduleTracker>,
         validator_intel: Arc<ValidatorIntelService>,
         fee_manager: FeeManager,
+        template_cache: Arc<RwLock<HashMap<String, ArbitrageInstructionsTemplate>>>,
     ) -> Self {
         Self {
             slot_tracker,
@@ -45,7 +47,7 @@ impl TransactionBuilder {
             leader_schedule_tracker,
             validator_intel,
             fee_manager,
-            template_cache: Arc::new(RwLock::new(HashMap::new())),
+            template_cache,
         }
     }
 }
