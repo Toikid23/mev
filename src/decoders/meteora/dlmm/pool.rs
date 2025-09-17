@@ -17,15 +17,13 @@ use crate::monitoring::metrics;
 use std::time::Instant;
 use tracing::debug;
 
-// --- CONSTANTES ---
+// ... (Les constantes PROGRAM_ID, MAX_BIN_PER_ARRAY, etc. ne changent pas) ...
 pub const PROGRAM_ID: Pubkey = pubkey!("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo");
 const MAX_BIN_PER_ARRAY: usize = 70;
 const BIN_ARRAY_SEED: &[u8] = b"bin_array";
 
-// --- STRUCTURES (inchangées) ---
 
-
-
+// ... (Les structs DecodedDlmmPool, DecodedBin, DecodedBinArray ne changent pas) ...
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecodedDlmmPool {
     pub address: Pubkey,
@@ -34,7 +32,7 @@ pub struct DecodedDlmmPool {
     pub mint_b: Pubkey,
     pub vault_a: Pubkey,
     pub vault_b: Pubkey,
-    pub oracle: Pubkey, // <--- CHAMP AJOUTÉ (remplace observation_key)
+    pub oracle: Pubkey,
     pub active_bin_id: i32,
     pub bin_step: u16,
     pub base_fee_rate: u64,
@@ -44,8 +42,8 @@ pub struct DecodedDlmmPool {
     pub mint_b_transfer_fee_bps: u16,
     pub mint_a_transfer_fee_max: u64,
     pub mint_b_transfer_fee_max: u64,
-    pub mint_a_program: Pubkey, // <--- CHAMP AJOUTÉ
-    pub mint_b_program: Pubkey, // <--- CHAMP AJOUTÉ
+    pub mint_a_program: Pubkey,
+    pub mint_b_program: Pubkey,
     pub parameters: onchain_layouts::StaticParameters,
     pub v_parameters: onchain_layouts::VariableParameters,
     pub hydrated_bin_arrays: Option<BTreeMap<i64, DecodedBinArray>>,
@@ -59,69 +57,40 @@ pub struct DecodedBin { pub amount_a: u64, pub amount_b: u64, pub price: u128 }
 pub struct DecodedBinArray {
     pub index: i64,
     #[serde(with = "serde_arrays")]
-    pub bins: [DecodedBin; MAX_BIN_PER_ARRAY] }
+    pub bins: [DecodedBin; MAX_BIN_PER_ARRAY]
+}
 
 
 impl DecodedDlmmPool {
     pub fn fee_as_percent(&self) -> f64 { (self.base_fee_rate as f64 / 100_000.0) * 100.0 }
 
+    // On supprime calculate_swap_quote_async car il n'est plus utilisé
 
-    pub async fn calculate_swap_quote_async(
-        &mut self,
-        amount_in: u64,
-        swap_for_y: bool,
-        current_timestamp: i64,
-        rpc_client: &ResilientRpcClient
-    ) -> Result<u64> {
-        // On s'assure que le pool est hydraté au minimum
-        if self.hydrated_bin_arrays.is_none() {
-            bail!("Pool is not hydrated. Call hydrate first.");
-        }
-
+    fn calculate_swap_quote_internal(&self, amount_in: u64, swap_for_y: bool, current_timestamp: i64) -> Result<(u64, u32)> {
+        let bin_arrays = self.hydrated_bin_arrays.as_ref().ok_or_else(|| anyhow!("Pool not hydrated"))?;
         let mut amount_remaining_in = amount_in as u128;
         let mut total_amount_out: u128 = 0;
         let mut current_bin_id = self.active_bin_id;
+        let mut bins_crossed = 0u32;
 
-        // Garde une trace des BinArrays déjà fetchés pour éviter les appels en boucle
-        let mut fetched_array_indices = std::collections::HashSet::new();
-        let initial_array_index = get_bin_array_index_from_bin_id(current_bin_id);
-        fetched_array_indices.insert(initial_array_index);
-
-        // Copie temporaire des paramètres pour la simulation de frais
         let mut temp_v_params = self.v_parameters;
         update_references(&mut temp_v_params, &self.parameters, self.active_bin_id, current_timestamp)?;
 
         while amount_remaining_in > 0 {
-            if current_bin_id < self.parameters.min_bin_id || current_bin_id > self.parameters.max_bin_id {
-                break;
-            }
+            if current_bin_id < self.parameters.min_bin_id || current_bin_id > self.parameters.max_bin_id { break; }
 
             let bin_array_idx = get_bin_array_index_from_bin_id(current_bin_id);
+            let bin_array = match bin_arrays.get(&bin_array_idx) {
+                Some(array) => array,
+                None => break,
+            };
 
-            // --- DÉBUT DE LA LOGIQUE DYNAMIQUE ---
-            if !self.hydrated_bin_arrays.as_ref().unwrap().contains_key(&bin_array_idx) {
-                // Le BinArray n'est pas en cache, il faut le fetcher
-                if !fetched_array_indices.contains(&bin_array_idx) {
-                    let address_to_fetch = get_bin_array_address(&self.address, bin_array_idx, &self.program_id);
-
-                    if let Ok(account) = rpc_client.get_account(&address_to_fetch).await {
-                        if let Ok(decoded_array) = decode_bin_array(bin_array_idx, &account.data) {
-                            self.hydrated_bin_arrays.as_mut().unwrap().insert(bin_array_idx, decoded_array);
-                            fetched_array_indices.insert(bin_array_idx);
-                            continue; // On redémarre la boucle pour utiliser les nouvelles données
-                        }
-                    }
-                }
-                // Si on ne peut pas le fetcher ou qu'on l'a déjà tenté, on s'arrête
-                break;
-            }
-            // --- FIN DE LA LOGIQUE DYNAMIQUE ---
-
-            let bin_array = self.hydrated_bin_arrays.as_ref().unwrap().get(&bin_array_idx).unwrap();
             let bin_index_in_array = (current_bin_id % (MAX_BIN_PER_ARRAY as i32) + (MAX_BIN_PER_ARRAY as i32)) % (MAX_BIN_PER_ARRAY as i32);
             let current_bin = &bin_array.bins[bin_index_in_array as usize];
 
-            // Le reste de la logique de calcul est identique à votre `calculate_swap_quote`
+            bins_crossed += 1;
+
+            // --- LA LOGIQUE DE CALCUL DE FRAIS EST RESTAURÉE ICI ---
             update_volatility_accumulator(&mut temp_v_params, &self.parameters, self.active_bin_id, current_bin_id)?;
             let total_fee_rate = get_total_fee(self.bin_step, &self.parameters, &temp_v_params)?;
 
@@ -134,7 +103,14 @@ impl DecodedDlmmPool {
 
             let max_amount_out_from_bin = out_reserve as u128;
             let required_net_in_for_max_out = math::get_amount_out(max_amount_out_from_bin as u64, current_bin.price, !swap_for_y)? as u128;
-            let fee_for_max_out = (required_net_in_for_max_out * total_fee_rate) / (FEE_PRECISION - total_fee_rate);
+
+            // Correction pour éviter la division par zéro si total_fee_rate == FEE_PRECISION
+            let fee_for_max_out = if FEE_PRECISION > total_fee_rate {
+                (required_net_in_for_max_out * total_fee_rate) / (FEE_PRECISION - total_fee_rate)
+            } else {
+                u128::MAX // Si les frais sont de 100%, le coût est infini
+            };
+
             let required_gross_in_for_max_out = required_net_in_for_max_out + fee_for_max_out;
 
             if amount_remaining_in >= required_gross_in_for_max_out {
@@ -150,89 +126,7 @@ impl DecodedDlmmPool {
             }
         }
 
-        Ok(total_amount_out as u64)
-    }
-
-    fn calculate_swap_quote_internal(&self, amount_in: u64, swap_for_y: bool, current_timestamp: i64) -> Result<(u64, u32)> {
-        let bin_arrays = self.hydrated_bin_arrays.as_ref().ok_or_else(|| anyhow!("Pool not hydrated"))?;
-        let mut amount_remaining_in = amount_in as u128;
-        let mut total_amount_out: u128 = 0;
-        let mut current_bin_id = self.active_bin_id;
-
-        let mut bins_crossed = 0u32; // <-- NOTRE COMPTEUR
-
-        let mut temp_v_params = self.v_parameters;
-        update_references(&mut temp_v_params, &self.parameters, self.active_bin_id, current_timestamp)?;
-
-        while amount_remaining_in > 0 {
-            if current_bin_id < self.parameters.min_bin_id || current_bin_id > self.parameters.max_bin_id { break; }
-
-            // ... (logique de get bin_array et bin_index_in_array)
-            let bin_array_idx = get_bin_array_index_from_bin_id(current_bin_id);
-            let bin_array = match bin_arrays.get(&bin_array_idx) {
-                Some(array) => array,
-                None => break,
-            };
-
-            let bin_index_in_array = (current_bin_id % (MAX_BIN_PER_ARRAY as i32) + (MAX_BIN_PER_ARRAY as i32)) % (MAX_BIN_PER_ARRAY as i32);
-            let current_bin = &bin_array.bins[bin_index_in_array as usize];
-
-
-            bins_crossed += 1; // <-- ON INCRÉMENTE LE COMPTEUR
-
-            // ... (le reste de la logique de calcul de la boucle est identique)
-            update_volatility_accumulator(&mut temp_v_params, &self.parameters, self.active_bin_id, current_bin_id)?;
-
-            let fee_params = math::DynamicFeeParams {
-                volatility_accumulator: temp_v_params.volatility_accumulator,
-                last_update_timestamp: temp_v_params.last_update_timestamp,
-                bin_step: self.bin_step,
-                base_factor: self.parameters.base_factor,
-                filter_period: self.parameters.filter_period,
-                decay_period: self.parameters.decay_period,
-                reduction_factor: self.parameters.reduction_factor,
-                variable_fee_control: self.parameters.variable_fee_control,
-                max_volatility_accumulator: self.parameters.max_volatility_accumulator,
-            };
-
-            // On appelle la fonction avec la structure
-            let dynamic_fee_rate = math::calculate_dynamic_fee(1, &fee_params)?;
-
-            // On utilise la variable pour calculer le taux de frais total
-            let total_fee_rate = (self.base_fee_rate as u128)
-                .checked_add(dynamic_fee_rate as u128)
-                .ok_or_else(|| anyhow!("MathOverflow"))?;
-
-            let (out_reserve, _in_reserve_for_out) = if swap_for_y {
-                (current_bin.amount_b, current_bin.amount_a)
-            } else {
-                (current_bin.amount_a, current_bin.amount_b)
-            };
-
-            if out_reserve == 0 {
-                current_bin_id = if swap_for_y { current_bin_id.saturating_sub(1) } else { current_bin_id.saturating_add(1) };
-                continue;
-            }
-
-            let max_amount_out_from_bin = out_reserve as u128;
-            let required_net_in_for_max_out = math::get_amount_out(max_amount_out_from_bin as u64, current_bin.price, !swap_for_y)? as u128;
-            let fee_for_max_out = (required_net_in_for_max_out * total_fee_rate) / (FEE_PRECISION - total_fee_rate);
-            let required_gross_in_for_max_out = required_net_in_for_max_out + fee_for_max_out;
-
-            if amount_remaining_in >= required_gross_in_for_max_out {
-                total_amount_out += max_amount_out_from_bin;
-                amount_remaining_in -= required_gross_in_for_max_out;
-                current_bin_id = if swap_for_y { current_bin_id.saturating_sub(1) } else { current_bin_id.saturating_add(1) };
-            } else {
-                let fee_on_remaining_in = (amount_remaining_in * total_fee_rate) / FEE_PRECISION;
-                let net_amount_in = amount_remaining_in - fee_on_remaining_in;
-                let amount_out_chunk = math::get_amount_out(net_amount_in as u64, current_bin.price, swap_for_y)?;
-                total_amount_out += amount_out_chunk as u128;
-                amount_remaining_in = 0;
-            }
-        }
-
-        Ok((total_amount_out as u64, bins_crossed)) // <-- On retourne les deux valeurs
+        Ok((total_amount_out as u64, bins_crossed))
     }
 }
 
