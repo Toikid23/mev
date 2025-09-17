@@ -14,6 +14,7 @@ use solana_sdk::signature::Keypair;
 use solana_sdk::transaction::VersionedTransaction;
 use std::sync::Arc;
 use tracing::{info, error, Span};
+use crate::config::Config;
 
 /// Le Contexte est un objet qui transporte toutes les données nécessaires
 /// à travers les différentes étapes (middlewares) du pipeline de traitement.
@@ -36,6 +37,7 @@ pub struct ExecutionContext {
     pub is_jito_leader: bool,
     pub jito_tip: Option<u64>,
     pub target_jito_region: Option<JitoRegion>,
+    pub config: Config,
 
     // Métadonnées
     pub pool_pair_id: String,
@@ -50,6 +52,7 @@ impl ExecutionContext {
         rpc_client: Arc<ResilientRpcClient>,
         current_timestamp: i64,
         span: Span,
+        config: Config,
     ) -> Self {
         let mut pools = [opportunity.pool_buy_from_key.to_string(), opportunity.pool_sell_to_key.to_string()];
         pools.sort();
@@ -71,6 +74,7 @@ impl ExecutionContext {
             is_jito_leader: false,
             jito_tip: None,
             target_jito_region: None,
+            config,
             pool_pair_id,
             span,
         }

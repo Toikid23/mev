@@ -2903,6 +2903,7 @@ dependencies = [
  "bs58 0.5.1",
  "bytemuck",
  "chrono",
+ "crossbeam-utils",
  "dotenvy",
  "envy",
  "fixed",

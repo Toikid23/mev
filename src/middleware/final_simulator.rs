@@ -4,12 +4,13 @@ use super::{ExecutionContext, Middleware};
 use crate::execution::sender::{ArbitrageSendInfo, TransactionSender};
 use crate::execution::simulator;
 use crate::monitoring::metrics;
-use anyhow::{Result, Ok};
+use anyhow::{Result};
 use async_trait::async_trait;
 use solana_client::rpc_config::RpcSimulateTransactionConfig;
 use solana_transaction_status::UiTransactionEncoding;
 use std::sync::Arc;
 use tracing::{error, info, warn};
+use std::result::Result::Ok;
 
 pub struct FinalSimulator {
     sender: Arc<dyn TransactionSender>,
@@ -44,10 +45,11 @@ impl Middleware for FinalSimulator {
         };
 
         match context.rpc_client.simulate_transaction_with_config(tx_to_simulate, sim_config).await {
-            Result::Ok(sim_response) if sim_response.value.err.is_none() => {
+            Ok(sim_response) if sim_response.value.err.is_none() => {
                 info!("SUCCÈS DE LA SIMULATION FINALE ! Passage à l'envoi.");
                 metrics::TRANSACTION_OUTCOMES.with_label_values(&["SimSuccess", &context.pool_pair_id]).inc();
 
+                // On peut toujours logger le profit simulé pour analyse, mais sans toucher au PnL
                 if let Some(logs) = &sim_response.value.logs {
                     if let Some(realized_profit) = simulator::parse_realized_profit_from_logs(logs) {
                         let slippage = (context.estimated_profit.unwrap() as i64) - (realized_profit as i64);
@@ -57,14 +59,14 @@ impl Middleware for FinalSimulator {
 
                 let send_info = ArbitrageSendInfo {
                     transaction: tx_to_simulate.clone(),
-                    is_jito_tx: context.is_jito_leader, // <-- MODIFIÉ
+                    is_jito_tx: context.is_jito_leader,
                     jito_tip: context.jito_tip,
                     estimated_profit: context.estimated_profit.unwrap(),
-                    target_jito_region: context.target_jito_region, // <-- MODIFIÉ
+                    target_jito_region: context.target_jito_region,
                 };
 
                 match self.sender.send_transaction(send_info).await {
-                    Result::Ok(signature) => { // Utilisez Result::Ok
+                    Ok(signature) => {
                         info!(signature = %signature, "Transaction envoyée avec succès !");
                         metrics::TRANSACTIONS_SENT.inc();
                         let outcome = if context.is_jito_leader { "Sent_Jito" } else { "Sent_Normal" };
@@ -77,7 +79,7 @@ impl Middleware for FinalSimulator {
                     }
                 }
             }
-            Result::Ok(sim_response) => { // Utilisez Result::Ok
+            Ok(sim_response) => {
                 warn!(error = ?sim_response.value.err, "ÉCHEC DE LA SIMULATION FINALE.");
                 if let Some(logs) = sim_response.value.logs { for log in logs { warn!(log = log); } }
                 metrics::TRANSACTION_OUTCOMES.with_label_values(&["SimFailure", &context.pool_pair_id]).inc();
@@ -88,6 +90,6 @@ impl Middleware for FinalSimulator {
             }
         }
 
-        Ok(false) // On arrête toujours le pipeline ici, que ce soit un succès ou un échec
+        Ok(false)
     }
 }

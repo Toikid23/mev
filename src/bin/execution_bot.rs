@@ -1,6 +1,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+use mev::execution::cu_manager;
 use anyhow::{anyhow, Result, Context, bail};
 use arc_swap::ArcSwap;
 use futures_util::{StreamExt, sink::SinkExt};
@@ -19,6 +20,7 @@ use mev::{
     },
     strategies::spatial::{find_spatial_arbitrage, ArbitrageOpportunity},
 };
+use mev::state::balance_tracker;
 use mev::middleware::{
     ExecutionContext, Pipeline,
     quote_validator::QuoteValidator,
@@ -297,7 +299,6 @@ async fn scout_worker(
 ) {
     info!("[Scout] Démarrage du worker de recherche d'opportunités.");
     loop {
-        // Attendre une notification de mise à jour du graphe
         if update_receiver.changed().await.is_err() {
             error!("[Scout] Le canal de notification est fermé. Arrêt.");
             break;
@@ -308,13 +309,46 @@ async fn scout_worker(
             continue;
         }
 
-        // Le scout fait le travail de recherche UNE SEULE FOIS
-        let opportunities = find_spatial_arbitrage(graph_snapshot.clone()).await;
+        let mut opportunities = find_spatial_arbitrage(graph_snapshot.clone()).await;
 
         if !opportunities.is_empty() {
-            info!("[Scout] Trouvé {} opportunités. Envoi aux workers d'analyse...", opportunities.len());
+            // --- NOUVEAU BLOC DE SCORING ET DE TRI ---
+            info!("[Scout] {} opportunités brutes trouvées. Calcul des scores et tri...", opportunities.len());
+
+            opportunities.sort_by_cached_key(|opp| {
+                // On estime un coût de transaction très simple ici.
+                // NOTE : C'est une estimation rapide, pas la valeur finale.
+                // Le but est juste de classer les opportunités.
+
+                // On récupère les pools pour l'estimation de CUs.
+                let pool_buy_from = graph_snapshot.pools.get(&opp.pool_buy_from_key);
+                let pool_sell_to = graph_snapshot.pools.get(&opp.pool_sell_to_key);
+
+                let estimated_cost = if let (Some(buy_pool), Some(sell_pool)) = (pool_buy_from, pool_sell_to) {
+                    // On suppose 1 tick traversé pour une estimation rapide.
+                    // Le vrai nombre sera calculé par le `QuoteValidator`.
+                    let estimated_cus = cu_manager::estimate_arbitrage_cost(buy_pool, 1, sell_pool, 1);
+
+                    // Estimation agressive du coût des frais pour le scoring.
+                    const ESTIMATED_PRIORITY_FEE_PER_MILLION_CU: u64 = 5000;
+                    (estimated_cus * ESTIMATED_PRIORITY_FEE_PER_MILLION_CU) / 1_000_000
+                } else {
+                    // Si on ne trouve pas les pools, on pénalise lourdement.
+                    u64::MAX
+                };
+
+                let score = (opp.profit_in_lamports as i128) - (estimated_cost as i128);
+
+                // On veut trier du plus grand score au plus petit, donc on inverse le score.
+                -score
+            });
+
+            info!("[Scout] Tri terminé. Meilleur score: ~{} lamports de profit net estimé.",
+                  -(opportunities.first().map_or(0, |opp| ((opp.profit_in_lamports as i128) - 10000))));
+
+            // --- FIN DU NOUVEAU BLOC ---
+
             for opp in opportunities {
-                // Envoie chaque opportunité dans le canal
                 if let Err(e) = opportunity_sender.send(opp).await {
                     error!("[Scout] Erreur d'envoi au canal des workers, ils se sont probablement arrêtés: {}", e);
                     break;
@@ -353,6 +387,7 @@ struct WorkerDependencies {
     validator_intel: Arc<ValidatorIntelService>,
     fee_manager: FeeManager,
     sender: Arc<dyn TransactionSender>,
+    config: Config,
 }
 
 async fn analysis_worker(
@@ -438,6 +473,7 @@ async fn analysis_worker(
             deps.rpc_client.clone(),
             current_timestamp,
             span.clone(),
+            deps.config.clone(),
         );
 
         pipeline.run(context).await;
@@ -458,6 +494,7 @@ async fn main() -> Result<()> {
     let rpc_client = Arc::new(ResilientRpcClient::new(config.solana_rpc_url.clone(), 3, 500));
     let geyser_url = env::var("GEYSER_GRPC_URL").context("GEYSER_GRPC_URL requis")?;
     let validators_app_token = env::var("VALIDATORS_APP_API_KEY").context("VALIDATORS_APP_API_KEY requis")?;
+    balance_tracker::start_monitoring(rpc_client.clone(), config.clone());
     println!("[Init] Le bot utilisera la LUT gérée à l'adresse: {}", MANAGED_LUT_ADDRESS);
 
     // --- Instanciation du service d'envoi unifié ---
@@ -535,6 +572,7 @@ async fn main() -> Result<()> {
         validator_intel: validator_intel_service.clone(),
         fee_manager: fee_manager.clone(),
         sender: sender.clone(),
+        config: config.clone(),
     };
 
     for i in 0..ANALYSIS_WORKER_COUNT {

@@ -155,6 +155,12 @@ async fn main() -> Result<()> {
     tokio::spawn(metrics::start_metrics_server());
     println!("[Listener] Serveur de métriques Prometheus démarré sur le port 9100.");
 
+    // On crée l'état partagé ici
+    let stats_map = std::sync::Arc::new(Mutex::new(HashMap::new()));
+
+    // On lance la tâche de logging en arrière-plan
+    tokio::spawn(log_stats_periodically(stats_map.clone()));
+
     loop {
         println!("[Listener] Tentative de connexion à Geyser : {}", geyser_url);
         match run_listener(geyser_url).await {
