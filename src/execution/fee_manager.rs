@@ -64,10 +64,14 @@ impl FeeManager {
         })
     }
 
-    pub async fn calculate_priority_fee(&self, accounts_in_tx: &[Pubkey], overbid_percent: u8) -> u64 {
+    pub async fn calculate_priority_fee(
+        &self,
+        accounts_in_tx: &[Pubkey],
+        time_remaining_in_slot_ms: u128,
+    ) -> u64 {
         let reader = self.fee_cache.read().await;
         if reader.is_empty() {
-            return 1000;
+            return 1000; // Fallback s'il n'y a pas de données de frais
         }
 
         let mut relevant_fees: Vec<u64> = accounts_in_tx
@@ -83,15 +87,20 @@ impl FeeManager {
 
         relevant_fees.sort_unstable();
 
-        // --- LA STRATÉGIE FINALE : 80ème PERCENTILE + PRIME ---
         let percentile_index = (relevant_fees.len() as f64 * 0.8).floor() as usize;
-        // S'assurer que l'index ne dépasse pas les bornes
         let safe_index = percentile_index.min(relevant_fees.len().saturating_sub(1));
-
         let base_fee = *relevant_fees.get(safe_index).unwrap_or(&1000);
 
-        let overbid_amount = (base_fee as u128 * overbid_percent as u128) / 100;
+        // --- NOUVELLE LOGIQUE DE COURBE D'ENCHÈRE ---
+        // Ces valeurs peuvent être affinées une fois sur le bare metal.
+        let overbid_percent = match time_remaining_in_slot_ms {
+            0..=100 => 200,   // < 100ms restant : Enchère très agressive (200% de plus)
+            101..=250 => 50,  // < 250ms restant : Enchère agressive (50% de plus)
+            251..=400 => 20,  // < 400ms restant : Enchère standard (20% de plus)
+            _ => 10,          // > 400ms restant : Enchère conservatrice (10% de plus)
+        };
 
+        let overbid_amount = (base_fee as u128 * overbid_percent) / 100;
         (base_fee as u128 + overbid_amount) as u64
     }
 

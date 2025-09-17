@@ -148,14 +148,33 @@ impl Middleware for TransactionBuilder {
             info!(profit_net, jito_tip = tip, "DÉCISION: PRÉPARER BUNDLE JITO.");
             (0, Some(tip))
         } else {
-            let fee_per_cu = self.fee_manager.calculate_priority_fee(&[/* ... */], 20).await;
+            // On récupère le temps restant DANS le slot cible
+            let time_remaining_ms = if target_slot == current_slot {
+                self.slot_metronome.estimated_time_remaining_in_slot_ms()
+            } else {
+                // Si on vise le prochain slot, on suppose qu'on a tout le temps
+                self.slot_metronome.average_slot_duration_ms()
+            };
+
+            let accounts_in_opp = [ // On rassemble les comptes clés de l'opportunité
+                context.opportunity.pool_buy_from_key,
+                context.opportunity.pool_sell_to_key,
+            ];
+
+            let fee_per_cu = self.fee_manager.calculate_priority_fee(
+                &accounts_in_opp,
+                time_remaining_ms
+            ).await;
+
             let total_fee = (estimated_cus * fee_per_cu) / 1_000_000;
-            let profit_net = estimated_profit.saturating_sub(total_fee).saturating_sub(5000);
+            let profit_net = estimated_profit.saturating_sub(total_fee).saturating_sub(5000); // 5000 = frais de base tx
+
             if profit_net < 5000 {
-                info!(profit_net, "DÉCISION: Abandon. Profit normal insuffisant.");
+                info!(profit_net, "DÉCISION: Abandon. Profit normal insuffisant après frais dynamiques.");
                 span.record("decision", "Abandon_NormalProfitTooLow");
                 return Ok(false);
             }
+
             span.record("decision", "PrepareNormal");
             info!(profit_net, priority_fee=total_fee, "DÉCISION: PRÉPARER TRANSACTION NORMALE.");
             (fee_per_cu, None)
