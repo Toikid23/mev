@@ -51,26 +51,14 @@ use solana_sdk::transaction::VersionedTransaction;
 use tracing::{info, error};
 use mev::monitoring::metrics;
 use tokio::sync::mpsc;
+use mev::execution::routing::{JitoRegion, JITO_RPC_ENDPOINTS};
+
 
 
 const MANAGED_LUT_ADDRESS: &str = "E5h798UBdK8V1L7MvRfi1ppr2vitPUUUUCVqvTyDgKXN";
 
 const ANALYSIS_WORKER_COUNT: usize = 4; // <-- NOUVEAU : Nombre de workers d'analyse
 
-lazy_static::lazy_static! {
-    static ref JITO_REGIONAL_ENDPOINTS: HashMap<String, String> = {
-        let mut map = HashMap::new();
-        map.insert("Amsterdam".to_string(), "https://amsterdam.mainnet.block-engine.jito.wtf".to_string());
-        map.insert("Dublin".to_string(), "https://dublin.mainnet.block-engine.jito.wtf".to_string());
-        map.insert("Frankfurt".to_string(), "https://frankfurt.mainnet.block-engine.jito.wtf".to_string());
-        map.insert("London".to_string(), "https://london.mainnet.block-engine.jito.wtf".to_string());
-        map.insert("New York".to_string(), "https://ny.mainnet.block-engine.jito.wtf".to_string());
-        map.insert("Salt Lake City".to_string(), "https://slc.mainnet.block-engine.jito.wtf".to_string());
-        map.insert("Singapore".to_string(), "https://singapore.mainnet.block-engine.jito.wtf".to_string());
-        map.insert("Tokyo".to_string(), "https://tokyo.mainnet.block-engine.jito.wtf".to_string());
-        map
-    };
-}
 
 // Les fonctions helpers (read_hotlist, load_main_graph_from_cache, etc.) restent les mêmes.
 // ... (copiez-collez ici les fonctions read_hotlist, load_main_graph_from_cache, ensure_pump_user_account_exists, ensure_atas_exist_for_pool)
@@ -476,7 +464,10 @@ async fn main() -> Result<()> {
     // --- Instanciation du service d'envoi unifié ---
     // Mettez `dry_run: true` pour tester localement sans rien envoyer.
     // Mettez `dry_run: false` sur votre bare metal pour envoyer réellement les transactions.
-    let sender: Arc<dyn TransactionSender> = Arc::new(UnifiedSender::new(rpc_client.clone(), true));
+    let sender: Arc<dyn TransactionSender> = Arc::new(UnifiedSender::new(
+        rpc_client.clone(),
+        true // dry_run: mettre à `false` en production
+    ));
     println!("[Init] Service d'envoi de transactions configuré (Mode: Dry Run).");
 
 

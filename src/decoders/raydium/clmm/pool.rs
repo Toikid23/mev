@@ -319,8 +319,8 @@ impl DecodedClmmPool {
 
         // On pré-calcule de 0.01 à 20.0 par pas de 0.01
         // (La plage peut être ajustée en fonction des montants d'arbitrage typiques)
-        for i in 1..=2000 {
-            let amount_in_ui = i as f64 * 0.01;
+        for i in 1..=400 {
+            let amount_in_ui = i as f64 * 0.005;
             let amount_in = (amount_in_ui * 10f64.powi(decimals as i32)) as u64;
 
             // On appelle directement la logique de calcul interne

@@ -57,9 +57,10 @@ impl Middleware for FinalSimulator {
 
                 let send_info = ArbitrageSendInfo {
                     transaction: tx_to_simulate.clone(),
-                    is_jito_leader: context.is_jito_leader,
+                    is_jito_tx: context.is_jito_leader, // <-- MODIFIÉ
                     jito_tip: context.jito_tip,
                     estimated_profit: context.estimated_profit.unwrap(),
+                    target_jito_region: context.target_jito_region, // <-- MODIFIÉ
                 };
 
                 match self.sender.send_transaction(send_info).await {

@@ -70,7 +70,7 @@ once_cell = "1.21.3"
 
 
 # --- Dépendances pour Jito --
-
+jito-sdk-rust = "0.3.2"
 
 
 

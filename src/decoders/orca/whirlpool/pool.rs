@@ -354,8 +354,8 @@ impl DecodedWhirlpoolPool {
         let token_in_mint = if is_base_input { self.mint_a } else { self.mint_b };
 
         // Plage de pré-calcul
-        for i in 1..=2000 {
-            let amount_in_ui = i as f64 * 0.01;
+        for i in 1..=400 {
+            let amount_in_ui = i as f64 * 0.005;
             let amount_in = (amount_in_ui * 10f64.powi(decimals as i32)) as u64;
 
             // On appelle la méthode de quote existante (qui est déjà synchrone)

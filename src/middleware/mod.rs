@@ -2,7 +2,7 @@ pub mod quote_validator;
 pub mod protection_calculator;
 pub mod transaction_builder;
 pub mod final_simulator;
-
+use crate::execution::routing::JitoRegion;
 use crate::decoders::Pool;
 use crate::execution::protections::SwapProtections;
 use crate::graph_engine::Graph;
@@ -35,6 +35,7 @@ pub struct ExecutionContext {
     pub final_tx: Option<VersionedTransaction>,
     pub is_jito_leader: bool,
     pub jito_tip: Option<u64>,
+    pub target_jito_region: Option<JitoRegion>,
 
     // Métadonnées
     pub pool_pair_id: String,
@@ -69,6 +70,7 @@ impl ExecutionContext {
             final_tx: None,
             is_jito_leader: false,
             jito_tip: None,
+            target_jito_region: None,
             pool_pair_id,
             span,
         }
