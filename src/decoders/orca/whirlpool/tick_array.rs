@@ -66,10 +66,10 @@ pub fn decode_tick_array(data: &[u8]) -> Result<TickArrayData> {
 
     let mut ticks = [TickData::default(); TICK_ARRAY_SIZE];
     let tick_data_size = size_of::<TickData>();
-    for i in 0..TICK_ARRAY_SIZE {
+    for (i, tick_mut) in ticks.iter_mut().enumerate() {
         let start = offset + i * tick_data_size;
         let end = start + tick_data_size;
-        ticks[i] = *bytemuck::from_bytes(&data_slice[start..end]);
+        *tick_mut = *bytemuck::from_bytes(&data_slice[start..end]);
     }
     offset += tick_data_size * TICK_ARRAY_SIZE;
 

@@ -17,7 +17,7 @@ pub fn tick_to_sqrt_price_x64(tick: i32) -> u128 {
     let abs_tick = tick.unsigned_abs();
     let mut ratio = if (abs_tick & 0x1) != 0 { 0xfffb023273ab_u128 } else { 0x1000000000000_u128 };
     if (abs_tick & 0x2) != 0 { ratio = (ratio * 0xfff608684f0a_u128) >> 48; }
-    if (abs_tick & 0x4) != 0 { ratio = (ratio * 0xffeC11970624_u128) >> 48; }
+    if (abs_tick & 0x4) != 0 { ratio = (ratio * 0xffec11970624_u128) >> 48; }
     if (abs_tick & 0x8) != 0 { ratio = (ratio * 0xffd827226560_u128) >> 48; }
     if (abs_tick & 0x10) != 0 { ratio = (ratio * 0xffb0568d3568_u128) >> 48; }
     if (abs_tick & 0x20) != 0 { ratio = (ratio * 0xff610884848c_u128) >> 48; }
@@ -164,7 +164,7 @@ pub fn compute_swap_step(
 }
 
 pub fn get_tick_at_sqrt_price(sqrt_price_x64: u128) -> Result<i32> {
-    if !(sqrt_price_x64 >= tick_math::MIN_SQRT_PRICE_X64 && sqrt_price_x64 < tick_math::MAX_SQRT_PRICE_X64) {
+    if !(tick_math::MIN_SQRT_PRICE_X64..tick_math::MAX_SQRT_PRICE_X64).contains(&sqrt_price_x64) {
         return Err(anyhow!("SqrtPrice out of range"));
     }
     let msb = 128 - sqrt_price_x64.leading_zeros() - 1;

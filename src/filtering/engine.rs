@@ -71,22 +71,24 @@ impl FilteringEngine {
         loop {
             tokio::select! {
                 Some(pool_address) = active_pool_receiver.recv() => {
-                    if !known_pools.contains_key(&pool_address) {
+                    if let std::collections::hash_map::Entry::Vacant(entry) = known_pools.entry(pool_address) {
+                        // Le pool n'est pas connu, on le traite (branche `if`)
                         if let Some(identity) = initial_cache.pools.get(&pool_address) {
                             if !TOKEN_WHITELIST.contains(&identity.mint_a) && !TOKEN_WHITELIST.contains(&identity.mint_b) {
-                                continue; // Le pool ne contient aucun token de confiance, on l'ignore.
+                                continue;
                             }
                             match self.hydrate_and_check_liquidity(identity).await {
                                 Ok(true) => {
                                     println!("[Engine] Nouveau pool {} a passé le filtre statique. Suivi de l'activité.", pool_address);
-                                    known_pools.insert(pool_address, identity.clone());
+                                    entry.insert(identity.clone()); // On insère via l'entrée vacante
                                     activity_tracker.entry(pool_address).or_default().push(Instant::now());
                                 },
-                                Ok(false) => { /* Le pool n'a pas assez de liquidité, on l'ignore. */ },
+                                Ok(false) => { /* Ignore */ },
                                 Err(e) => eprintln!("[Engine] Erreur d'hydratation pour {}: {}", pool_address, e),
                             }
                         }
                     } else {
+                        // Le pool est déjà connu, on met juste à jour l'activité (branche `else`)
                         activity_tracker.entry(pool_address).or_default().push(Instant::now());
                     }
                 },

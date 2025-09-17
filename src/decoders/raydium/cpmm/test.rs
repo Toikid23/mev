@@ -146,7 +146,7 @@ pub async fn test_cpmm_with_simulation(rpc_client: &ResilientRpcClient, payer_ke
 
     // On décode l'état du compte APRES
     let post_accounts = sim_result.accounts.ok_or_else(|| anyhow!("La simulation n'a pas retourné l'état des comptes."))?;
-    let destination_account_state = post_accounts.get(0).and_then(|acc| acc.as_ref()).ok_or_else(|| anyhow!("L'état du compte de destination n'a pas été retourné."))?;
+    let destination_account_state = post_accounts.first().and_then(|acc| acc.as_ref()).ok_or_else(|| anyhow!("L'état du compte de destination n'a pas été retourné."))?;
 
     let decoded_data = match &destination_account_state.data {
         UiAccountData::Binary(data_str, _) => STANDARD.decode(data_str)?,

@@ -335,32 +335,39 @@ async fn rehydrate_if_clmm(pool: Pool, rpc_client: &Arc<ResilientRpcClient>) -> 
 }
 
 
-async fn analysis_worker(
-    id: usize,
-    opportunity_receiver: Arc<Mutex<mpsc::Receiver<ArbitrageOpportunity>>>,
-    shared_graph: Arc<ArcSwap<Graph>>,
+struct WorkerDependencies {
     rpc_client: Arc<ResilientRpcClient>,
-    payer: Keypair,
     slot_tracker: Arc<SlotTracker>,
     slot_metronome: Arc<SlotMetronome>,
     leader_schedule_tracker: Arc<LeaderScheduleTracker>,
     validator_intel: Arc<ValidatorIntelService>,
     fee_manager: FeeManager,
     sender: Arc<dyn TransactionSender>,
+}
+
+
+async fn analysis_worker(
+    id: usize,
+    opportunity_receiver: Arc<Mutex<mpsc::Receiver<ArbitrageOpportunity>>>,
+    shared_graph: Arc<ArcSwap<Graph>>,
+    payer: Keypair,
+    deps: WorkerDependencies, // <-- MODIFIÉ : La longue liste est remplacée par `deps`
 ) {
     info!("[Worker {}] Démarrage.", id);
 
+    // On utilise les dépendances de `deps` pour construire le pipeline
     let pipeline = Pipeline::new(vec![
         Box::new(QuoteValidator),
         Box::new(ProtectionCalculator),
         Box::new(TransactionBuilder {
-            slot_tracker: slot_tracker.clone(),
-            slot_metronome: slot_metronome.clone(),
-            leader_schedule_tracker: leader_schedule_tracker.clone(),
-            validator_intel: validator_intel.clone(),
-            fee_manager: fee_manager.clone(),
+            // <-- MODIFIÉ : On accède aux champs via `deps.`
+            slot_tracker: deps.slot_tracker.clone(),
+            slot_metronome: deps.slot_metronome.clone(),
+            leader_schedule_tracker: deps.leader_schedule_tracker.clone(),
+            validator_intel: deps.validator_intel.clone(),
+            fee_manager: deps.fee_manager.clone(),
         }),
-        Box::new(FinalSimulator::new(sender.clone())),
+        Box::new(FinalSimulator::new(deps.sender.clone())),
     ]);
 
     loop {
@@ -373,9 +380,8 @@ async fn analysis_worker(
         };
 
         let start_time = Instant::now();
-        let graph_for_processing: Arc<Graph>; // Le type final sera un Arc<Graph>
 
-        // --- DÉBUT DE LA LOGIQUE DE RÉHYDRATATION CORRIGÉE ---
+        // --- DÉBUT DE LA LOGIQUE DE RÉHYDRATATION CORRIGÉE AVEC `deps` ---
         let original_graph_snapshot = shared_graph.load_full();
 
         let pool_buy_from_data = match original_graph_snapshot.pools.get(&opportunity.pool_buy_from_key) {
@@ -387,27 +393,23 @@ async fn analysis_worker(
             None => continue,
         };
 
-        let rehydrated_buy_result = rehydrate_if_clmm(pool_buy_from_data, &rpc_client).await;
-        let rehydrated_sell_result = rehydrate_if_clmm(pool_sell_to_data, &rpc_client).await;
+        // <-- MODIFIÉ : On utilise `deps.rpc_client`
+        let rehydrated_buy_result = rehydrate_if_clmm(pool_buy_from_data, &deps.rpc_client).await;
+        let rehydrated_sell_result = rehydrate_if_clmm(pool_sell_to_data, &deps.rpc_client).await;
 
-        // On vérifie si AU MOINS UNE réhydratation a eu lieu
-        if matches!(rehydrated_buy_result, Ok(Some(_))) || matches!(rehydrated_sell_result, Ok(Some(_))) {
-            // Si oui, on clone le graphe pour le modifier
+        let graph_for_processing: Arc<Graph> = if matches!(rehydrated_buy_result, Ok(Some(_))) || matches!(rehydrated_sell_result, Ok(Some(_))) {
             let mut mutable_graph = (*original_graph_snapshot).clone();
-
             if let Ok(Some(new_buy)) = rehydrated_buy_result {
                 mutable_graph.update_pool_in_graph(&opportunity.pool_buy_from_key, new_buy);
             }
             if let Ok(Some(new_sell)) = rehydrated_sell_result {
                 mutable_graph.update_pool_in_graph(&opportunity.pool_sell_to_key, new_sell);
             }
-            // On met notre graphe modifié dans un nouvel Arc
-            graph_for_processing = Arc::new(mutable_graph);
+            Arc::new(mutable_graph)
         } else {
-            // Si aucune réhydratation, on clone simplement le pointeur Arc (très rapide)
-            graph_for_processing = original_graph_snapshot.clone();
-        }
-        // --- FIN DE LA LOGIQUE DE RÉHYDRATATION CORRIGÉE ---
+            original_graph_snapshot.clone()
+        };
+        // --- FIN DE LA LOGIQUE DE RÉHYDRATATION ---
 
         let span = tracing::info_span!(
             "process_opportunity",
@@ -418,13 +420,15 @@ async fn analysis_worker(
         );
         let _enter = span.enter();
 
-        let current_timestamp = slot_tracker.current().clock.unix_timestamp;
+        // <-- MODIFIÉ : On utilise `deps.slot_tracker`
+        let current_timestamp = deps.slot_tracker.current().clock.unix_timestamp;
 
         let context = ExecutionContext::new(
             opportunity,
-            graph_for_processing, // On passe notre Arc<Graph> final
+            graph_for_processing,
             payer.insecure_clone(),
-            rpc_client.clone(),
+            // <-- MODIFIÉ : On utilise `deps.rpc_client`
+            deps.rpc_client.clone(),
             current_timestamp,
             span.clone(),
         );
@@ -514,23 +518,32 @@ async fn main() -> Result<()> {
     for i in 0..ANALYSIS_WORKER_COUNT {
         let worker_rx = shared_opportunity_rx.clone();
         let worker_graph = hot_graph.clone();
-        let worker_rpc = rpc_client.clone();
         let worker_payer = Keypair::try_from(payer.to_bytes().as_slice())?;
-        let worker_slot_tracker = slot_tracker.clone();
-        let worker_slot_metronome = slot_metronome.clone();
-        let worker_leader_schedule = leader_schedule_tracker.clone();
-        let worker_validator_intel = validator_intel_service.clone();
-        let worker_fee_manager = fee_manager.clone();
-        let worker_sender = sender.clone(); // On clone l'Arc du sender pour le worker
+
+        // --- DÉBUT DE LA CORRECTION ---
+        // 1. On crée la structure qui regroupe toutes les dépendances
+        let worker_deps = WorkerDependencies {
+            rpc_client: rpc_client.clone(),
+            slot_tracker: slot_tracker.clone(),
+            slot_metronome: slot_metronome.clone(),
+            leader_schedule_tracker: leader_schedule_tracker.clone(),
+            validator_intel: validator_intel_service.clone(),
+            fee_manager: fee_manager.clone(),
+            sender: sender.clone(),
+        };
 
         tokio::spawn(async move {
+            // 2. On appelle la fonction avec la nouvelle signature (5 arguments)
             analysis_worker(
-                i + 1, worker_rx, worker_graph, worker_rpc, worker_payer,
-                worker_slot_tracker, worker_slot_metronome,
-                worker_leader_schedule, worker_validator_intel, worker_fee_manager,
-                worker_sender, // On passe le sender cloné
-            ).await;
+                i + 1,
+                worker_rx,
+                worker_graph,
+                worker_payer,
+                worker_deps, // On passe la structure en un seul bloc
+            )
+                .await;
         });
+        // --- FIN DE LA CORRECTION ---
     }
 
     println!("[Bot] Architecture démarrée. Le bot est opérationnel.");

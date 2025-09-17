@@ -111,7 +111,7 @@ fn get_delta_amount_b_unsigned_unchecked(lower_sqrt_price: u128, upper_sqrt_pric
     let delta_sqrt_price: U256 = U256::from(upper_sqrt_price - lower_sqrt_price);
     let prod: U256 = liquidity_u256.checked_mul(delta_sqrt_price).ok_or(anyhow!("MathOverflow"))?;
     match round {
-        Rounding::Up => { let denominator: U256 = U256::ONE << (RESOLUTION as usize) * 2; Ok((prod + denominator - U256::ONE) / denominator) }
-        Rounding::Down => Ok(prod >> (RESOLUTION as usize) * 2),
+        Rounding::Up => { let denominator: U256 = U256::ONE << ((RESOLUTION as usize) * 2); Ok((prod + denominator - U256::ONE) / denominator) }
+        Rounding::Down => Ok(prod >> ((RESOLUTION as usize) * 2)),
     }
 }

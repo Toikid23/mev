@@ -19,8 +19,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-const CONFIG_CACHE_TTL_SECONDS: u64 = 300; // 5 minutes
-const CLOCK_CACHE_TTL_MILLIS: u64 = 500; // 500 millisecondes, juste un peu plus qu'un slot
+const CONFIG_CACHE_TTL_SECONDS: u64 = 300;
+const CLOCK_CACHE_TTL_MILLIS: u64 = 500;
 
 #[derive(Debug, Clone)]
 struct CacheEntry<T> {
@@ -36,7 +36,9 @@ impl<T> CacheEntry<T> {
 
 #[derive(Debug, Clone)]
 pub enum CacheableData {
-    PumpAmmGlobalConfig(Box<pump_layouts::GlobalConfig>), // <-- La suggestion
+    // --- CORRECTION : On boxe la variante la plus grande ---
+    PumpAmmGlobalConfig(Box<pump_layouts::GlobalConfig>),
+
     RaydiumCpmmAmmConfig(CpmmDecodedConfig),
     RaydiumClmmAmmConfig(DecodedClmmConfig),
     OrcaWhirlpoolsConfig(DecodedWhirlpoolsConfig),
@@ -45,6 +47,13 @@ pub enum CacheableData {
 
 pub struct GlobalCache {
     cache: RwLock<HashMap<Pubkey, CacheEntry<CacheableData>>>,
+}
+
+// --- CORRECTION : On implémente le trait Default comme suggéré par Clippy ---
+impl Default for GlobalCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GlobalCache {

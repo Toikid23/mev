@@ -27,8 +27,8 @@ pub fn parse_swap_event_from_logs(logs: &[String], is_base_input: bool) -> Optio
         if let Some(data_str) = log.strip_prefix("Program data: ") {
             if let Ok(bytes) = STANDARD.decode(data_str) {
                 if bytes.len() > 8 && bytes.starts_with(&SWAP_EVENT_DISCRIMINATOR) {
-                    let mut event_data: &[u8] = &bytes[8..];
-                    if let Ok(event) = SwapEvent::try_from_slice(&mut event_data) {
+                    let event_data: &[u8] = &bytes[8..];
+                    if let Ok(event) = SwapEvent::try_from_slice(event_data) {
                         // Si l'input est le token de base (A), la sortie est `amount_1` (token B)
                         // Sinon, la sortie est `amount_0` (token A)
                         return if is_base_input {

@@ -21,14 +21,17 @@ pub use pool_factory::PoolFactory;
 // --- 3. Définir l'enum unifié avec les BONS NOMS ---
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Pool {
-    RaydiumAmmV4(raydium::amm_v4::DecodedAmmPool),
-    RaydiumCpmm(raydium::cpmm::DecodedCpmmPool),
-    RaydiumClmm(Box<raydium::clmm::DecodedClmmPool>), // Boxer les CLMMs aussi par précaution
-    MeteoraDammV1(Box<meteora::damm_v1::DecodedMeteoraSbpPool>), // <-- La suggestion
+    // On boxe tout sauf les plus petits pour être sûr
+    RaydiumAmmV4(Box<raydium::amm_v4::DecodedAmmPool>),
+    RaydiumCpmm(Box<raydium::cpmm::DecodedCpmmPool>),
+
+    // Variantes de grande taille, stockées derrière un pointeur `Box`
+    PumpAmm(Box<pump::amm::DecodedPumpAmmPool>),
+    RaydiumClmm(Box<raydium::clmm::DecodedClmmPool>),
+    MeteoraDammV1(Box<meteora::damm_v1::DecodedMeteoraSbpPool>),
     MeteoraDammV2(Box<meteora::damm_v2::DecodedMeteoraDammPool>),
     MeteoraDlmm(Box<meteora::dlmm::DecodedDlmmPool>),
     OrcaWhirlpool(Box<orca::whirlpool::DecodedWhirlpoolPool>),
-    PumpAmm(pump::amm::DecodedPumpAmmPool),
 }
 
 // --- 4. Implémenter le trait pour l'enum avec les BONS NOMS ---

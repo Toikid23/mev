@@ -173,14 +173,11 @@ pub async fn hydrate(pool: &mut DecodedWhirlpoolPool, rpc_client: &ResilientRpcC
     let accounts_results = rpc_client.get_multiple_accounts(&tick_arrays_to_fetch.into_iter().collect::<Vec<_>>()).await?;
 
     let mut hydrated_tick_arrays = BTreeMap::new();
-    for account_opt in accounts_results {
-        if let Some(account) = account_opt {
-            if let Ok(decoded_array) = tick_array::decode_tick_array(&account.data) {
-                hydrated_tick_arrays.insert(decoded_array.start_tick_index, decoded_array);
-            }
+    for account in accounts_results.into_iter().flatten() {
+        if let Ok(decoded_array) = tick_array::decode_tick_array(&account.data) {
+            hydrated_tick_arrays.insert(decoded_array.start_tick_index, decoded_array);
         }
     }
-
     pool.tick_arrays = Some(hydrated_tick_arrays);
 
     Ok(())
@@ -224,14 +221,11 @@ pub async fn hydrate_with_depth(pool: &mut DecodedWhirlpoolPool, rpc_client: &Re
     let accounts_results = rpc_client.get_multiple_accounts(&tick_arrays_to_fetch.into_iter().collect::<Vec<_>>()).await?;
 
     let mut hydrated_tick_arrays = BTreeMap::new();
-    for account_opt in accounts_results {
-        if let Some(account) = account_opt {
-            if let Ok(decoded_array) = tick_array::decode_tick_array(&account.data) {
-                hydrated_tick_arrays.insert(decoded_array.start_tick_index, decoded_array);
-            }
+    for account in accounts_results.into_iter().flatten() {
+        if let Ok(decoded_array) = tick_array::decode_tick_array(&account.data) {
+            hydrated_tick_arrays.insert(decoded_array.start_tick_index, decoded_array);
         }
     }
-
     pool.tick_arrays = Some(hydrated_tick_arrays);
     Ok(())
 }
@@ -282,12 +276,12 @@ pub async fn rehydrate_for_escalation(
     Ok(())
 }
 
-fn find_next_initialized_tick<'a>(
+fn find_next_initialized_tick(
     tick_spacing: u16,
     current_tick_index: i32,
     a_to_b: bool,
-    tick_arrays: &'a BTreeMap<i32, tick_array::TickArrayData>,
-) -> Option<(i32, &'a tick_array::TickData)> {
+    tick_arrays: &BTreeMap<i32, tick_array::TickArrayData>,
+) -> Option<(i32, &tick_array::TickData)> {
     let tick_spacing = tick_spacing as i32;
 
     if a_to_b { // Le prix baisse, on cherche un tick inférieur

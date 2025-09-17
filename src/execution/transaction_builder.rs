@@ -38,6 +38,17 @@ pub struct ExecuteRouteIxArgs {
     pub minimum_expected_profit: u64,
 }
 
+pub struct ArbitrageTransactionParams<'a> {
+    pub opportunity: &'a ArbitrageOpportunity,
+    pub graph: Arc<Graph>,
+    pub rpc_client: &'a ResilientRpcClient,
+    pub payer: &'a Keypair,
+    pub lookup_table_account: &'a AddressLookupTableAccount,
+    pub protections: &'a SwapProtections,
+    pub estimated_cus: u64,
+    pub priority_fee_price_per_cu: u64,
+}
+
 // C'est votre fonction originale, maintenant dans son propre module.
 pub async fn build_arbitrage_transaction(
     opportunity: &ArbitrageOpportunity,
@@ -119,7 +130,7 @@ pub async fn build_arbitrage_transaction(
     let message = v0::Message::try_compile(
         &payer.pubkey(),
         &all_instructions, // On utilise le vecteur complet
-        &[lookup_table_account.clone()],
+        std::slice::from_ref(lookup_table_account),
         recent_blockhash,
     )?;
     let transaction = VersionedTransaction::try_new(VersionedMessage::V0(message), &[payer])?;

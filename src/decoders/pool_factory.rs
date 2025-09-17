@@ -31,43 +31,34 @@ impl PoolFactory {
 
     /// Tente de décoder les données brutes d'un compte en un objet `Pool` non hydraté.
     /// C'est utile pour les scanners/filtres qui n'ont pas besoin de données hydratées.
-    pub fn decode_raw_pool(
-        &self,
-        address: &Pubkey,
-        data: &[u8],
-        owner: &Pubkey,
-    ) -> Result<Pool> {
+    pub fn decode_raw_pool(&self, address: &Pubkey, data: &[u8], owner: &Pubkey) -> Result<Pool> {
         match *owner {
-            // Raydium
+            // AMMs (pas de Box)
             id if id == raydium::amm_v4::RAYDIUM_AMM_V4_PROGRAM_ID => {
-                raydium::amm_v4::decode_pool(address, data).map(Pool::RaydiumAmmV4)
+                raydium::amm_v4::decode_pool(address, data).map(|p| Pool::RaydiumAmmV4(Box::new(p)))
             }
             id if id == Pubkey::from_str("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C").unwrap() => {
-                raydium::cpmm::decode_pool(address, data).map(Pool::RaydiumCpmm)
+                raydium::cpmm::decode_pool(address, data).map(|p| Pool::RaydiumCpmm(Box::new(p)))
             }
-            id if id == Pubkey::from_str("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK").unwrap() => {
-                raydium::clmm::decode_pool(address, data, &id).map(Pool::RaydiumClmm)
+            id if id == pump::amm::PUMP_PROGRAM_ID => {
+                pump::amm::decode_pool(address, data).map(|p| Pool::PumpAmm(Box::new(p)))
             }
 
-            // Meteora
+            // Variantes "Boxées"
+            id if id == Pubkey::from_str("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK").unwrap() => {
+                raydium::clmm::decode_pool(address, data, &id).map(|p| Pool::RaydiumClmm(Box::new(p)))
+            }
             id if id == Pubkey::from_str("Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB").unwrap() => {
-                meteora::damm_v1::decode_pool(address, data).map(Pool::MeteoraDammV1)
+                meteora::damm_v1::decode_pool(address, data).map(|p| Pool::MeteoraDammV1(Box::new(p)))
             }
             id if id == Pubkey::from_str("cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG").unwrap() => {
-                meteora::damm_v2::decode_pool(address, data).map(Pool::MeteoraDammV2)
+                meteora::damm_v2::decode_pool(address, data).map(|p| Pool::MeteoraDammV2(Box::new(p)))
             }
             id if id == meteora::dlmm::PROGRAM_ID => {
-                meteora::dlmm::decode_lb_pair(address, data, &id).map(Pool::MeteoraDlmm)
+                meteora::dlmm::decode_lb_pair(address, data, &id).map(|p| Pool::MeteoraDlmm(Box::new(p)))
             }
-
-            // Orca
             id if id == Pubkey::from_str("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc").unwrap() => {
-                orca::whirlpool::decode_pool(address, data).map(Pool::OrcaWhirlpool)
-            }
-
-            // Pump
-            id if id == pump::amm::PUMP_PROGRAM_ID => {
-                pump::amm::decode_pool(address, data).map(Pool::PumpAmm)
+                orca::whirlpool::decode_pool(address, data).map(|p| Pool::OrcaWhirlpool(Box::new(p)))
             }
 
             _ => Err(anyhow!("Programme propriétaire inconnu: {}", owner)),

@@ -333,7 +333,7 @@ impl PoolOperations for DecodedMeteoraSbpPool {
         let unlocked_in_vault_before = get_unlocked_amount(&in_vault_state, current_timestamp);
         let in_lp_minted = get_lp_for_tokens(amount_in_after_protocol_fee, unlocked_in_vault_before, in_vault_lp_supply);
 
-        let mut temp_in_vault_state = in_vault_state.clone();
+        let mut temp_in_vault_state = in_vault_state;
         temp_in_vault_state.total_amount = in_vault_state.total_amount.saturating_add(amount_in_after_protocol_fee);
         let unlocked_in_vault_after = get_unlocked_amount(&temp_in_vault_state, current_timestamp);
         let new_in_vault_lp_supply = in_vault_lp_supply.saturating_add(in_lp_minted);

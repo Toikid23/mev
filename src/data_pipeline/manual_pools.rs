@@ -54,7 +54,6 @@
     ]
 }
 */
-
 pub fn get_manual_pool_list() -> Vec<&'static str> {
     vec![
         "2669SjVyYp7d4oBxMmvyVELPHDdADznDJFLoDdcEXPn3", // Pool 1 (votre adresse)

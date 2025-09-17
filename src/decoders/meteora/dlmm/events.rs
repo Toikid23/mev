@@ -26,8 +26,8 @@ pub fn parse_dlmm_swap_event_from_logs(logs: &[String]) -> Option<u64> {
         if let Some(data_str) = log.strip_prefix("Program data: ") {
             if let Ok(bytes) = STANDARD.decode(data_str) {
                 if bytes.len() > 8 && bytes.starts_with(&SWAP_EVENT_DISCRIMINATOR) {
-                    let mut event_data: &[u8] = &bytes[8..];
-                    if let Ok(event) = DlmmSwapEvent::try_from_slice(&mut event_data) {
+                    let event_data: &[u8] = &bytes[8..];
+                    if let Ok(event) = DlmmSwapEvent::try_from_slice(event_data) {
                         return Some(event.amount_out);
                     }
                 }

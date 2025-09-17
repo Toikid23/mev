@@ -107,21 +107,22 @@ pub fn decode_pool(address: &Pubkey, data: &[u8]) -> Result<DecodedPumpAmmPool> 
     })
 }
 
+// DANS : src/decoders/pump/amm/pool.rs
+
 pub async fn hydrate(pool: &mut DecodedPumpAmmPool, rpc_client: &ResilientRpcClient) -> Result<()> {
     let (global_config_address, _) = Pubkey::find_program_address(&[b"global_config"], &PUMP_PROGRAM_ID);
     let (fee_config_address, _) = Pubkey::find_program_address(&[b"fee_config", PUMP_PROGRAM_ID.as_ref()], &PUMP_FEE_PROGRAM_ID);
 
-    // --- DÉBUT DE LA NOUVELLE LOGIQUE DE CACHE POUR GLOBAL_CONFIG ---
-
-    // 1. Tenter de récupérer GlobalConfig depuis le cache.
+    // --- DÉBUT DE LA LOGIQUE CORRIGÉE POUR LE CACHE ---
     let cached_config = GLOBAL_CACHE.get(&global_config_address);
 
-    let global_config = if let Some(CacheableData::PumpAmmGlobalConfig(config)) = cached_config {
+    let global_config = if let Some(CacheableData::PumpAmmGlobalConfig(config_box)) = cached_config {
         println!("[Cache] HIT pour Pump.fun GlobalConfig: {}", global_config_address);
-        config
+        // config_box est un Box<GlobalConfig>. On le déréférence pour obtenir GlobalConfig.
+        // Comme GlobalConfig est `Copy`, cela crée une copie simple sur la stack.
+        *config_box
     } else {
         println!("[Cache] MISS pour Pump.fun GlobalConfig: {}. Fetching via RPC...", global_config_address);
-        // 2. Cache MISS: Faire l'appel RPC.
         let global_config_data = rpc_client
             .get_account_data(&global_config_address)
             .await
@@ -135,24 +136,22 @@ pub async fn hydrate(pool: &mut DecodedPumpAmmPool, rpc_client: &ResilientRpcCli
             &config_data_slice[..size_of::<onchain_layouts::GlobalConfig>()],
         );
 
-        // 3. Mettre à jour le cache.
+        // On met à jour le cache en "boxant" la nouvelle configuration.
         GLOBAL_CACHE.put(
             global_config_address,
-            CacheableData::PumpAmmGlobalConfig(new_config), // Pas besoin de .clone() car GlobalConfig est Copy
+            CacheableData::PumpAmmGlobalConfig(Box::new(new_config)),
         );
         new_config
     };
 
-    // Assigner la config (du cache ou du RPC) au pool.
     pool.global_config = global_config;
     pool.protocol_fee_recipients = pool.global_config.protocol_fee_recipients;
+    // --- FIN DE LA LOGIQUE CORRIGÉE ---
 
-    // --- FIN DE LA LOGIQUE DE CACHE ---
-
-    // Le reste de la fonction ne récupère plus que les comptes variables.
+    // Le reste de la fonction ne change pas.
     let accounts_to_fetch = vec![
         pool.vault_a, pool.vault_b, pool.mint_a, pool.mint_b,
-        fee_config_address // On garde fee_config car il pourrait être plus dynamique
+        fee_config_address
     ];
     let mut accounts_data = rpc_client.get_multiple_accounts(&accounts_to_fetch).await?;
 
@@ -170,7 +169,6 @@ pub async fn hydrate(pool: &mut DecodedPumpAmmPool, rpc_client: &ResilientRpcCli
     pool.mint_b_decoded = spl_token_decoders::mint::decode_mint(&pool.mint_b, &mint_b_account.data)?;
     pool.mint_b_program = mint_b_account.owner;
 
-    // La logique pour FeeConfig reste inchangée, car il pourrait être mis à jour plus souvent.
     if let Some(fee_config_account) = accounts_data[4].take() {
         if fee_config_account.data.get(..8) == Some(&FEE_CONFIG_DISCRIMINATOR) {
             let mut data_slice = &fee_config_account.data[8..];

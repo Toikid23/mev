@@ -196,7 +196,7 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &ResilientRpcClient
             if (word & (1 << bit_index)) != 0 {
                 let compressed_index = word_index * 64 + bit_index;
                 let start_tick_index = (compressed_index as i32 - 512) * multiplier;
-                if start_tick_index >= math::MIN_TICK && start_tick_index <= math::MAX_TICK {
+                if (math::MIN_TICK..=math::MAX_TICK).contains(&start_tick_index) {
                     addresses_to_fetch.insert(tick_array::get_tick_array_address(&pool.address, start_tick_index, &pool.program_id));
                 }
             }
@@ -217,7 +217,7 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &ResilientRpcClient
                     let bit_pos_in_page = (pos_idx % 8) * 64 + bit_index;
                     ticks_in_one_bitmap * (page_index as i32 + 1) + (bit_pos_in_page as i32 * multiplier)
                 };
-                if start_tick_index >= math::MIN_TICK && start_tick_index <= math::MAX_TICK {
+                if (math::MIN_TICK..=math::MAX_TICK).contains(&start_tick_index) {
                     addresses_to_fetch.insert(tick_array::get_tick_array_address(&pool.address, start_tick_index, &pool.program_id));
                 }
             }
@@ -229,11 +229,10 @@ pub async fn hydrate(pool: &mut DecodedClmmPool, rpc_client: &ResilientRpcClient
     }
     let accounts_results = rpc_client.get_multiple_accounts(&addresses_to_fetch.into_iter().collect::<Vec<_>>()).await?;
     let mut tick_arrays = BTreeMap::new();
-    for account_opt in accounts_results {
-        if let Some(account) = account_opt {
-            if let Ok(decoded_array) = tick_array::decode_tick_array(&account.data) {
-                tick_arrays.insert(decoded_array.start_tick_index, decoded_array);
-            }
+    // La boucle devient :
+    for account in accounts_results.into_iter().flatten() {
+        if let Ok(decoded_array) = tick_array::decode_tick_array(&account.data) {
+            tick_arrays.insert(decoded_array.start_tick_index, decoded_array);
         }
     }
     pool.tick_arrays = Some(tick_arrays);

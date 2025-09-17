@@ -63,15 +63,15 @@ pub async fn test_ammv4_with_simulation(rpc_client: &ResilientRpcClient, payer_k
             let difference = required_input_from_quote.saturating_sub(amount_in_base_units);
             // On tolère une petite différence due aux arrondis successifs.
             if difference <= 10 { // 10 lamports est une tolérance très acceptable
-                println!("  -> ✅ SUCCÈS: Le calcul inverse est cohérent (différence: {} lamports).", difference);
+                println!("  -> ✅ SUCCÈS : Le calcul inverse est cohérent (différence: {} lamports).", difference);
             } else {
-                bail!("  -> ⚠️ ÉCHEC: La différence du calcul inverse est trop grande ({} lamports).", difference);
+                bail!("  -> ⚠️ ÉCHEC : La différence du calcul inverse est trop grande ({} lamports).", difference);
             }
         } else {
-            bail!("  -> ⚠️ ÉCHEC: Le calcul inverse a produit un montant inférieur à l'original !");
+            bail!("  -> ⚠️ ÉCHEC : Le calcul inverse a produit un montant inférieur à l'original !");
         }
     } else {
-        println!("  -> AVERTISSEMENT: Le quote est de 0, test d'inversion sauté.");
+        println!("  -> AVERTISSEMENT : Le quote est de 0, test d'inversion sauté.");
     }
 
 
@@ -200,7 +200,7 @@ pub async fn test_ammv4_with_simulation(rpc_client: &ResilientRpcClient, payer_k
 
     // Extraction de la balance POST-simulation
     let post_accounts = sim_result.accounts.ok_or_else(|| anyhow!("La simulation n'a pas retourné l'état des comptes."))?;
-    let destination_account_state = post_accounts.get(0).and_then(|acc| acc.as_ref()).ok_or_else(|| anyhow!("L'état du compte de destination n'a pas été retourné."))?;
+    let destination_account_state = post_accounts.first().and_then(|acc| acc.as_ref()).ok_or_else(|| anyhow!("L'état du compte de destination n'a pas été retourné."))?;
 
     let decoded_data = match &destination_account_state.data {
         UiAccountData::Binary(data_str, _) => STANDARD.decode(data_str)?,

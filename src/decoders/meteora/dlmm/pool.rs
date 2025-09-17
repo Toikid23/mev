@@ -182,7 +182,26 @@ impl DecodedDlmmPool {
 
             // ... (le reste de la logique de calcul de la boucle est identique)
             update_volatility_accumulator(&mut temp_v_params, &self.parameters, self.active_bin_id, current_bin_id)?;
-            let total_fee_rate = get_total_fee(self.bin_step, &self.parameters, &temp_v_params)?;
+
+            let fee_params = math::DynamicFeeParams {
+                volatility_accumulator: temp_v_params.volatility_accumulator,
+                last_update_timestamp: temp_v_params.last_update_timestamp,
+                bin_step: self.bin_step,
+                base_factor: self.parameters.base_factor,
+                filter_period: self.parameters.filter_period,
+                decay_period: self.parameters.decay_period,
+                reduction_factor: self.parameters.reduction_factor,
+                variable_fee_control: self.parameters.variable_fee_control,
+                max_volatility_accumulator: self.parameters.max_volatility_accumulator,
+            };
+
+            // On appelle la fonction avec la structure
+            let dynamic_fee_rate = math::calculate_dynamic_fee(1, &fee_params)?;
+
+            // On utilise la variable pour calculer le taux de frais total
+            let total_fee_rate = (self.base_fee_rate as u128)
+                .checked_add(dynamic_fee_rate as u128)
+                .ok_or_else(|| anyhow!("MathOverflow"))?;
 
             let (out_reserve, _in_reserve_for_out) = if swap_for_y {
                 (current_bin.amount_b, current_bin.amount_a)
@@ -616,12 +635,12 @@ fn decode_bin_array(index: i64, data: &[u8]) -> Result<DecodedBinArray> {
     const BINS_FIELD_OFFSET: usize = 48;
     let mut bins = [DecodedBin { amount_a: 0, amount_b: 0, price: 0 }; MAX_BIN_PER_ARRAY];
 
-    for i in 0..MAX_BIN_PER_ARRAY {
+    for (i, bin_mut) in bins.iter_mut().enumerate() {
         let bin_offset = BINS_FIELD_OFFSET + (i * mem::size_of::<onchain_layouts::Bin>());
         let bin_end_offset = bin_offset + mem::size_of::<onchain_layouts::Bin>();
         if data_slice.len() < bin_end_offset { bail!("BinArray data slice too short to read bin #{}", i); }
         let bin_struct: onchain_layouts::Bin = pod_read_unaligned(&data_slice[bin_offset..bin_end_offset]);
-        bins[i] = DecodedBin { amount_a: bin_struct.amount_x, amount_b: bin_struct.amount_y, price: bin_struct.price };
+        *bin_mut = DecodedBin { amount_a: bin_struct.amount_x, amount_b: bin_struct.amount_y, price: bin_struct.price };
     }
     Ok(DecodedBinArray { index, bins })
 }
@@ -629,10 +648,10 @@ fn decode_bin_array(index: i64, data: &[u8]) -> Result<DecodedBinArray> {
 // --- HELPERS DE CALCUL DE FRAIS (TRADUITS FIDÈLEMENT DU SDK) ---
 
 fn get_base_fee(bin_step: u16, params: &onchain_layouts::StaticParameters) -> Result<u128> {
-    Ok(u128::from(params.base_factor)
+    u128::from(params.base_factor)
         .checked_mul(bin_step.into()).ok_or_else(|| anyhow!("MathOverflow"))?
         .checked_mul(10u128).ok_or_else(|| anyhow!("MathOverflow"))?
-        .checked_mul(10u128.pow(params.base_fee_power_factor.into())).ok_or_else(|| anyhow!("MathOverflow"))?)
+        .checked_mul(10u128.pow(params.base_fee_power_factor.into())).ok_or_else(|| anyhow!("MathOverflow"))
 }
 
 fn compute_variable_fee(volatility_accumulator: u32, bin_step: u16, params: &onchain_layouts::StaticParameters) -> Result<u128> {
@@ -642,8 +661,8 @@ fn compute_variable_fee(volatility_accumulator: u32, bin_step: u16, params: &onc
             .checked_pow(2).ok_or_else(|| anyhow!("MathOverflow"))?
             .checked_mul(params.variable_fee_control.into()).ok_or_else(|| anyhow!("MathOverflow"))?;
 
-        return Ok(v_fee.checked_add(99_999_999_999).ok_or_else(|| anyhow!("MathOverflow"))?
-            .checked_div(100_000_000_000).ok_or_else(|| anyhow!("MathOverflow"))?);
+        return v_fee.checked_add(99_999_999_999).ok_or_else(|| anyhow!("MathOverflow"))?
+            .checked_div(100_000_000_000).ok_or_else(|| anyhow!("MathOverflow"));
     }
     Ok(0)
 }
