@@ -15,7 +15,7 @@ use serde::{Serialize, Deserialize};
 use async_trait::async_trait;
 use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts, QuoteResult};
 use crate::decoders::raydium::clmm::full_math::MulDiv;
-use crate::decoders::spl_token_decoders::mint::{calculate_transfer_fee, calculate_gross_amount_before_transfer_fee};
+use crate::decoders::spl_token_decoders::mint::{calculate_gross_amount_before_transfer_fee};
 // Pas besoin d'importer U256 ici, car il n'est pas utilisé directement.
 use crate::rpc::ResilientRpcClient;
 use crate::state::global_cache::{CacheableData, GLOBAL_CACHE};

@@ -7,13 +7,15 @@ use crate::state::{
     leader_schedule::LeaderScheduleTracker, slot_metronome::SlotMetronome,
     slot_tracker::SlotTracker, validator_intel::ValidatorIntelService,
 };
-use anyhow::{Result, Ok};
+use anyhow::{Result};
 use async_trait::async_trait;
 use solana_address_lookup_table_program::state::AddressLookupTable;
 use solana_sdk::{message::AddressLookupTableAccount as SdkAddressLookupTableAccount, pubkey::Pubkey};
 use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{error, info, warn};
+use std::result::Result::Ok;
+
 
 // Ces constantes doivent être accessibles, nous les redéfinissons ici
 const MANAGED_LUT_ADDRESS: &str = "E5h798UBdK8V1L7MvRfi1ppr2vitPUUUUCVqvTyDgKXN";
@@ -50,8 +52,9 @@ impl Middleware for TransactionBuilder {
         let leader_identity = match leader_identity_opt {
             Some(identity) => identity,
             None => {
+                // --- LOG SPÉCIFIQUE ---
                 warn!(slot = target_slot, "Leader introuvable pour le slot cible. Abandon.");
-                metrics::TRANSACTION_OUTCOMES.with_label_values(&["LeaderNotFound", &context.pool_pair_id]).inc();
+                metrics::TRANSACTION_OUTCOMES.with_label_values(&["Abandoned_LeaderNotFound", &context.pool_pair_id]).inc();
                 return Ok(false);
             }
         };
@@ -81,7 +84,9 @@ impl Middleware for TransactionBuilder {
             let jito_tip = self.fee_manager.calculate_jito_tip(estimated_profit, JITO_TIP_PERCENT, estimated_cus);
             let profit_net_final = estimated_profit.saturating_sub(jito_tip);
 
-            if profit_net_final > 5000 {
+            // --- LOG SPÉCIFIQUE ---
+            const MIN_JITO_PROFIT: u64 = 5000;
+            if profit_net_final > MIN_JITO_PROFIT {
                 info!(profit_net_final, jito_tip, "DÉCISION : PRÉPARER BUNDLE JITO.");
                 context.jito_tip = Some(jito_tip);
                 transaction_builder::build_arbitrage_transaction(
@@ -101,31 +106,31 @@ impl Middleware for TransactionBuilder {
             let total_priority_fee = (estimated_cus * priority_fee_price_per_cu) / 1_000_000;
             let profit_net_final = estimated_profit.saturating_sub(5000).saturating_sub(total_priority_fee);
 
-            if profit_net_final > 5000 {
+            // --- LOG SPÉCIFIQUE ---
+            const MIN_NORMAL_PROFIT: u64 = 5000;
+            if profit_net_final > MIN_NORMAL_PROFIT {
                 info!(profit_net_final, total_priority_fee, "DÉCISION: PRÉPARER TRANSACTION NORMALE.");
                 transaction_builder::build_arbitrage_transaction(
                     &context.opportunity, context.graph_snapshot.clone(), &context.rpc_client, &context.payer,
                     &owned_lookup_table, context.protections.as_ref().unwrap(), estimated_cus, priority_fee_price_per_cu,
                 ).await
             } else {
-                info!(profit_net_final, "DÉCISION : Abandon. Profit normal insuffisant.");
+                info!(profit_net_final, threshold = MIN_NORMAL_PROFIT, "DÉCISION : Abandon. Profit normal insuffisant.");
                 metrics::TRANSACTION_OUTCOMES.with_label_values(&["Abandoned_NormalProfitTooLow", &context.pool_pair_id]).inc();
                 return Ok(false);
             }
         };
 
         match build_result {
-            Result::Ok((tx, _)) => {
+            Ok((tx, _)) => {
                 context.final_tx = Some(tx);
-                Ok(true) // Succès, on continue au prochain middleware (simulation)
+                Ok(true)
             }
             Err(e) => {
-                error!(error = %e, "Échec de la construction de la transaction.");
-                metrics::TRANSACTION_OUTCOMES.with_label_values(&["BuildError", &context.pool_pair_id]).inc();
-                Ok(false) // Erreur, on arrête le pipeline
+                error!(error = %e, "Échec de la construction de la transaction. Abandon.");
+                metrics::TRANSACTION_OUTCOMES.with_label_values(&["Abandoned_BuildError", &context.pool_pair_id]).inc();
+                Ok(false)
             }
         }
-        // Il n'y a plus rien après ce match.
-        // --- FIN DE LA LOGIQUE CORRIGÉE ---
     }
 }
