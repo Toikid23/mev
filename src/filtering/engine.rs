@@ -63,6 +63,9 @@ impl FilteringEngine {
         let mut hotlist: HashSet<Pubkey> = HashSet::new();
         let mut analysis_interval = tokio::time::interval(Duration::from_secs(10));
 
+        let mut reload_cache_interval = tokio::time::interval(Duration::from_secs(30)); // Recharger toutes les 30s
+        let mut cache = initial_cache; // On rend le cache mutable
+
         // <-- MODIFIÉ : Pré-allocation des collections utilisées dans la boucle d'analyse
         let mut hot_pairs: HashSet<(Pubkey, Pubkey)> = HashSet::with_capacity(100);
         let mut new_hotlist: HashSet<Pubkey> = HashSet::with_capacity(500);
@@ -70,28 +73,47 @@ impl FilteringEngine {
 
         loop {
             tokio::select! {
-                Some(pool_address) = active_pool_receiver.recv() => {
-                    if let std::collections::hash_map::Entry::Vacant(entry) = known_pools.entry(pool_address) {
-                        // Le pool n'est pas connu, on le traite (branche `if`)
-                        if let Some(identity) = initial_cache.pools.get(&pool_address) {
-                            if !TOKEN_WHITELIST.contains(&identity.mint_a) && !TOKEN_WHITELIST.contains(&identity.mint_b) {
-                                continue;
-                            }
-                            match self.hydrate_and_check_liquidity(identity).await {
-                                Ok(true) => {
-                                    println!("[Engine] Nouveau pool {} a passé le filtre statique. Suivi de l'activité.", pool_address);
-                                    entry.insert(identity.clone()); // On insère via l'entrée vacante
-                                    activity_tracker.entry(pool_address).or_default().push(Instant::now());
-                                },
-                                Ok(false) => { /* Ignore */ },
-                                Err(e) => eprintln!("[Engine] Erreur d'hydratation pour {}: {}", pool_address, e),
-                            }
-                        }
-                    } else {
-                        // Le pool est déjà connu, on met juste à jour l'activité (branche `else`)
-                        activity_tracker.entry(pool_address).or_default().push(Instant::now());
+        // La branche active_pool_receiver reste inchangée
+        Some(pool_address) = active_pool_receiver.recv() => {
+            if let std::collections::hash_map::Entry::Vacant(entry) = known_pools.entry(pool_address) {
+                // On utilise maintenant le cache mutable
+                if let Some(identity) = cache.pools.get(&pool_address) {
+                    // ... le reste de la logique est inchangé
+                    if !TOKEN_WHITELIST.contains(&identity.mint_a) && !TOKEN_WHITELIST.contains(&identity.mint_b) {
+                        continue;
+                    }
+                    match self.hydrate_and_check_liquidity(identity).await {
+                        Ok(true) => {
+                            println!("[Engine] Nouveau pool {} a passé le filtre statique. Suivi de l'activité.", pool_address);
+                            entry.insert(identity.clone());
+                            activity_tracker.entry(pool_address).or_default().push(Instant::now());
+                        },
+                        Ok(false) => { /* Ignore */ },
+                        Err(e) => eprintln!("[Engine] Erreur d'hydratation pour {}: {}", pool_address, e),
+                    }
+                }
+            } else {
+                activity_tracker.entry(pool_address).or_default().push(Instant::now());
+            }
+        },
+
+        // --- NOUVELLE BRANCHE À AJOUTER ---
+        _ = reload_cache_interval.tick() => {
+            println!("[Engine] Tentative de rechargement du cache de l'univers des pools...");
+            match PoolCache::load() {
+                Ok(new_cache) => {
+                    if new_cache.pools.len() > cache.pools.len() {
+                        println!("[Engine] ✅ Cache rechargé avec succès. {} nouveaux pools détectés (total: {}).",
+                                 new_cache.pools.len() - cache.pools.len(),
+                                 new_cache.pools.len());
+                        cache = new_cache; // On remplace l'ancien cache par le nouveau
                     }
                 },
+                Err(e) => {
+                    eprintln!("[Engine] ⚠️ Erreur lors du rechargement du cache : {}", e);
+                }
+            }
+        },
                 _ = analysis_interval.tick() => {
                     // <-- MODIFIÉ : Vider les collections au lieu de les recréer
                     hot_pairs.clear();
@@ -110,15 +132,15 @@ impl FilteringEngine {
                         !timestamps.is_empty()
                     });
 
-                    for (mint_a, mint_b) in &hot_pairs { // <-- MODIFIÉ : itération par référence
-                        for identity in initial_cache.pools.values() {
-                            let (mut id_mint_a, mut id_mint_b) = (identity.mint_a, identity.mint_b);
-                            if id_mint_a > id_mint_b { std::mem::swap(&mut id_mint_a, &mut id_mint_b); }
-                            if id_mint_a == *mint_a && id_mint_b == *mint_b { // <-- MODIFIÉ : Déréférencement
-                                new_hotlist.insert(identity.address);
-                            }
-                        }
+                    for (mint_a, mint_b) in &hot_pairs {
+                for identity in cache.pools.values() { // <-- Utilise `cache` au lieu de `initial_cache`
+                    let (mut id_mint_a, mut id_mint_b) = (identity.mint_a, identity.mint_b);
+                    if id_mint_a > id_mint_b { std::mem::swap(&mut id_mint_a, &mut id_mint_b); }
+                    if id_mint_a == *mint_a && id_mint_b == *mint_b {
+                        new_hotlist.insert(identity.address);
                     }
+                }
+            }
 
                     if !new_hotlist.is_empty() {
                         println!("[MEM_METRICS] engine.rs - new_hotlist length: {}", new_hotlist.len());

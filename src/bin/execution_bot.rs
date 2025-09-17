@@ -51,7 +51,6 @@ use solana_sdk::transaction::VersionedTransaction;
 use tracing::{info, error};
 use mev::monitoring::metrics;
 use tokio::sync::mpsc;
-use mev::execution::routing::{JitoRegion, JITO_RPC_ENDPOINTS};
 
 
 

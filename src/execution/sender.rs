@@ -5,8 +5,6 @@ use solana_sdk::{signature::Signature, transaction::VersionedTransaction};
 use crate::rpc::ResilientRpcClient;
 use std::sync::Arc;
 use tracing::info;
-use std::collections::HashMap;
-use lazy_static::lazy_static;
 use serde_json::{json}; // Pour construire le corps de la requête JSON
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 
