@@ -77,7 +77,7 @@ impl TransactionSender for UnifiedSender {
                 profit_estimation = info.estimated_profit,
                 "Envoi de la transaction via RPC standard..."
             );
-            self.rpc_client.send_and_confirm_transaction(&info.transaction).await
+            self.rpc_client.send_transaction_quick(&info.transaction).await
         }
     }
 }

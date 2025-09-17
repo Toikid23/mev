@@ -1,19 +1,31 @@
-// DANS : src/rpc/resilient_client.rs
+// DANS : src/rpc/resilient_client.rs (VERSION DÉFINITIVE)
 
-use anyhow::{Context, Result};
-use solana_client::{client_error::{ClientError, ClientErrorKind}, nonblocking::rpc_client::RpcClient, rpc_config, rpc_response::{Response as RpcResponse, RpcSimulateTransactionResult}};
+use anyhow::{Context, Result}; // Correction: 'anyhow' macro non utilisé retiré
+use solana_client::{
+    client_error::{ClientError, ClientErrorKind},
+    nonblocking::rpc_client::RpcClient,
+    rpc_config,
+    rpc_response::{Response as RpcResponse, RpcSimulateTransactionResult},
+};
 use solana_sdk::{
-    account::Account, commitment_config::CommitmentConfig, pubkey::Pubkey,
-    signature::Signature, transaction::{VersionedTransaction},
+    account::Account,
+    // --- LA CORRECTION EST ICI : On importe CommitmentLevel ---
+    commitment_config::{CommitmentConfig, CommitmentLevel},
+    epoch_info::EpochInfo,
+    pubkey::Pubkey,
+    signature::Signature,
+    transaction::VersionedTransaction,
 };
 use solana_client::rpc_config::RpcTransactionConfig;
 use solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature;
 use solana_transaction_status::UiTransactionEncoding;
-use std::{sync::Arc, time::{Duration, Instant}};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::time::sleep;
 use rpc_config::RpcSimulateTransactionConfig;
-use solana_sdk::epoch_info::EpochInfo;
-use std::collections::HashMap;
 use tracing::warn;
 use crate::monitoring::metrics;
 
@@ -27,7 +39,10 @@ pub struct ResilientRpcClient {
 impl ResilientRpcClient {
     pub fn new(rpc_url: String, max_retries: u8, delay_ms: u64) -> Self {
         Self {
-            client: Arc::new(RpcClient::new(rpc_url)),
+            client: Arc::new(RpcClient::new_with_commitment(
+                rpc_url,
+                CommitmentConfig::processed(),
+            )),
             max_retries,
             delay_ms,
         }
@@ -45,29 +60,8 @@ impl ResilientRpcClient {
     }
 
     pub async fn get_account_data(&self, pubkey: &Pubkey) -> Result<Vec<u8>> {
-        const METHOD_NAME: &str = "get_account_data";
-        for attempt in 0..=self.max_retries {
-            let start_time = Instant::now();
-            let result = self.client.get_account_data(pubkey).await;
-            metrics::RPC_REQUEST_LATENCY.with_label_values(&[METHOD_NAME]).observe(start_time.elapsed().as_secs_f64());
-
-            match result {
-                Ok(data) => {
-                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "success"]).inc();
-                    return Ok(data);
-                }
-                Err(e) => {
-                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "failure"]).inc();
-                    if Self::is_retryable(&e) && attempt < self.max_retries {
-                        warn!(attempt = attempt + 1, error = %e, pubkey = %pubkey, "Échec RPC (get_account_data), nouvelle tentative...");
-                        sleep(Duration::from_millis(self.delay_ms)).await;
-                    } else {
-                        return Err(e).with_context(|| format!("Échec final de get_account_data pour {}", pubkey));
-                    }
-                }
-            }
-        }
-        unreachable!()
+        let account = self.get_account(pubkey).await?;
+        Ok(account.data)
     }
 
     pub async fn get_account(&self, pubkey: &Pubkey) -> Result<Account> {
@@ -226,8 +220,11 @@ impl ResilientRpcClient {
         unreachable!()
     }
 
-    pub async fn simulate_transaction_with_config(&self, transaction: &VersionedTransaction, config: RpcSimulateTransactionConfig) -> Result<RpcResponse<RpcSimulateTransactionResult>> {
+    pub async fn simulate_transaction_with_config(&self, transaction: &VersionedTransaction, mut config: RpcSimulateTransactionConfig) -> Result<RpcResponse<RpcSimulateTransactionResult>> {
         const METHOD_NAME: &str = "simulate_transaction_with_config";
+        if config.commitment.is_none() {
+            config.commitment = Some(CommitmentConfig::processed());
+        }
         for attempt in 0..=self.max_retries {
             let start_time = Instant::now();
             let result = self.client.simulate_transaction_with_config(transaction, config.clone()).await;
@@ -434,6 +431,38 @@ impl ResilientRpcClient {
                         sleep(Duration::from_millis(self.delay_ms)).await;
                     } else {
                         return Err(e).with_context(|| "Échec final de get_slot");
+                    }
+                }
+            }
+        }
+        unreachable!()
+    }
+
+    pub async fn send_transaction_quick(&self, transaction: &VersionedTransaction) -> Result<Signature> {
+        const METHOD_NAME: &str = "send_transaction_quick";
+        let config = solana_client::rpc_config::RpcSendTransactionConfig {
+            skip_preflight: true,
+            preflight_commitment: Some(CommitmentLevel::Processed),
+            ..Default::default()
+        };
+
+        for attempt in 0..=self.max_retries {
+            let start_time = Instant::now();
+            let result = self.client.send_transaction_with_config(transaction, config).await;
+            metrics::RPC_REQUEST_LATENCY.with_label_values(&[METHOD_NAME]).observe(start_time.elapsed().as_secs_f64());
+
+            match result {
+                Ok(signature) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "success"]).inc();
+                    return Ok(signature);
+                }
+                Err(e) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "failure"]).inc();
+                    if Self::is_retryable(&e) && attempt < self.max_retries {
+                        warn!(attempt = attempt + 1, error = %e, "Échec RPC (send_transaction_quick), nouvelle tentative...");
+                        sleep(Duration::from_millis(self.delay_ms)).await;
+                    } else {
+                        return Err(e).with_context(|| "Échec final de send_transaction_quick");
                     }
                 }
             }
