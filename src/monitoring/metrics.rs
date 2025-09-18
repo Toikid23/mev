@@ -86,6 +86,12 @@ lazy_static! {
         &["pool_pair"]
     ).unwrap();
 
+    pub static ref PNL_CUMULATIVE_LAMPORTS: IntGauge = register_int_gauge!(
+        "mev_pnl_cumulative_lamports",
+        "Suivi du profit et de la perte cumulés du bot en lamports (incluant les frais des échecs)"
+    ).unwrap();
+
+
 }
 
 // La fonction start_metrics_server ne change pas

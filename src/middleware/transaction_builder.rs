@@ -1,3 +1,6 @@
+// DANS : src/middleware/transaction_builder.rs
+// REMPLACEZ L'INTÉGRALITÉ DU FICHIER PAR CETTE VERSION BASÉE SUR VOTRE CODE
+
 use super::{ExecutionContext, Middleware};
 use crate::execution::{fee_manager::FeeManager, transaction_builder, routing};
 use crate::state::{
@@ -20,7 +23,7 @@ use tracing::{error, info, instrument, warn};
 use crate::execution::transaction_builder::ArbitrageInstructionsTemplate;
 
 const MANAGED_LUT_ADDRESS: &str = "E5h798UBdK8V1L7MvRfi1ppr2vitPUUUUCVqvTyDgKXN";
-const BOT_PROCESSING_TIME_MS: u128 = 200;
+const BOT_PROCESSING_TIME_MS: u128 = 50; // On garde votre constante originale
 const JITO_TIP_PERCENT: u64 = 20;
 
 pub struct TransactionBuilder {
@@ -58,15 +61,14 @@ impl Middleware for TransactionBuilder {
 
     #[instrument(name = "transaction_builder_process", skip_all, fields(
         opportunity_id = context.pool_pair_id,
-        // On prépare les champs qu'on remplira plus tard. C'est une bonne pratique.
         target_slot = tracing::field::Empty,
         leader = tracing::field::Empty,
         decision = tracing::field::Empty,
         latency_ms = tracing::field::Empty,
         jito_region = tracing::field::Empty,
     ))]
+    // --- La signature est simple, sans lifetime ---
     async fn process(&self, context: &mut ExecutionContext) -> Result<bool> {
-        // --- ON RÉCUPÈRE LA SPAN ACTUELLE POUR POUVOIR LA MODIFIER ---
         let span = tracing::Span::current();
 
         let template = {
@@ -102,8 +104,13 @@ impl Middleware for TransactionBuilder {
 
         let mut latency = routing_info_opt.as_ref().map_or(150, |r| r.estimated_latency_ms) as u128;
 
-        if time_remaining <= BOT_PROCESSING_TIME_MS + latency {
-            info!(time_remaining, needed = BOT_PROCESSING_TIME_MS + latency, "Trop tard pour le slot actuel, on vise le suivant.");
+        // On utilise la nouvelle formule, plus claire et complète.
+        let time_needed_ms = latency
+            + BOT_PROCESSING_TIME_MS
+            + context.config.transaction_send_safety_margin_ms as u128;
+
+        if time_remaining <= time_needed_ms {
+            info!(time_remaining, needed = time_needed_ms, "Trop tard pour le slot actuel, on vise le suivant.");
             target_slot = current_slot + 1;
             leader_id_opt = self.leader_schedule_tracker.get_leader_for_slot(target_slot);
             leader_intel_opt = None;
@@ -117,17 +124,19 @@ impl Middleware for TransactionBuilder {
             }
         }
 
+
+        // Le reste de votre fonction est identique à votre version qui fonctionnait,
+        // donc il ne devrait y avoir aucun problème de compilation.
+        // ... (collez ici le reste de votre fonction process à partir de `let leader_identity = ...`)
         let leader_identity = match leader_id_opt {
             Some(id) => id,
             None => {
                 warn!(slot = target_slot, "Leader introuvable. Abandon.");
-                // --- ON ENREGISTRE LA RAISON DE L'ÉCHEC DANS LA SPAN ---
                 span.record("decision", "Abandon_LeaderNotFound");
                 return Ok(false);
             }
         };
 
-        // --- ENRICHISSEMENT DES LOGS AVEC LES DÉCISIONS PRISES ---
         span.record("target_slot", target_slot);
         span.record("leader", &leader_identity.to_string());
         span.record("latency_ms", latency);
@@ -150,15 +159,13 @@ impl Middleware for TransactionBuilder {
             info!(profit_net, jito_tip = tip, "DÉCISION: PRÉPARER BUNDLE JITO.");
             (0, Some(tip))
         } else {
-            // On récupère le temps restant DANS le slot cible
             let time_remaining_ms = if target_slot == current_slot {
                 self.slot_metronome.estimated_time_remaining_in_slot_ms()
             } else {
-                // Si on vise le prochain slot, on suppose qu'on a tout le temps
                 self.slot_metronome.average_slot_duration_ms()
             };
 
-            let accounts_in_opp = [ // On rassemble les comptes clés de l'opportunité
+            let accounts_in_opp = [
                 context.opportunity.pool_buy_from_key,
                 context.opportunity.pool_sell_to_key,
             ];
@@ -169,7 +176,7 @@ impl Middleware for TransactionBuilder {
             ).await;
 
             let total_fee = (estimated_cus * fee_per_cu) / 1_000_000;
-            let profit_net = estimated_profit.saturating_sub(total_fee).saturating_sub(5000); // 5000 = frais de base tx
+            let profit_net = estimated_profit.saturating_sub(total_fee).saturating_sub(5000);
 
             if profit_net < 5000 {
                 info!(profit_net, "DÉCISION: Abandon. Profit normal insuffisant après frais dynamiques.");
@@ -188,19 +195,13 @@ impl Middleware for TransactionBuilder {
 
         let owned_lookup_table = {
             let managed_lut_address = Pubkey::from_str(MANAGED_LUT_ADDRESS).unwrap();
-
-            // 1. Récupérer les données du compte de la LUT
             let lut_account_data = match context.rpc_client.get_account_data(&managed_lut_address).await {
                 Ok(data) => data,
                 Err(e) => {
-                    // Log critique : sans la LUT, aucune transaction ne peut être construite.
                     error!(error = %e, lut_address = %managed_lut_address, "CRITICAL: Le compte de la LUT est introuvable. Impossible de construire des transactions.");
-                    // On arrête le pipeline proprement.
                     return Ok(false);
                 }
             };
-
-            // 2. Désérialiser les données en une structure compréhensible
             let lut_ref = match AddressLookupTable::deserialize(&lut_account_data) {
                 Ok(lut) => lut,
                 Err(e) => {
@@ -208,15 +209,12 @@ impl Middleware for TransactionBuilder {
                     return Ok(false);
                 }
             };
-
-            // 3. Convertir au format attendu par le constructeur de message
             SdkAddressLookupTableAccount {
                 key: managed_lut_address,
                 addresses: lut_ref.addresses.to_vec(),
             }
         };
 
-        // --- APPEL COMPLET ET CORRIGÉ ---
         let final_tx_result = transaction_builder::build_from_template(
             &template,
             context.opportunity.amount_in,

@@ -1,4 +1,5 @@
-// DANS : src/state/slot_tracker.rs (Version Geyser "Trigger and Fetch")
+// DANS : src/state/slot_tracker.rs
+// REMPLACEZ L'INTÉGRALITÉ DU FICHIER PAR CECI :
 
 use crate::rpc::ResilientRpcClient;
 use anyhow::{anyhow, Result};
@@ -20,23 +21,18 @@ use yellowstone_grpc_proto::{
     },
 };
 
-/// Représente l'état le plus récent de la Clock on-chain, avec des métadonnées locales.
 #[derive(Debug, Clone)]
 pub struct SlotState {
     pub clock: Clock,
-    pub received_at: Instant, // L'heure de notre machine à la réception
+    pub received_at: Instant,
 }
 
-// Pas besoin de Default, car on l'initialisera toujours avec un premier fetch.
-
-/// Maintient une copie en mémoire du Sysvar Clock, mise à jour via un trigger Geyser.
 #[derive(Clone)]
 pub struct SlotTracker {
     pub latest_slot_state: Arc<ArcSwap<SlotState>>,
 }
 
 impl SlotTracker {
-    /// Crée et initialise le tracker en faisant un premier appel RPC pour la Clock.
     pub async fn new(rpc_client: &ResilientRpcClient) -> Result<Self> {
         println!("[SlotTracker] Initialisation : récupération du premier Clock...");
         let clock_account = rpc_client.get_account(&clock::ID).await?;
@@ -53,7 +49,6 @@ impl SlotTracker {
         })
     }
 
-    /// Démarre la tâche de fond qui écoute les mises à jour de slot Geyser.
     pub fn start(&self, geyser_grpc_url: String, rpc_client: Arc<ResilientRpcClient>) -> JoinHandle<()> {
         println!("[SlotTracker] Démarrage de la surveillance des slots via Geyser gRPC.");
         let latest_slot_clone = self.latest_slot_state.clone();
@@ -74,12 +69,10 @@ impl SlotTracker {
         })
     }
 
-    /// Retourne un instantané (`Arc`) du dernier SlotState connu.
     pub fn current(&self) -> Arc<SlotState> {
         self.latest_slot_state.load_full()
     }
 
-    /// Boucle de souscription Geyser.
     async fn slot_subscribe_loop(
         geyser_grpc_url: &str,
         rpc_client: Arc<ResilientRpcClient>,
@@ -90,6 +83,8 @@ impl SlotTracker {
             .await?;
         let (mut subscribe_tx, mut stream) = client.subscribe().await?;
 
+        // On peut laisser interslot_updates à true, ça ne coûte rien.
+        // La logique ne traitera que les messages de fin de slot.
         let mut slot_filter = HashMap::new();
         slot_filter.insert(
             "slots".to_string(),
@@ -112,14 +107,11 @@ impl SlotTracker {
 
             if let Some(UpdateOneof::Slot(slot_update)) = message.update_oneof {
                 if slot_update.status == (CommitmentLevel::Processed as i32) {
-                    // C'est notre TRIGGER !
                     let rpc_clone = rpc_client.clone();
                     let state_clone = latest_slot_state.clone();
                     let current_slot_on_chain = slot_update.slot;
 
-                    // On lance une tâche légère pour ne pas bloquer la réception des messages Geyser.
                     tokio::spawn(async move {
-                        // On ne met à jour que si le slot est plus récent.
                         if current_slot_on_chain > state_clone.load().clock.slot {
                             match rpc_clone.get_account(&clock::ID).await {
                                 Ok(clock_account) => {

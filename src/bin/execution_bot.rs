@@ -11,6 +11,7 @@ use solana_sdk::{
     pubkey::Pubkey, signature::Keypair, signer::Signer, transaction::Transaction,
     transaction::VersionedTransaction,
 };
+use mev::execution::confirmation_service::ConfirmationService;
 use mev::state::balance_manager;
 use tracing::warn;
 use std::{
@@ -413,6 +414,7 @@ async fn scout_worker(
     shared_graph: Arc<ArcSwap<Graph>>,
     mut update_receiver: watch::Receiver<()>,
     opportunity_sender: mpsc::Sender<ArbitrageOpportunity>,
+    config: Config,
 ) {
     info!("[Scout] Démarrage du worker de recherche d'opportunités.");
     loop {
@@ -426,7 +428,7 @@ async fn scout_worker(
             continue;
         }
 
-        let mut opportunities = find_spatial_arbitrage(graph_snapshot.clone()).await;
+        let mut opportunities = find_spatial_arbitrage(graph_snapshot.clone(), &config).await;
 
         if !opportunities.is_empty() {
             // --- NOUVEAU BLOC DE SCORING ET DE TRI ---
@@ -658,12 +660,18 @@ async fn main() -> Result<()> {
     balance_tracker::start_monitoring(rpc_client.clone(), config.clone());
     println!("[Init] Le bot utilisera la LUT gérée à l'adresse: {}", MANAGED_LUT_ADDRESS);
 
+    println!("[Init] Démarrage du service de confirmation de P&L...");
+    let (confirmation_service, tx_to_confirm_sender) = ConfirmationService::new(rpc_client.clone());
+    confirmation_service.start();
+
     // --- Instanciation du service d'envoi unifié ---
     // Mettez `dry_run: true` pour tester localement sans rien envoyer.
     // Mettez `dry_run: false` sur votre bare metal pour envoyer réellement les transactions.
     let sender: Arc<dyn TransactionSender> = Arc::new(UnifiedSender::new(
         rpc_client.clone(),
-        true // dry_run: mettre à `false` en production
+        true, // dry_run: mettre à `false` en production
+        // --- ON PASSE LE SENDER DU CANAL ICI ---
+        tx_to_confirm_sender,
     ));
     println!("[Init] Service d'envoi de transactions configuré (Mode: Dry Run).");
 
@@ -717,8 +725,11 @@ async fn main() -> Result<()> {
     // Tâche 4 : Scout
     let scout_graph = hot_graph.clone();
     let scout_rx = update_rx.clone();
+    // --- ON CLONE LA CONFIG POUR LE SCOUT ---
+    let scout_config = config.clone();
     tokio::spawn(async move {
-        scout_worker(scout_graph, scout_rx, opportunity_tx).await;
+        // --- ON PASSE LA CONFIG ICI ---
+        scout_worker(scout_graph, scout_rx, opportunity_tx, scout_config).await;
     });
 
     // --- Tâche 5 : Workers d'analyse (VERSION CORRIGÉE ET SIMPLIFIÉE) ---

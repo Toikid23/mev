@@ -19,6 +19,16 @@ pub struct Config {
     pub min_sol_balance: u64,
     #[serde(default = "default_unwrap_amount")]
     pub unwrap_amount: u64,
+    #[serde(default = "default_max_trade_size_sol")]
+    pub max_trade_size_sol: f64,
+    #[serde(default = "default_safety_margin_ms")]
+    pub transaction_send_safety_margin_ms: u64,
+}
+
+fn default_safety_margin_ms() -> u64 { 50 } // Marge de 50ms par défaut
+
+fn default_max_trade_size_sol() -> f64 {
+    10.0 // Limite par défaut à 10 SOL par trade
 }
 
 fn default_min_profit_threshold() -> u64 {

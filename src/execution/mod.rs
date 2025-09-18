@@ -10,3 +10,4 @@ pub mod sender;
 pub mod fee_manager;
 pub mod cu_manager;
 pub mod routing;
+pub mod confirmation_service;

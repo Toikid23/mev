@@ -7,11 +7,10 @@ use std::sync::Arc;
 use tracing::info;
 use serde_json::{json}; // Pour construire le corps de la requête JSON
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-
-
-
-
+use super::confirmation_service::TransactionToConfirm; // <-- AJOUTER CET IMPORT
+use tokio::sync::mpsc::Sender; // <-- AJOUTER CET IMPORT
 use crate::execution::routing::{JitoRegion, JITO_RPC_ENDPOINTS};
+use tracing::error;
 
 
 
@@ -34,15 +33,22 @@ pub struct UnifiedSender {
     // On a juste besoin d'un client HTTP pour parler à Jito
     http_client: reqwest::Client,
     dry_run: bool,
+    confirmation_sender: Sender<TransactionToConfirm>,
 }
 
 impl UnifiedSender {
-    // Le constructeur n'a plus besoin de la keypair pour l'instant
-    pub fn new(rpc_client: Arc<ResilientRpcClient>, dry_run: bool) -> Self {
+    pub fn new(
+        rpc_client: Arc<ResilientRpcClient>,
+        dry_run: bool,
+        // --- NOUVEAU PARAMÈTRE ---
+        confirmation_sender: Sender<TransactionToConfirm>,
+    ) -> Self {
         Self {
             rpc_client,
             http_client: reqwest::Client::new(),
             dry_run,
+            // --- NOUVELLE INITIALISATION ---
+            confirmation_sender,
         }
     }
 
@@ -79,6 +85,29 @@ impl UnifiedSender {
 impl TransactionSender for UnifiedSender {
     async fn send_transaction(&self, info: ArbitrageSendInfo) -> Result<Signature> {
         let signature = info.transaction.signatures[0];
+
+        // --- NOUVELLE LOGIQUE : Envoyer les infos au ConfirmationService ---
+        // On calcule le coût en cas d'échec
+        let cost_on_failure = if info.is_jito_tx {
+            info.jito_tip.unwrap_or(0)
+        } else {
+            // Pour une tx normale, le coût est les frais de priorité.
+            // C'est une approximation, mais c'est la meilleure qu'on puisse faire ici.
+            5000 // On peut affiner ça plus tard si besoin
+        };
+
+        let tx_to_confirm = TransactionToConfirm {
+            signature,
+            cost_on_failure,
+            sent_at: std::time::Instant::now(),
+        };
+
+        // On envoie au service, mais on ne bloque pas si le canal est plein.
+        // C'est une protection pour que le chemin d'envoi reste rapide.
+        if let Err(e) = self.confirmation_sender.try_send(tx_to_confirm) {
+            error!("Impossible d'envoyer la transaction au service de confirmation: {}", e);
+        }
+        // --- FIN DE LA NOUVELLE LOGIQUE ---
 
         if self.dry_run {
             if info.is_jito_tx {

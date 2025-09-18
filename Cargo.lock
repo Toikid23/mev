@@ -2930,6 +2930,7 @@ dependencies = [
  "solana-program-pack",
  "solana-sdk",
  "solana-sdk-ids",
+ "solana-system-interface",
  "solana-transaction-status",
  "spl-associated-token-account 7.0.0",
  "spl-math",

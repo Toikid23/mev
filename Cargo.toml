@@ -56,6 +56,8 @@ solana-sdk-ids = "2.2.1"
 mimalloc = { version = "0.1.48", default-features = false}
 ruint = { version = "1.16.0", features = ["serde"]}
 crossbeam-utils = "0.8.21"
+solana-system-interface = { version = "1.0.0", features = ["bincode"] }
+
 
 
 # --- Dépendances pour le Client Geyser gRPC ---

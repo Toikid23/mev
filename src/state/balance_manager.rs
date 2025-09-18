@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::rpc::ResilientRpcClient;
 use anyhow::{anyhow, Context, Result};
 // On revient à l'import qui fonctionne, même s'il est déprécié.
-use solana_program::system_instruction;
+use solana_system_interface::instruction as system_instruction;
 use solana_sdk::{
     instruction::Instruction, message::VersionedMessage, pubkey::Pubkey, signature::Keypair,
     signer::Signer, transaction::VersionedTransaction,
