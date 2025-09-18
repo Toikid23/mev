@@ -13,16 +13,33 @@ pub struct Config {
     pub min_profit_threshold: u64,
     #[serde(default = "default_max_cumulative_loss")]
     pub max_cumulative_loss: u64,
+
+    // --- NOUVEAUX CHAMPS ---
+    #[serde(default = "default_min_sol_balance")]
+    pub min_sol_balance: u64,
+    #[serde(default = "default_unwrap_amount")]
+    pub unwrap_amount: u64,
 }
 
-// --- LA FONCTION MANQUANTE EST ICI ---
 fn default_min_profit_threshold() -> u64 {
-    50000 // Notre valeur par défaut sûre
+    50000 // 0.00005 SOL
 }
 
 fn default_max_cumulative_loss() -> u64 {
-    100_000_000 // 0.1 SOL par défaut
+    100_000_000 // 0.1 SOL
 }
+
+// --- NOUVELLES FONCTIONS DE VALEUR PAR DÉFAUT ---
+fn default_min_sol_balance() -> u64 {
+    // Seuil de déclenchement : 0.05 SOL
+    50_000_000
+}
+
+fn default_unwrap_amount() -> u64 {
+    // Montant à recharger : 0.05 SOL
+    50_000_000
+}
+
 
 impl Config {
     pub fn load() -> Result<Self> {

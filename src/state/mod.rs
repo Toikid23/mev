@@ -5,3 +5,4 @@ pub mod slot_metronome;
 pub mod validator_intel;
 
 pub mod balance_tracker;
+pub mod balance_manager;

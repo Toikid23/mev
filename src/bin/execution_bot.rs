@@ -11,6 +11,7 @@ use solana_sdk::{
     pubkey::Pubkey, signature::Keypair, signer::Signer, transaction::Transaction,
     transaction::VersionedTransaction,
 };
+use mev::state::balance_manager;
 use tracing::warn;
 use std::{
     collections::{HashMap, HashSet},
@@ -641,10 +642,19 @@ async fn main() -> Result<()> {
 
     // --- Initialisation ---
     let config = Config::load()?;
+    // On crée une copie de la keypair spécifiquement pour le manager
+    let payer_for_manager = Keypair::from_base58_string(&config.payer_private_key);
     let payer = Keypair::from_base58_string(&config.payer_private_key);
     let rpc_client = Arc::new(ResilientRpcClient::new(config.solana_rpc_url.clone(), 3, 500));
     let geyser_url = env::var("GEYSER_GRPC_URL").context("GEYSER_GRPC_URL requis")?;
     let validators_app_token = env::var("VALIDATORS_APP_API_KEY").context("VALIDATORS_APP_API_KEY requis")?;
+    balance_tracker::start_monitoring(rpc_client.clone(), config.clone());
+    println!("[Init] Le bot utilisera la LUT gérée à l'adresse: {}", MANAGED_LUT_ADDRESS);
+
+    // --- NOUVEAU : Démarrer le gestionnaire de solde en tâche de fond ---
+    balance_manager::start_balance_manager(rpc_client.clone(), payer_for_manager, config.clone());
+    println!("[Init] Service de gestion du solde SOL/WSOL démarré.");
+
     balance_tracker::start_monitoring(rpc_client.clone(), config.clone());
     println!("[Init] Le bot utilisera la LUT gérée à l'adresse: {}", MANAGED_LUT_ADDRESS);
 

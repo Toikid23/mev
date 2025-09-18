@@ -469,4 +469,30 @@ impl ResilientRpcClient {
         }
         unreachable!()
     }
+
+    pub async fn get_minimum_balance_for_rent_exemption(&self, data_len: usize) -> Result<u64> {
+        const METHOD_NAME: &str = "get_minimum_balance_for_rent_exemption";
+        for attempt in 0..=self.max_retries {
+            let start_time = Instant::now();
+            let result = self.client.get_minimum_balance_for_rent_exemption(data_len).await;
+            metrics::RPC_REQUEST_LATENCY.with_label_values(&[METHOD_NAME]).observe(start_time.elapsed().as_secs_f64());
+
+            match result {
+                Ok(rent) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "success"]).inc();
+                    return Ok(rent);
+                }
+                Err(e) => {
+                    metrics::RPC_REQUESTS_TOTAL.with_label_values(&[METHOD_NAME, "failure"]).inc();
+                    if Self::is_retryable(&e) && attempt < self.max_retries {
+                        warn!(attempt = attempt + 1, error = %e, "Échec RPC (get_minimum_balance_for_rent_exemption), nouvelle tentative...");
+                        sleep(Duration::from_millis(self.delay_ms)).await;
+                    } else {
+                        return Err(e).with_context(|| "Échec final de get_minimum_balance_for_rent_exemption");
+                    }
+                }
+            }
+        }
+        unreachable!()
+    }
 }
