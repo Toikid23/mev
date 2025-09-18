@@ -103,27 +103,28 @@ impl Pipeline {
         Self { middlewares }
     }
 
-    pub async fn run(&self, mut context: ExecutionContext) {
+    pub async fn run(&self, mut context: ExecutionContext) -> Result<()> {
         for middleware in &self.middlewares {
             let name = middleware.name();
             info!(middleware = name, "Exécution du middleware...");
             match middleware.process(&mut context).await {
                 Ok(true) => {
-                    // Continue to the next middleware
+                    // Continue
                 }
                 Ok(false) => {
-                    // Middleware decided to stop the pipeline gracefully
+                    // Arrêt propre, ce n'est PAS une erreur
                     info!(middleware = name, "Le middleware a arrêté le pipeline.");
                     context.span.record("outcome", format!("Stopped_at_{}", name));
-                    return;
+                    return Ok(());
                 }
                 Err(e) => {
-                    // An unrecoverable error occurred
+                    // Erreur critique, on la propage
                     error!(middleware = name, error = %e, "Erreur critique dans le middleware. Arrêt du pipeline.");
                     context.span.record("outcome", format!("Error_at_{}", name));
-                    return;
+                    return Err(e); // On retourne l'erreur
                 }
             }
         }
+        Ok(()) // Si tout s'est bien passé
     }
 }

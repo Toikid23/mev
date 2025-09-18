@@ -73,11 +73,17 @@ lazy_static! {
         &["outcome", "pool_pair"] // Labels: "SimSuccess", "pool1-pool2"
         // --- FIN DE LA MODIFICATION ---
     ).unwrap();
-    
+
     pub static ref NEW_POOLS_DISCOVERED: IntCounterVec = register_int_counter_vec!(
         "mev_new_pools_discovered_total",
         "Nombre total de nouvelles pools découvertes par le listener, par DEX",
         &["dex_name"] // Label: "Pump.fun AMM", "Raydium CPMM", etc.
+    ).unwrap();
+
+    pub static ref CIRCUIT_BREAKER_TRIPPED: IntCounterVec = register_int_counter_vec!(
+        "mev_circuit_breaker_tripped_total",
+        "Compteur de déclenchements du disjoncteur par paire de pools",
+        &["pool_pair"]
     ).unwrap();
 
 }

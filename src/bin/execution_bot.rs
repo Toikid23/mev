@@ -11,6 +11,7 @@ use solana_sdk::{
     pubkey::Pubkey, signature::Keypair, signer::Signer, transaction::Transaction,
     transaction::VersionedTransaction,
 };
+use tracing::warn;
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
@@ -125,6 +126,64 @@ async fn ensure_atas_exist_for_pool(rpc_client: &Arc<ResilientRpcClient>, payer:
         println!("[Admission] ✅ ATA(s) créé(s) avec succès. Signature : {}", signature);
     }
     Ok(())
+}
+
+
+const FAILURE_THRESHOLD: usize = 5; // Nombre d'échecs consécutifs avant de déclencher
+const COOLDOWN_SECONDS: u64 = 3600; // MODIFIÉ : 1 heure de pause
+const BLACKLIST_THRESHOLD: usize = 3; // NOUVEAU : Nombre de pauses avant de blacklister
+const BLACKLIST_FILE_NAME: &str = "pool_pair_blacklist.json"; // NOUVEAU : Fichier de persistance
+
+// Structure pour suivre les échecs et l'état de pause
+struct FailureTracker {
+    consecutive_failures: usize,
+    cooldown_until: Option<Instant>,
+    cooldown_trigger_count: usize, // NOUVEAU : Compte le nombre de fois où la pause a été activée
+}
+
+// NOUVELLE STRUCTURE
+#[derive(Clone)]
+struct BlacklistManager {
+    blacklisted_pairs: Arc<RwLock<HashSet<String>>>,
+}
+
+impl BlacklistManager {
+    // Charge la blacklist depuis le fichier au démarrage
+    fn load() -> Self {
+        let blacklisted_pairs = match fs::read_to_string(BLACKLIST_FILE_NAME) {
+            Ok(data) => serde_json::from_str(&data).unwrap_or_else(|e| {
+                warn!("Impossible de parser le fichier blacklist.json (erreur: {}), démarrage avec une liste vide.", e);
+                HashSet::new()
+            }),
+            Err(_) => {
+                info!("Fichier blacklist.json non trouvé, démarrage avec une liste vide.");
+                HashSet::new()
+            }
+        };
+        info!("{} paires chargées depuis la blacklist.", blacklisted_pairs.len());
+        Self {
+            blacklisted_pairs: Arc::new(RwLock::new(blacklisted_pairs)),
+        }
+    }
+
+    // Ajoute une paire à la blacklist et sauvegarde sur le disque
+    fn add(&self, pool_pair_id: &str) {
+        let mut writer = self.blacklisted_pairs.write().unwrap();
+        if writer.insert(pool_pair_id.to_string()) {
+            // Sauvegarde uniquement si un nouvel élément a été ajouté
+            if let Err(e) = fs::write(
+                BLACKLIST_FILE_NAME,
+                serde_json::to_string_pretty(&*writer).unwrap(),
+            ) {
+                error!("Échec de la sauvegarde de la blacklist dans le fichier : {}", e);
+            }
+        }
+    }
+
+    // Vérifie si une paire est blacklistée
+    fn is_blacklisted(&self, pool_pair_id: &str) -> bool {
+        self.blacklisted_pairs.read().unwrap().contains(pool_pair_id)
+    }
 }
 
 
@@ -436,6 +495,8 @@ async fn analysis_worker(
     shared_graph: Arc<ArcSwap<Graph>>,
     payer: Keypair,
     deps: WorkerDependencies,
+    circuit_breaker_state: Arc<RwLock<HashMap<String, FailureTracker>>>,
+    blacklist_manager: BlacklistManager,
 ) {
     info!("[Worker {}] Démarrage.", id);
 
@@ -464,10 +525,44 @@ async fn analysis_worker(
         };
 
         let start_time = Instant::now();
-
-        // --- TOUTE LA LOGIQUE DE RÉHYDRATATION EST SUPPRIMÉE ---
-        // Le graphe est déjà pré-hydraté par le DataProducer.
         let graph_for_processing = shared_graph.load_full();
+
+        let pool_pair_id = format!(
+            "{}-{}",
+            opportunity.pool_buy_from_key.min(opportunity.pool_sell_to_key),
+            opportunity.pool_buy_from_key.max(opportunity.pool_sell_to_key)
+        );
+
+        // --- NIVEAU 3 : VÉRIFICATION DE LA BLACKLIST (LA PLUS RAPIDE) ---
+        if blacklist_manager.is_blacklisted(&pool_pair_id) {
+            continue; // Ignore silencieusement, car c'est permanent
+        }
+
+        // --- DÉBUT DE LA LOGIQUE DU DISJONCTEUR ---
+        let is_in_cooldown = {
+            let reader = circuit_breaker_state.read().unwrap();
+            if let Some(tracker) = reader.get(&pool_pair_id) {
+                if let Some(cooldown_until) = tracker.cooldown_until {
+                    if Instant::now() < cooldown_until {
+                        // Toujours en pause
+                        true
+                    } else {
+                        // La pause est terminée, on peut réessayer
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+
+        if is_in_cooldown {
+            info!("[Worker {}] Paire {} en pause. Opportunité ignorée.", id, pool_pair_id);
+            continue; // On passe à la prochaine opportunité
+        }
+        // --- FIN DE LA LOGIQUE DU DISJONCTEUR ---
 
         let span = tracing::info_span!(
             "process_opportunity",
@@ -490,7 +585,50 @@ async fn analysis_worker(
             deps.config.clone(),
         );
 
-        pipeline.run(context).await;
+        let pipeline_result = pipeline.run(context).await;
+
+        let mut writer = circuit_breaker_state.write().unwrap();
+        let tracker = writer.entry(pool_pair_id.clone()).or_insert(FailureTracker {
+            consecutive_failures: 0,
+            cooldown_until: None,
+            cooldown_trigger_count: 0, // Initialisation
+        });
+
+        if tracker.cooldown_until.is_some() && Instant::now() > tracker.cooldown_until.unwrap() {
+            info!("[Worker {}] Fin de la pause pour la paire {}.", id, pool_pair_id);
+            tracker.consecutive_failures = 0;
+            tracker.cooldown_until = None;
+        }
+
+        if pipeline_result.is_err() {
+            tracker.consecutive_failures += 1;
+            info!("[Worker {}] Échec détecté pour la paire {}. Échecs consécutifs: {}", id, pool_pair_id, tracker.consecutive_failures);
+
+            if tracker.consecutive_failures >= FAILURE_THRESHOLD {
+                tracker.cooldown_trigger_count += 1; // On incrémente le compteur de déclenchements
+                warn!(
+                    "[Worker {}] DISJONCTEUR DÉCLENCHÉ ({}ème fois) pour la paire {} ! Mise en pause pour {} secondes.",
+                    id, tracker.cooldown_trigger_count, pool_pair_id, COOLDOWN_SECONDS
+                );
+                tracker.cooldown_until = Some(Instant::now() + Duration::from_secs(COOLDOWN_SECONDS));
+                metrics::CIRCUIT_BREAKER_TRIPPED.with_label_values(&[&pool_pair_id]).inc();
+
+                // LOGIQUE D'ESCALADE -> BLACKLIST
+                if tracker.cooldown_trigger_count >= BLACKLIST_THRESHOLD {
+                    error!(
+                        "[Worker {}] SEUIL DE BLACKLIST ATTEINT pour la paire {} ! Ajout permanent à la liste noire.",
+                        id, pool_pair_id
+                    );
+                    blacklist_manager.add(&pool_pair_id);
+                }
+            }
+        } else {
+            if tracker.consecutive_failures > 0 {
+                info!("[Worker {}] Succès détecté pour la paire {}. Réinitialisation du compteur d'échecs.", id, pool_pair_id);
+            }
+            tracker.consecutive_failures = 0;
+        }
+        // --- FIN MISE À JOUR DU TRACKER ---
 
         metrics::PROCESS_OPPORTUNITY_LATENCY.observe(start_time.elapsed().as_secs_f64());
     }
@@ -591,6 +729,9 @@ async fn main() -> Result<()> {
         template_cache: template_cache.clone(),
     };
 
+    let blacklist_manager = BlacklistManager::load();
+    let circuit_breaker_state = Arc::new(RwLock::new(HashMap::<String, FailureTracker>::new()));
+
     for i in 0..ANALYSIS_WORKER_COUNT {
         // 2. On clone les dépendances pour chaque worker. C'est une opération légère.
         let deps_for_worker = worker_deps.clone();
@@ -599,6 +740,9 @@ async fn main() -> Result<()> {
         let worker_graph = hot_graph.clone();
         let worker_payer = Keypair::try_from(payer.to_bytes().as_slice())?;
 
+        let breaker_clone = circuit_breaker_state.clone();
+        let blacklist_clone = blacklist_manager.clone();
+
         tokio::spawn(async move {
             analysis_worker(
                 i + 1,
@@ -606,6 +750,8 @@ async fn main() -> Result<()> {
                 worker_graph,
                 worker_payer,
                 deps_for_worker, // On déplace la copie dans le worker
+                breaker_clone,
+                blacklist_clone,
             )
                 .await;
         });
