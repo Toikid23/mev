@@ -1,12 +1,12 @@
 use crate::decoders::{Pool};
 use std::collections::HashMap;
 use once_cell::sync::Lazy; // Utiliser once_cell pour une initialisation statique propre
+use serde::{Serialize, Deserialize};
 
 // Structure pour stocker les coûts mesurés pour chaque type de DEX
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct DexCuCosts {
     pub base_cost: u64,
-    // Coût additionnel pour chaque tick traversé (pour les CLMMs)
     pub cost_per_tick: Option<u64>,
 }
 

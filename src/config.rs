@@ -1,4 +1,3 @@
-// DANS : src/config.rs
 
 use serde::Deserialize;
 use anyhow::Result;

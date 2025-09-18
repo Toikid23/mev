@@ -1,0 +1,33 @@
+# DANS : deployment/mev-engine.service
+
+[Unit]
+Description=MEV Bot - Arbitrage Engine Service
+After=mev-gateway.service mev-scanner.service
+
+[Service]
+Type=simple
+User=mev
+Group=mev
+WorkingDirectory=/home/mev/bot/
+
+# --- LA MODIFICATION EST ICI ---
+# Commande à exécuter AVANT de lancer le service principal.
+# On lance les tâches de maintenance les plus importantes une fois au démarrage.
+ExecStartPre=/bin/bash -c '\
+    echo "--- Lancement des tâches de pré-démarrage pour l'Arbitrage Engine ---" && \
+    /home/mev/bot/target/release/maintenance_worker census && \
+    /home/mev/bot/target/release/maintenance_worker update-runtime-config && \
+    /home/mev/bot/target/release/maintenance_worker health-check && \
+    echo "--- Tâches de pré-démarrage terminées avec succès ---"'
+
+# La commande principale ne change pas.
+ExecStart=/home/mev/bot/target/release/arbitrage_engine
+
+Restart=always
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

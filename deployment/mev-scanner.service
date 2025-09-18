@@ -1,0 +1,18 @@
+[Unit]
+Description=MEV Bot - Market Scanner Service
+After=network.target
+
+[Service]
+Type=simple
+User=mev
+Group=mev
+WorkingDirectory=/home/mev/bot/
+ExecStart=/home/mev/bot/target/release/market_scanner
+Restart=always
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

@@ -57,6 +57,9 @@ mimalloc = { version = "0.1.48", default-features = false}
 ruint = { version = "1.16.0", features = ["serde"]}
 crossbeam-utils = "0.8.21"
 solana-system-interface = { version = "1.0.0", features = ["bincode"] }
+zmq = "0.10.0"
+clap = { version = "4.5.47", features = ["derive"] }
+futures-channel = "0.3.31"
 
 
 
@@ -85,27 +88,39 @@ prometheus = { version = "0.14.0", features = ["process"] }
 warp = { version = "0.4.2", features = ["server"] }
 
 
+[[bin]]
+name = "geyser_gateway"
+path = "src/bin/geyser_gateway.rs"
 
 [[bin]]
-name = "execution_bot"
-path = "src/bin/execution_bot.rs"
+name = "market_scanner"
+path = "src/bin/market_scanner.rs"
 
 [[bin]]
-name = "census_runner"
-path = "src/bin/census_runner.rs"
+name = "arbitrage_engine"
+path = "src/bin/arbitrage_engine.rs"
 
 [[bin]]
-name = "filtering_bot"
-path = "src/bin/filtering_bot.rs"
+name = "maintenance_worker"
+path = "src/bin/maintenance_worker.rs"
+
+# -- Binaires utilitaires à conserver --
 
 [[bin]]
 name = "dev_runner"
 path = "src/bin/dev_runner.rs"
 
 [[bin]]
-name = "pool_listener"
-path = "src/bin/pool_listener.rs"
+name = "lut_analyzer"
+path = "src/bin/lut_analyzer.rs"
 
+[[bin]]
+name = "lut_manager"
+path = "src/bin/lut_manager.rs"
+
+[[bin]]
+name = "setup_wallet"
+path = "src/bin/setup_wallet.rs"
 
 [profile.release]
 lto = "fat"

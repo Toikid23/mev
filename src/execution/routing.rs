@@ -3,6 +3,7 @@
 use crate::state::validator_intel::ValidatorIntel;
 use lazy_static::lazy_static;
 use std::collections::HashMap;
+use serde::Deserialize;
 
 // On ajoute toutes les régions connues
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -22,6 +23,15 @@ pub enum JitoRegion {
 pub struct RoutingInfo {
     pub region: JitoRegion,
     pub estimated_latency_ms: u32,
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct RuntimeConfig {
+    #[serde(default)]
+    pub jito_latencies: HashMap<String, u32>,
+    // On ajoute aussi les coûts de CU pour avoir une config centralisée
+    #[serde(default)]
+    pub compute_unit_costs: HashMap<String, crate::execution::cu_manager::DexCuCosts>,
 }
 
 lazy_static! {
@@ -153,34 +163,51 @@ lazy_static! {
     };
 }
 
-pub fn get_routing_info(validator_intel: &ValidatorIntel) -> Option<RoutingInfo> {
+pub fn get_routing_info(
+    validator_intel: &ValidatorIntel,
+    // On passe la config chargée en paramètre
+    runtime_config: &RuntimeConfig,
+) -> Option<RoutingInfo> {
     let dc_key = validator_intel.data_center_key.as_deref().unwrap_or_default();
-
-    // Gérer le cas "Unknown"
     if dc_key == "0--Unknown" || dc_key.is_empty() {
         return None;
     }
 
     let parts: Vec<&str> = dc_key.split('-').collect();
+    let mut found_region: Option<JitoRegion> = None;
 
-    // Niveau 1: Recherche par ville (plus robuste)
+    // Niveau 1: Recherche par ville
     if let Some(city_part) = parts.get(2) {
         for (city_keyword, region) in CITY_TO_REGION.iter() {
             if city_part.contains(city_keyword) {
-                let latency = ESTIMATED_LATENCIES.get(region).cloned().unwrap_or(u32::MAX);
-                return Some(RoutingInfo { region: *region, estimated_latency_ms: latency });
+                found_region = Some(*region);
+                break;
             }
         }
     }
 
     // Niveau 2: Recherche par pays
-    if let Some(country_code) = parts.get(1) {
-        if let Some(region) = COUNTRY_TO_REGION.get(country_code) {
-            let latency = ESTIMATED_LATENCIES.get(region).cloned().unwrap_or(u32::MAX);
-            return Some(RoutingInfo { region: *region, estimated_latency_ms: latency });
+    if found_region.is_none() {
+        if let Some(country_code) = parts.get(1) {
+            if let Some(region) = COUNTRY_TO_REGION.get(country_code) {
+                found_region = Some(*region);
+            }
         }
     }
 
-    // Niveau 3: Aucun mappage trouvé
+    // --- LOGIQUE DE FALLBACK ---
+    if let Some(region) = found_region {
+        // 1. On essaie de lire la latence depuis la config dynamique
+        let latency = runtime_config.jito_latencies
+            .get(&format!("{:?}", region))
+            .cloned()
+            // 2. Si elle n'y est pas, on utilise notre fallback statique
+            .or_else(|| ESTIMATED_LATENCIES.get(&region).cloned())
+            // 3. Sécurité ultime
+            .unwrap_or(u32::MAX);
+
+        return Some(RoutingInfo { region, estimated_latency_ms: latency });
+    }
+
     None
 }

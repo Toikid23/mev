@@ -1,0 +1,42 @@
+# DANS : deployment/mev-gateway.service
+
+[Unit]
+# Description lisible du service
+Description=MEV Bot - Geyser Gateway Service
+# S'assure que le service ne démarre qu'une fois que le réseau est prêt
+After=network.target
+
+[Service]
+# Le type de service. 'simple' est le plus courant.
+Type=simple
+
+# L'utilisateur et le groupe qui lanceront le processus.
+# CRUCIAL : Créez un utilisateur dédié sur votre serveur (ex: 'mev')
+# Ne jamais lancer un bot en tant que 'root' !
+User=mev
+Group=mev
+
+# Le répertoire de travail du bot. Tous les fichiers (hotlist.json, etc.) seront relatifs à ce chemin.
+WorkingDirectory=/home/mev/bot/
+
+# La commande exacte pour lancer le service. Utilisez le chemin absolu vers le binaire compilé.
+ExecStart=/home/mev/bot/target/release/geyser_gateway
+
+# --- LA MAGIE DE SYSTEMD ---
+# Redémarre toujours le service s'il se termine, que ce soit un crash ou une sortie normale.
+Restart=always
+# Attend 5 secondes avant de tenter un redémarrage, pour éviter de surcharger le système en cas de crash en boucle.
+RestartSec=5s
+
+# Redirige la sortie standard (println!, info!) et les erreurs (eprintln!, error!) vers le journal de systemd.
+# C'est la manière propre de gérer les logs. Vous les consulterez avec `journalctl`.
+StandardOutput=journal
+StandardError=journal
+
+# Augmente la limite de descripteurs de fichiers ouverts. Essentiel pour les applications réseau
+# qui gèrent de nombreuses connexions (comme notre gateway).
+LimitNOFILE=65535
+
+[Install]
+# Indique à systemd de lancer ce service au démarrage du système.
+WantedBy=multi-user.target

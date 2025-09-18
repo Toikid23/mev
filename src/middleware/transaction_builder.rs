@@ -7,7 +7,8 @@ use crate::state::{
     leader_schedule::LeaderScheduleTracker, slot_metronome::SlotMetronome,
     slot_tracker::SlotTracker, validator_intel::ValidatorIntelService,
 };
-
+use crate::execution::routing::RuntimeConfig;
+use std::fs;
 use solana_sdk::signature::Signer;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -65,11 +66,16 @@ impl Middleware for TransactionBuilder {
         leader = tracing::field::Empty,
         decision = tracing::field::Empty,
         latency_ms = tracing::field::Empty,
-        jito_region = tracing::field::Empty,
+        jito_region = tracing::field::Empty, // <-- On va utiliser ce champ
     ))]
-    // --- La signature est simple, sans lifetime ---
     async fn process(&self, context: &mut ExecutionContext) -> Result<bool> {
         let span = tracing::Span::current();
+
+        // 1. Charger la configuration dynamique depuis le fichier.
+        let runtime_config: RuntimeConfig = fs::read_to_string("runtime_config.json")
+            .ok()
+            .and_then(|data| serde_json::from_str(&data).ok())
+            .unwrap_or_default();
 
         let template = {
             let reader = self.template_cache.read().unwrap();
@@ -87,47 +93,34 @@ impl Middleware for TransactionBuilder {
             }
         };
 
+        // --- La logique de sélection du slot et du leader ---
         let time_remaining = self.slot_metronome.estimated_time_remaining_in_slot_ms();
         let current_slot = self.slot_tracker.current().clock.slot;
-
         let mut target_slot = current_slot;
+
         let mut leader_id_opt = self.leader_schedule_tracker.get_leader_for_slot(current_slot);
+        let mut leader_intel_opt = if let Some(id) = leader_id_opt { self.validator_intel.get_validator_intel(&id).await } else { None };
 
-        let mut leader_intel_opt = None;
-        if let Some(id) = leader_id_opt {
-            leader_intel_opt = self.validator_intel.get_validator_intel(&id).await;
-        }
-
+        // On passe la config chargée à get_routing_info
         let mut routing_info_opt = leader_intel_opt.as_ref()
             .filter(|intel| intel.is_jito)
-            .and_then(routing::get_routing_info);
+            .and_then(|intel| routing::get_routing_info(intel, &runtime_config));
 
         let mut latency = routing_info_opt.as_ref().map_or(150, |r| r.estimated_latency_ms) as u128;
-
-        // On utilise la nouvelle formule, plus claire et complète.
-        let time_needed_ms = latency
-            + BOT_PROCESSING_TIME_MS
-            + context.config.transaction_send_safety_margin_ms as u128;
+        let time_needed_ms = latency + BOT_PROCESSING_TIME_MS + context.config.transaction_send_safety_margin_ms as u128;
 
         if time_remaining <= time_needed_ms {
             info!(time_remaining, needed = time_needed_ms, "Trop tard pour le slot actuel, on vise le suivant.");
             target_slot = current_slot + 1;
             leader_id_opt = self.leader_schedule_tracker.get_leader_for_slot(target_slot);
-            leader_intel_opt = None;
-            routing_info_opt = None;
-            if let Some(id) = leader_id_opt {
-                leader_intel_opt = self.validator_intel.get_validator_intel(&id).await;
-                routing_info_opt = leader_intel_opt.as_ref()
-                    .filter(|intel| intel.is_jito)
-                    .and_then(routing::get_routing_info);
-                latency = routing_info_opt.as_ref().map_or(150, |r| r.estimated_latency_ms) as u128;
-            }
+            leader_intel_opt = if let Some(id) = leader_id_opt { self.validator_intel.get_validator_intel(&id).await } else { None };
+            routing_info_opt = leader_intel_opt.as_ref()
+                .filter(|intel| intel.is_jito)
+                .and_then(|intel| routing::get_routing_info(intel, &runtime_config));
+            latency = routing_info_opt.as_ref().map_or(150, |r| r.estimated_latency_ms) as u128;
         }
 
-
-        // Le reste de votre fonction est identique à votre version qui fonctionnait,
-        // donc il ne devrait y avoir aucun problème de compilation.
-        // ... (collez ici le reste de votre fonction process à partir de `let leader_identity = ...`)
+        // Le reste de la fonction
         let leader_identity = match leader_id_opt {
             Some(id) => id,
             None => {
@@ -137,9 +130,9 @@ impl Middleware for TransactionBuilder {
             }
         };
 
+        // --- AMÉLIORATION DES LOGS ---
         span.record("target_slot", target_slot);
         span.record("leader", &leader_identity.to_string());
-        span.record("latency_ms", latency);
 
         let is_target_leader_jito = leader_intel_opt.map_or(false, |intel| intel.is_jito);
         let estimated_profit = context.estimated_profit.unwrap();
@@ -153,10 +146,19 @@ impl Middleware for TransactionBuilder {
                 span.record("decision", "Abandon_JitoProfitTooLow");
                 return Ok(false);
             }
-            let region = routing_info_opt.as_ref().map(|r| r.region);
-            span.record("decision", "PrepareJito");
-            span.record("jito_region", &format!("{:?}", region));
-            info!(profit_net, jito_tip = tip, "DÉCISION: PRÉPARER BUNDLE JITO.");
+            let region_name = routing_info_opt.as_ref().map_or("Unknown", |r| match r.region {
+                routing::JitoRegion::Amsterdam => "Amsterdam",
+                routing::JitoRegion::Dublin => "Dublin",
+                routing::JitoRegion::Frankfurt => "Frankfurt",
+                routing::JitoRegion::London => "London",
+                routing::JitoRegion::NewYork => "NewYork",
+                routing::JitoRegion::SaltLakeCity => "SaltLakeCity",
+                routing::JitoRegion::Singapore => "Singapore",
+                routing::JitoRegion::Tokyo => "Tokyo",
+            });
+            span.record("jito_region", region_name);
+            span.record("latency_ms", latency);
+            info!(profit_net = estimated_profit.saturating_sub(tip), jito_tip = tip, target_region = region_name, latency_ms = latency, "DÉCISION: PRÉPARER BUNDLE JITO.");
             (0, Some(tip))
         } else {
             let time_remaining_ms = if target_slot == current_slot {

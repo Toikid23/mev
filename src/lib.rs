@@ -9,3 +9,4 @@ pub mod filtering;
 pub mod rpc;
 pub mod monitoring;
 pub mod middleware;
+pub mod communication;

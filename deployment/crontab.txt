@@ -1,0 +1,47 @@
+# DANS : deployment/crontab.txt
+
+# ==============================================================================
+# Fichier Crontab pour le Worker de Maintenance du Bot MEV
+# ==============================================================================
+# Pour l'installer sur le serveur, exécutez : crontab deployment/crontab.txt
+# Pour voir les tâches installées : crontab -l
+# Pour éditer manuellement : crontab -e
+#
+# Syntaxe d'une ligne cron :
+# MINUTE HEURE JOUR_DU_MOIS MOIS JOUR_DE_SEMAINE COMMANDE
+# *      *     *            *    *
+#
+# Exemples :
+# */10 * * * *  -> Toutes les 10 minutes
+# 0 */6 * * *   -> À la minute 0, toutes les 6 heures (00:00, 06:00, 12:00, 18:00)
+# 0 5 * * *     -> Tous les jours à 5h00 du matin
+# ==============================================================================
+
+# IMPORTANT : Rediriger la sortie vers un fichier de log est une bonne pratique
+# pour le débogage. `cron` peut aussi envoyer des emails en cas d'erreur.
+# Remplacez /home/mev/bot par le chemin réel de votre projet sur le serveur.
+LOG_FILE="/home/mev/bot/logs/maintenance_worker.log"
+BOT_DIR="/home/mev/bot"
+WORKER_BIN="${BOT_DIR}/target/release/maintenance_worker"
+
+# --- Tâches Critiques ---
+
+# 1. Health Check (Haute Fréquence)
+#    Vérifie la santé des décodeurs toutes les 10 minutes.
+#    Si cette commande échoue (exit code non-nul), cron enverra une alerte à MAILTO.
+#    `>> ${LOG_FILE} 2>&1` ajoute la sortie (standard et erreur) au fichier de log.
+*/10 * * * * cd ${BOT_DIR} && ${WORKER_BIN} health-check >> ${LOG_FILE} 2>&1
+
+# --- Tâches de Mise à Jour (Fréquence Moyenne) ---
+
+# 2. Mise à jour de la Configuration d'Exécution
+#    Met à jour les coûts de CU et les latences Jito toutes les heures.
+0 * * * * cd ${BOT_DIR} && ${WORKER_BIN} update-runtime-config >> ${LOG_FILE} 2>&1
+
+# --- Tâches de Fond (Basse Fréquence) ---
+
+# 3. Recensement Complet (Census)
+#    Exécute un scan complet de la chaîne pour trouver tous les pools.
+#    Lancé toutes les 6 heures, à 00:05, 06:05, 12:05, 18:05.
+#    (On met un décalage de 5 minutes pour ne pas le lancer en même temps que la tâche horaire)
+5 */6 * * * cd ${BOT_DIR} && ${WORKER_BIN} census >> ${LOG_FILE} 2>&1
