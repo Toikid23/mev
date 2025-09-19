@@ -8,10 +8,18 @@ use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 use crate::rpc::ResilientRpcClient; // <-- NOUVEL IMPORT
 
+
 #[derive(Debug)]
 pub struct RawPoolData {
     pub address: Pubkey,
     pub data: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub struct RawPoolDataWithOwner {
+    pub address: Pubkey,
+    pub data: Vec<u8>,
+    pub owner: Pubkey, // On ajoute l'owner ici
 }
 
 // La fonction devient `async` et prend notre client résilient

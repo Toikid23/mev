@@ -8,9 +8,9 @@ use solana_sdk::{
     pubkey::Pubkey, signature::Keypair, signer::Signer, transaction::Transaction,
     transaction::VersionedTransaction,
 };
-use mev::filtering::cache::PoolCache; // Assurez-vous que cet import est présent
-use mev::decoders::PoolFactory;      // Assurez-vous que cet import est présent
-use anyhow::bail;
+use std::str::FromStr;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use mev::decoders::PoolFactory;
 use mev::state::slot_tracker::SlotState;
 use zmq;
 use mev::communication::{
@@ -35,7 +35,7 @@ use mev::{
         cu_manager,
         fee_manager::FeeManager,
         sender::{TransactionSender, UnifiedSender},
-        transaction_builder::ArbitrageInstructionsTemplate, // Correct path
+        transaction_builder::ArbitrageInstructionsTemplate,
     },
     graph_engine::Graph,
     middleware::{
@@ -64,47 +64,7 @@ fn read_hotlist() -> Result<HashSet<Pubkey>> {
     let data = fs::read_to_string("hotlist.json")?;
     Ok(serde_json::from_str(&data)?)
 }
-/// Charge le graphe de référence en décodant tous les pools de l'univers connu.
-/// Charge le graphe de référence en décodant tous les pools de l'univers connu.
-async fn load_main_graph_from_universe(
-    rpc_client: &Arc<ResilientRpcClient>,
-    pool_factory: &PoolFactory
-) -> Result<Graph> {
-    info!("[Graph] Chargement du graphe de référence depuis 'pools_universe.json'...");
-    let cache = PoolCache::load()?;
-    if cache.pools.is_empty() {
-        // C'est une condition critique. Le bot ne peut pas démarrer sans connaissance.
-        bail!("[Graph] ERREUR CRITIQUE: 'pools_universe.json' est vide. Lancez le 'maintenance_worker census' au moins une fois avant de démarrer l'engine.");
-    }
 
-    let mut graph = Graph::new();
-    let pool_pubkeys: Vec<Pubkey> = cache.pools.keys().cloned().collect();
-
-    info!("[Graph] Récupération des données de compte pour {} pools...", pool_pubkeys.len());
-
-    // On récupère tous les comptes par lots pour ne pas surcharger le RPC.
-    let account_chunks = pool_pubkeys.chunks(100);
-    let mut all_accounts_data = Vec::new();
-
-    for chunk in account_chunks {
-        let accounts = rpc_client.get_multiple_accounts(chunk).await?;
-        all_accounts_data.extend(accounts);
-    }
-
-    info!("[Graph] Décodage des pools en cours...");
-    for (index, account_opt) in all_accounts_data.into_iter().enumerate() {
-        let address = pool_pubkeys[index];
-        if let Some(account) = account_opt {
-            // On décode le pool "brut" (non-hydraté) à partir des données du compte
-            if let Ok(pool) = pool_factory.decode_raw_pool(&address, &account.data, &account.owner) {
-                graph.add_pool_to_graph(pool);
-            }
-        }
-    }
-
-    info!("[Graph] Graphe de référence construit avec {} pools.", graph.pools.len());
-    Ok(graph)
-}
 async fn ensure_pump_user_account_exists(rpc_client: &Arc<ResilientRpcClient>, payer: &Keypair) -> Result<()> {
     println!("\n[Pré-vérification] Vérification du compte de volume utilisateur pump.fun...");
     let (pda, _) = Pubkey::find_program_address(&[b"user_volume_accumulator", payer.pubkey().as_ref()], &mev::decoders::pump::amm::PUMP_PROGRAM_ID);
@@ -212,61 +172,100 @@ impl BlacklistManager {
     }
 }
 
-
-struct OnboardingProducer {
-    shared_graph: Arc<ArcSwap<Graph>>,
-    main_graph: Arc<Graph>,
-    shared_hotlist: Arc<tokio::sync::RwLock<HashSet<Pubkey>>>,
-    update_notifier: watch::Sender<()>,
-    rpc_client: Arc<ResilientRpcClient>,
-    payer: Keypair,
+#[derive(serde::Deserialize)]
+struct PoolDataFromJson {
+    owner: String,
+    data_b64: String,
 }
 
-impl OnboardingProducer {
-    async fn run(&self) {
-        info!("[Onboarding] Démarrage du service d'intégration des pools de la hotlist.");
-        let mut processed_pools = HashSet::new();
-        let mut interval = tokio::time::interval(Duration::from_secs(5));
-        loop {
-            interval.tick().await;
-            let hotlist_snapshot = self.shared_hotlist.read().await.clone();
-            let mut graph_changed = false;
-            let mut graph_clone = (*self.shared_graph.load_full()).clone();
+async fn hotlist_updater(
+    shared_graph: Arc<ArcSwap<Graph>>,
+    shared_hotlist: Arc<tokio::sync::RwLock<HashSet<Pubkey>>>,
+    pool_factory: PoolFactory,
+    payer: Keypair,
+    rpc_client: Arc<ResilientRpcClient>,
+    update_notifier: tokio::sync::watch::Sender<()>,
+) {
+    info!("[HotlistUpdater] Démarrage du service de mise à jour du graphe actif.");
+    let mut interval = tokio::time::interval(Duration::from_secs(2));
 
-            for pool_address in hotlist_snapshot {
-                if !processed_pools.contains(&pool_address) && !graph_clone.pools.contains_key(&pool_address) {
-                    if let Some(unhydrated_pool) = self.main_graph.pools.get(&pool_address) {
-                        match Graph::hydrate_pool(unhydrated_pool.clone(), &self.rpc_client).await {
-                            Ok(mut hydrated_pool) => {
-                                // <--- CORRECTION: On appelle la vérification des ATAs ici !
-                                if let Err(e) = ensure_atas_exist_for_pool(&self.rpc_client, &self.payer, &hydrated_pool).await {
-                                    warn!("[Onboarding] Échec de la création d'ATA pour {}: {}", pool_address, e);
-                                    continue; // On passe au pool suivant
-                                }
+    // Charger l'univers une seule fois pour des recherches rapides
+    let universe_on_disk: HashMap<String, PoolDataFromJson> =
+        fs::read_to_string("pools_universe.json")
+            .ok()
+            .and_then(|content| serde_json::from_str(&content).ok())
+            .unwrap_or_else(HashMap::new);
 
-                                // (Votre logique de peuplement des tables de lookup reste)
-                                match &mut hydrated_pool {
-                                    Pool::RaydiumClmm(p) => p.populate_quote_lookup_table(true),
-                                    Pool::OrcaWhirlpool(p) => p.populate_quote_lookup_table(true),
-                                    Pool::MeteoraDlmm(p) => p.populate_quote_lookup_table(true),
-                                    Pool::MeteoraDammV2(p) => p.populate_quote_lookup_table(true),
-                                    _ => {}
-                                }
-                                graph_clone.add_pool_to_graph(hydrated_pool);
-                                info!("[Onboarding] Nouveau pool {} ajouté au hot graph.", pool_address);
-                                processed_pools.insert(pool_address);
-                                graph_changed = true;
+    if universe_on_disk.is_empty() {
+        error!("[HotlistUpdater] CRITICAL: pools_universe.json est vide ou illisible. Le bot ne pourra pas ajouter de nouveaux pools.");
+    }
+
+    loop {
+        interval.tick().await;
+
+        let new_hotlist_on_disk = match read_hotlist() {
+            Ok(list) => list,
+            Err(_) => continue, // Si le fichier est en cours d'écriture, on attend
+        };
+
+        let mut graph_changed = false;
+        let mut graph_clone = (*shared_graph.load_full()).clone();
+
+        // Étape 1: Ajouter les nouveaux pools
+        for pool_address in &new_hotlist_on_disk {
+            if !graph_clone.pools.contains_key(pool_address) {
+                info!("[HotlistUpdater] Nouveau pool détecté dans la hotlist: {}", pool_address);
+                if let Some(pool_json_data) = universe_on_disk.get(&pool_address.to_string()) {
+                    if let (Ok(owner), Ok(data)) = (
+                        Pubkey::from_str(&pool_json_data.owner),
+                        STANDARD.decode(&pool_json_data.data_b64)
+                    ) {
+                        if let Ok(raw_pool) = pool_factory.decode_raw_pool(pool_address, &data, &owner) {
+                            match Graph::hydrate_pool(raw_pool, &rpc_client).await {
+                                Ok(mut hydrated_pool) => {
+                                    if let Err(e) = ensure_atas_exist_for_pool(&rpc_client, &payer, &hydrated_pool).await {
+                                        warn!("[Onboarding] Échec création ATA pour {}: {}", pool_address, e);
+                                        continue;
+                                    }
+                                    match &mut hydrated_pool {
+                                        Pool::RaydiumClmm(p) => p.populate_quote_lookup_table(true),
+                                        Pool::OrcaWhirlpool(p) => p.populate_quote_lookup_table(true),
+                                        Pool::MeteoraDlmm(p) => p.populate_quote_lookup_table(true),
+                                        Pool::MeteoraDammV2(p) => p.populate_quote_lookup_table(true),
+                                        _ => {}
+                                    }
+                                    graph_clone.add_pool_to_graph(hydrated_pool);
+                                    graph_changed = true;
+                                },
+                                Err(e) => warn!(pool = %pool_address, error = %e, "Échec hydratation du nouveau pool."),
                             }
-                            Err(e) => warn!("[Onboarding] Échec hydratation pour {}: {}", pool_address, e),
                         }
                     }
+                } else {
+                    warn!("[HotlistUpdater] Le pool {} est dans la hotlist mais pas dans l'univers!", pool_address);
                 }
             }
+        }
 
-            if graph_changed {
-                self.shared_graph.store(Arc::new(graph_clone));
-                let _ = self.update_notifier.send(());
-            }
+        // Étape 2: Retirer les anciens pools
+        let current_pools_in_graph: HashSet<Pubkey> = graph_clone.pools.keys().cloned().collect();
+        for pool_to_remove in current_pools_in_graph.difference(&new_hotlist_on_disk) {
+            info!("[HotlistUpdater] Retrait du pool inactif du graphe: {}", pool_to_remove);
+            graph_clone.pools.remove(pool_to_remove);
+            // On pourrait aussi nettoyer la account_to_pool_map si nécessaire, mais c'est moins critique
+            graph_changed = true;
+        }
+
+        // Étape 3: Mettre à jour les structures partagées si nécessaire
+        if graph_changed {
+            shared_graph.store(Arc::new(graph_clone));
+            let _ = update_notifier.send(());
+        }
+
+        // On met à jour la hotlist partagée pour le command_manager
+        let mut writer = shared_hotlist.write().await;
+        if *writer != new_hotlist_on_disk {
+            *writer = new_hotlist_on_disk;
         }
     }
 }
@@ -398,20 +397,6 @@ async fn command_manager(hotlist_reader: Arc<tokio::sync::RwLock<HashSet<Pubkey>
             let command = GatewayCommand::UpdateAccountSubscriptions(accounts_to_watch);
             commander.send(bincode::serialize(&command)?, 0)?;
             last_sent_hotlist = hotlist_snapshot;
-        }
-    }
-}
-
-async fn hotlist_reloader(shared_hotlist: Arc<tokio::sync::RwLock<HashSet<Pubkey>>>) {
-    info!("[Engine/Reloader] Démarrage du re-chargeur de hotlist.");
-    let mut interval = tokio::time::interval(Duration::from_secs(2));
-    loop {
-        interval.tick().await;
-        if let Ok(list) = read_hotlist() {
-            let mut writer = shared_hotlist.write().await;
-            if *writer != list {
-                *writer = list;
-            }
         }
     }
 }
@@ -649,9 +634,9 @@ async fn analysis_worker(
 async fn main() -> Result<()> {
     mev::monitoring::logging::setup_logging();
     dotenvy::dotenv().ok();
-    info!("--- Démarrage de l'Arbitrage Engine (Architecture Micro-Services) ---");
+    info!("--- Démarrage de l'Arbitrage Engine (Architecture Sélective) ---");
 
-    // --- Initialisation (similaire à votre code, mais nettoyée) ---
+    // --- 1. Initialisation des Services de Base ---
     let config = Config::load()?;
     let payer = Keypair::from_base58_string(&config.payer_private_key);
     let rpc_client = Arc::new(ResilientRpcClient::new(config.solana_rpc_url.clone(), 3, 500));
@@ -665,50 +650,94 @@ async fn main() -> Result<()> {
     let validator_intel_service = Arc::new(ValidatorIntelService::new(validators_app_token.clone()).await?);
     validator_intel_service.start(validators_app_token);
 
-    // <--- CHANGEMENT ICI : Initialisation passive du SlotTracker
     let slot_tracker = Arc::new(SlotTracker::new(&rpc_client).await?);
-
     let leader_schedule_tracker = Arc::new(LeaderScheduleTracker::new(rpc_client.clone()).await?);
     leader_schedule_tracker.start();
     let slot_metronome = Arc::new(SlotMetronome::new(slot_tracker.clone()));
     slot_metronome.start();
 
-    balance_manager::start_balance_manager(rpc_client.clone(), Keypair::from_base58_string(&config.payer_private_key), config.clone());
+    balance_manager::start_balance_manager(rpc_client.clone(), payer.insecure_clone(), config.clone());
     balance_tracker::start_monitoring(rpc_client.clone(), config.clone());
-
     ensure_pump_user_account_exists(&rpc_client, &payer).await?;
-    let main_graph = Arc::new(load_main_graph_from_universe(&rpc_client, &pool_factory).await?);
 
-    // --- Architecture de données ---
-    let hot_graph = Arc::new(ArcSwap::new(Arc::new(Graph::new())));
+    // --- 2. Construction du Graphe Initial (0 appel RPC) ---
+    info!("[Main] Démarrage du moteur avec une stratégie de chargement sélectif...");
+    let initial_hotlist = read_hotlist().unwrap_or_else(|_| {
+        warn!("hotlist.json non trouvée au démarrage, démarrage avec un graphe vide.");
+        HashSet::new()
+    });
+
+    let universe_on_disk: HashMap<String, PoolDataFromJson> = fs::read_to_string("pools_universe.json")
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_else(HashMap::new);
+
+    let mut initial_graph = Graph::new();
+    info!("[Main] Peuplement du graphe initial avec {} pools de la hotlist...", initial_hotlist.len());
+    for pool_address in initial_hotlist {
+        if let Some(pool_json_data) = universe_on_disk.get(&pool_address.to_string()) {
+            if let (Ok(owner), Ok(data)) = (
+                Pubkey::from_str(&pool_json_data.owner),
+                STANDARD.decode(&pool_json_data.data_b64)
+            ) {
+                if let Ok(raw_pool) = pool_factory.decode_raw_pool(&pool_address, &data, &owner) {
+                    match Graph::hydrate_pool(raw_pool, &rpc_client).await {
+                        Ok(mut hydrated_pool) => {
+                            if let Err(e) = ensure_atas_exist_for_pool(&rpc_client, &payer, &hydrated_pool).await {
+                                warn!("[Onboarding] Échec création ATA pour {}: {}", pool_address, e);
+                                continue;
+                            }
+                            match &mut hydrated_pool {
+                                Pool::RaydiumClmm(p) => p.populate_quote_lookup_table(true),
+                                Pool::OrcaWhirlpool(p) => p.populate_quote_lookup_table(true),
+                                Pool::MeteoraDlmm(p) => p.populate_quote_lookup_table(true),
+                                Pool::MeteoraDammV2(p) => p.populate_quote_lookup_table(true),
+                                _ => {}
+                            }
+                            initial_graph.add_pool_to_graph(hydrated_pool);
+                        },
+                        Err(e) => warn!(pool = %pool_address, error = %e, "Échec hydratation initiale."),
+                    }
+                }
+            }
+        }
+    }
+    info!("[Main] Graphe initial prêt avec {} pools.", initial_graph.pools.len());
+
+    // --- 3. Initialisation des Données Partagées ---
+    let shared_graph = Arc::new(ArcSwap::new(Arc::new(initial_graph)));
     let (update_tx, update_rx) = watch::channel(());
-    let shared_hotlist = Arc::new(tokio::sync::RwLock::new(HashSet::<Pubkey>::new()));
     let (opportunity_tx, opportunity_rx) = mpsc::channel::<ArbitrageOpportunity>(1024);
     let shared_opportunity_rx = Arc::new(Mutex::new(opportunity_rx));
 
-    // --- DÉMARRAGE DES TÂCHES DE FOND ---
+    // NOUVEAU: Hotlist partagée pour le command_manager
+    let shared_hotlist = Arc::new(tokio::sync::RwLock::new(read_hotlist().unwrap_or_default()));
 
+    // --- 4. Démarrage des Tâches de Fond ---
     info!("[Main] Démarrage des services de communication et de données...");
-    tokio::spawn(data_listener(hot_graph.clone(), slot_tracker.clone(), update_tx.clone()));
-    tokio::spawn(hotlist_reloader(shared_hotlist.clone()));
-    tokio::spawn(command_manager(shared_hotlist.clone(), hot_graph.clone()));
+    tokio::spawn(data_listener(shared_graph.clone(), slot_tracker.clone(), update_tx.clone()));
 
-    let producer = OnboardingProducer {
-        shared_graph: hot_graph.clone(),
-        main_graph: main_graph.clone(),
-        shared_hotlist: shared_hotlist.clone(),
-        update_notifier: update_tx.clone(),
-        rpc_client: rpc_client.clone(),
-        payer: Keypair::from_base58_string(&config.payer_private_key),
-    };
-    tokio::spawn(async move { producer.run().await; });
+    // NOUVEAU: On lance le hotlist_updater ici !
+    tokio::spawn(hotlist_updater(
+        shared_graph.clone(),
+        shared_hotlist.clone(),
+        pool_factory.clone(),
+        payer.insecure_clone(),
+        rpc_client.clone(),
+        update_tx.clone()
+    ));
 
-    tokio::spawn(clmm_pre_hydrator(hot_graph.clone(), rpc_client.clone(), update_tx.clone()));
+    // Le command_manager utilise la shared_hotlist pour être réactif
+    tokio::spawn(command_manager(shared_hotlist.clone(), shared_graph.clone()));
+
+    // On conserve le pre_hydrator car vous le souhaitez pour la performance
+    tokio::spawn(clmm_pre_hydrator(shared_graph.clone(), rpc_client.clone(), update_tx.clone()));
 
     info!("[Main] Démarrage des services de trading...");
     let fee_manager = FeeManager::new(rpc_client.clone());
+    // Le fee_manager s'abonne aussi à la hotlist partagée
     fee_manager.start(shared_hotlist.clone());
-    tokio::spawn(scout_worker(hot_graph.clone(), update_rx, opportunity_tx, config.clone()));
+    tokio::spawn(scout_worker(shared_graph.clone(), update_rx, opportunity_tx, config.clone()));
 
     info!("[Main] Démarrage des workers d'analyse...");
     let worker_deps = WorkerDependencies {
@@ -729,8 +758,8 @@ async fn main() -> Result<()> {
     for i in 0..ANALYSIS_WORKER_COUNT {
         let deps_for_worker = worker_deps.clone();
         let worker_rx = shared_opportunity_rx.clone();
-        let worker_graph = hot_graph.clone();
-        let worker_payer = Keypair::from_base58_string(&config.payer_private_key);
+        let worker_graph = shared_graph.clone();
+        let worker_payer = payer.insecure_clone();
         let breaker_clone = circuit_breaker_state.clone();
         let blacklist_clone = blacklist_manager.clone();
         tokio::spawn(async move {
