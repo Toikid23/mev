@@ -2,14 +2,12 @@ version: '3.8'
 
 services:
 
-
   process-exporter:
     image: ncabatoff/process-exporter
     container_name: process-exporter
-    command: -procnames execution_bot
-    pid: "host" # Permet au conteneur de voir les processus de la machine hôte
+    command: -procnames execution_bot,geyser_gateway,market_scanner,maintenance_worker
+    pid: "host"
     ports: [ "9256:9256" ]
-
 
   prometheus:
     image: prom/prometheus:latest
@@ -34,7 +32,7 @@ services:
     image: grafana/promtail:latest
     container_name: promtail
     volumes:
-      - ../logs:/var/log/mev-bot:ro # 'ro' = read-only (lecture seule)
+      - ../logs:/var/log/mev-bot:ro
       - ./promtail:/etc/promtail
     command: -config.file=/etc/promtail/promtail-config.yml
     restart: unless-stopped
@@ -43,12 +41,17 @@ services:
     image: grafana/grafana:latest
     container_name: grafana
     volumes:
+      # ... (les volumes ne changent pas)
       - grafana_data:/var/lib/grafana
       - ./grafana-provisioning:/etc/grafana/provisioning
-    ports: ["3000:3000"]
+    ports: [ "3000:3000" ]
+    # --- LA MODIFICATION EST ICI ---
+    env_file:
+      - ../.env # On retente avec la syntaxe de liste, c'est important
+    # --- FIN DE LA MODIFICATION ---
     restart: unless-stopped
 
 volumes:
-  prometheus_data: {}
-  loki_data: {}
-  grafana_data: {}
+  prometheus_data: { }
+  loki_data: { }
+  grafana_data: { }

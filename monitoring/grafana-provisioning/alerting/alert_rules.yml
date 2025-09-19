@@ -1,0 +1,128 @@
+# DANS : monitoring/grafana-provisioning/alerting/alert_rules.yml
+
+apiVersion: 1
+
+groups:
+  - name: MEV Bot Critical Alerts
+    folder: 'MEV Bot Alerts'
+    interval: 1m
+    rules:
+      # Règle 1 : Chute significative du P&L
+      - uid: pnl_drop_alert
+        title: "Chute de P&L significative"
+        condition: A # Condition A
+        data:
+          - refId: A # Requête A
+            relativeTimeRange:
+              from: 900 # 15m
+              to: 0
+            datasourceUid: 'Prometheus (MEV Bot)'
+            model:
+              expr: 'increase(mev_pnl_cumulative_lamports[15m]) / 1000000000 < -0.05'
+              type: 'query'
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Le P&L a chuté de plus de 0.05 SOL en 15 minutes."
+          description: "Perte détectée. Le bot est peut-être en difficulté. Vérifiez les logs et le P&L."
+
+      # Règle 2 : Taux d'erreur RPC élevé
+      - uid: rpc_error_rate_alert
+        title: "Taux d'erreur RPC élevé"
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300 # 5m
+              to: 0
+            datasourceUid: 'Prometheus (MEV Bot)'
+            model:
+              expr: '(sum(rate(mev_rpc_requests_total{status="failure"}[5m])) / sum(rate(mev_rpc_requests_total[5m]))) * 100 > 10'
+              type: 'query'
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Plus de 10% des requêtes RPC échouent."
+          description: "Le taux d'erreur RPC actuel est de {{ $values.A.Value | printf \"%.2f\" }}%. Cela peut impacter la performance."
+
+      # Règle 3 : Le stream Geyser est en panne
+      - uid: geyser_stream_down_alert
+        title: "Stream Geyser inactif"
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 120 # 2m
+              to: 0
+            datasourceUid: 'Prometheus (MEV Bot)'
+            model:
+              expr: 'time() - mev_geyser_last_message_timestamp_seconds > 120'
+              type: 'query'
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Aucun message Geyser reçu depuis plus de 2 minutes."
+          description: "Le bot ne reçoit plus de données on-chain. Le service geyser_gateway est probablement en panne."
+
+      # Règle 4 : Un des processus du bot a crashé
+      - uid: bot_process_down_alert
+        title: "Un processus du bot est en panne"
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 60 # 1m
+              to: 0
+            datasourceUid: 'Prometheus (MEV Bot)'
+            model:
+              expr: 'up{job="process-exporter"} == 0'
+              type: 'query'
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Le processus '{{ $labels.groupname }}' ne répond plus."
+          description: "Prometheus ne peut plus scraper les métriques du processus {{ $labels.groupname }}. Il a probablement crashé."
+
+      # Règle 5 : Un disjoncteur (Circuit Breaker) s'est déclenché
+      - uid: circuit_breaker_tripped_alert
+        title: "Disjoncteur déclenché pour une paire de pools"
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300 # 5m
+              to: 0
+            datasourceUid: 'Prometheus (MEV Bot)'
+            model:
+              expr: 'increase(mev_circuit_breaker_tripped_total[5m]) > 0'
+              type: 'query'
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Le disjoncteur s'est déclenché pour la paire `{{ $labels.pool_pair }}`."
+          description: "La paire `{{ $labels.pool_pair }}` (DEXs: `{{ $labels.dex_pair }}`) a enregistré trop d'échecs et a été mise en pause."
+
+      # Règle 6 : Échec de la vérification de santé (Health Check)
+      - uid: health_check_failure_alert
+        title: "Échec du Health Check du Maintenance Worker"
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 60 # 1m
+              to: 0
+            datasourceUid: 'Prometheus (MEV Bot)'
+            model:
+              expr: "process_last_status{groupname=\"maintenance_worker\", job=\"process-exporter\"} == 0 and time() - process_start_time_seconds{groupname=\"maintenance_worker\", job=\"process-exporter\"} > 60"
+              type: 'query'
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "La tâche 'health-check' du maintenance_worker a échoué."
+          description: "Un ou plusieurs décodeurs ne fonctionnent plus. Consultez les logs du worker : `make logs-worker`."

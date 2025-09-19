@@ -78,7 +78,19 @@ pub async fn run_census(rpc_client: &ResilientRpcClient) -> Result<()> {
     serde_json::to_writer_pretty(file, &raw_data_map)
         .context("Échec de la sauvegarde du cache de l'univers des pools")?;
 
-    info!(pool_count = raw_data_map.len(), "Sauvegarde de l'univers des pools terminée.");
+    match std::fs::metadata("pools_universe.json") {
+        Ok(metadata) => {
+            let file_size_mb = metadata.len() as f64 / (1024.0 * 1024.0);
+            info!(
+            pool_count = raw_data_map.len(),
+            file_size_mb = format!("{:.2}", file_size_mb),
+            "Sauvegarde de l'univers des pools terminée."
+        );
+        }
+        Err(e) => {
+            warn!(error = %e, "Sauvegarde de l'univers des pools terminée, mais impossible de lire la taille du fichier.");
+        }
+    }
 
     Ok(())
 }

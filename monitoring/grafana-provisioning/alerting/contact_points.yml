@@ -1,0 +1,17 @@
+# DANS : monitoring/grafana-provisioning/alerting/contact_points.yml
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: discord-mev-alerts
+    receivers:
+      - uid: discord-receiver-1
+        type: discord
+        settings:
+          # On remet la variable
+          url: '${DISCORD_WEBHOOK_URL}'
+          title: '🚨 Alerte MEV Bot : {{ .CommonLabels.alertname }}'
+          message: |
+            **Gravité:** `{{ .CommonLabels.severity }}`
+            **Résumé:** {{ .CommonAnnotations.summary }}
+            **Description:** {{ .CommonAnnotations.description }}

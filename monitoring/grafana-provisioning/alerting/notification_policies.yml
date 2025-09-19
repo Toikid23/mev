@@ -1,0 +1,8 @@
+# DANS : monitoring/grafana-provisioning/alerting/notification_policies.yml
+apiVersion: 1
+
+policies:
+  - orgId: 1
+    receiver: 'discord-mev-alerts' # Doit correspondre au `name` dans contact_points.yml
+    # Nous laissons les autres options par défaut, ce qui signifie que
+    # toutes les alertes iront à ce destinataire.

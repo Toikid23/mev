@@ -22,6 +22,15 @@
 REMOTE_SSH := mev@123.45.67.89
 REMOTE_DIR := /home/mev/bot
 
+
+# --- NOUVELLE SECTION : NIVEAUX DE LOG ---
+# On définit les variables pour les niveaux de log.
+# On peut les surcharger en ligne de commande si besoin (ex: make run-engine RUST_LOG=trace)
+RUST_LOG ?= info
+RUST_LOG_DEBUG ?= debug
+RUST_LOG_TRACE ?= trace
+
+
 # Couleurs pour une sortie plus lisible
 GREEN = \033[0;32m
 YELLOW = \033[0;33m
@@ -153,6 +162,39 @@ strategy-copytrade-disable:
 	@make status
 
 
+# --- NOUVELLE SECTION : EXÉCUTION LOCALE POUR DÉBOGAGE ---
+
+.PHONY: run-engine run-engine-debug run-engine-trace run-scanner run-gateway run-worker run-tests-debug
+
+run-engine:
+	@echo "$(YELLOW)--- Lancement de l'Arbitrage Engine (Logs: $(RUST_LOG))... ---$(NC)"
+	@RUST_LOG=$(RUST_LOG) cargo run --release --bin arbitrage_engine
+
+run-engine-debug:
+	@echo "$(YELLOW)--- Lancement de l'Arbitrage Engine (Logs: $(RUST_LOG_DEBUG))... ---$(NC)"
+	@RUST_LOG=$(RUST_LOG_DEBUG) cargo run --release --bin arbitrage_engine
+
+run-engine-trace:
+	@echo "$(YELLOW)--- Lancement de l'Arbitrage Engine (Logs: $(RUST_LOG_TRACE))... ---$(NC)"
+	@RUST_LOG=$(RUST_LOG_TRACE) cargo run --release --bin arbitrage_engine
+
+run-scanner:
+	@echo "$(YELLOW)--- Lancement du Market Scanner (Logs: $(RUST_LOG))... ---$(NC)"
+	@RUST_LOG=$(RUST_LOG) cargo run --release --bin market_scanner
+
+run-gateway:
+	@echo "$(YELLOW)--- Lancement du Geyser Gateway (Logs: $(RUST_LOG))... ---$(NC)"
+	@RUST_LOG=$(RUST_LOG) cargo run --release --bin geyser_gateway
+
+run-worker:
+	@echo "$(YELLOW)--- Lancement du Maintenance Worker (Logs: $(RUST_LOG))... ---$(NC)"
+	@RUST_LOG=$(RUST_LOG) cargo run --release --bin maintenance_worker
+
+run-tests-debug:
+	@echo "$(YELLOW)--- Lancement du banc de test des décodeurs (Logs: $(RUST_LOG_DEBUG))... ---$(NC)"
+	@RUST_LOG=$(RUST_LOG_DEBUG) cargo run --release --bin dev_runner
+
+
 # --- Cible d'Aide ---
 help:
 	@echo "Makefile pour la gestion du Bot MEV. Commandes disponibles:"
@@ -186,6 +228,15 @@ help:
     @echo "  strategy-copytrade-enable   - Active le copy-trading."
     @echo "  strategy-copytrade-disable  - Désactive le copy-trading."
     @echo "  (La stratégie manuelle est toujours active via le fichier manual_hotlist.json)"
+    @echo ""
+    @echo "  --- Exécution Locale pour Débogage ---"
+    @echo "  run-engine         - Lance l'engine localement avec les logs INFO."
+    @echo "  run-engine-debug   - Lance l'engine localement avec les logs DEBUG."
+    @echo "  run-engine-trace   - Lance l'engine localement avec les logs TRACE."
+    @echo "  run-scanner        - Lance le scanner localement."
+    @echo "  run-gateway        - Lance le gateway localement."
+    @echo "  run-worker         - Lance le worker localement (sans argument)."
+    @echo "  run-tests-debug    - Lance le banc de test des décodeurs avec les logs DEBUG."
 
 
 # Déclare que ces cibles ne sont pas des fichiers, pour que `make` les exécute toujours.
