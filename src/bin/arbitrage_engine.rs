@@ -638,13 +638,18 @@ async fn main() -> Result<()> {
 
     // --- 1. Initialisation des Services de Base ---
     let config = Config::load()?;
+    if config.dry_run {
+        warn!("--- LE BOT EST EN MODE DRY RUN. AUCUNE TRANSACTION REELLE NE SERA ENVOYEE. ---");
+    } else {
+        info!("--- Le bot est en mode LIVE. Les transactions seront envoyées sur la blockchain. ---");
+    }
     let payer = Keypair::from_base58_string(&config.payer_private_key);
     let rpc_client = Arc::new(ResilientRpcClient::new(config.solana_rpc_url.clone(), 3, 500));
     let pool_factory = PoolFactory::new(rpc_client.clone());
 
     let (confirmation_service, tx_to_confirm_sender) = ConfirmationService::new(rpc_client.clone());
     confirmation_service.start();
-    let sender: Arc<dyn TransactionSender> = Arc::new(UnifiedSender::new(rpc_client.clone(), false, tx_to_confirm_sender));
+    let sender: Arc<dyn TransactionSender> = Arc::new(UnifiedSender::new(rpc_client.clone(), config.dry_run, tx_to_confirm_sender));
 
     let validators_app_token = env::var("VALIDATORS_APP_API_KEY").context("VALIDATORS_APP_API_KEY requis")?;
     let validator_intel_service = Arc::new(ValidatorIntelService::new(validators_app_token.clone()).await?);

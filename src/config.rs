@@ -1,3 +1,4 @@
+// DANS : src/config.rs
 
 use serde::Deserialize;
 use anyhow::Result;
@@ -12,8 +13,6 @@ pub struct Config {
     pub min_profit_threshold: u64,
     #[serde(default = "default_max_cumulative_loss")]
     pub max_cumulative_loss: u64,
-
-    // --- NOUVEAUX CHAMPS ---
     #[serde(default = "default_min_sol_balance")]
     pub min_sol_balance: u64,
     #[serde(default = "default_unwrap_amount")]
@@ -22,33 +21,39 @@ pub struct Config {
     pub max_trade_size_sol: f64,
     #[serde(default = "default_safety_margin_ms")]
     pub transaction_send_safety_margin_ms: u64,
+
+    // --- AJOUTS CI-DESSOUS ---
+    #[serde(default = "default_true")] // Sécurité : activé par défaut
+    pub dry_run: bool,
 }
 
-fn default_safety_margin_ms() -> u64 { 50 } // Marge de 50ms par défaut
+// Nouvelle fonction pour la valeur par défaut
+fn default_true() -> bool {
+    true
+}
+// --- FIN DES AJOUTS ---
+
+fn default_safety_margin_ms() -> u64 { 50 }
 
 fn default_max_trade_size_sol() -> f64 {
-    10.0 // Limite par défaut à 10 SOL par trade
+    10.0
 }
 
 fn default_min_profit_threshold() -> u64 {
-    50000 // 0.00005 SOL
+    50000
 }
 
 fn default_max_cumulative_loss() -> u64 {
-    100_000_000 // 0.1 SOL
+    100_000_000
 }
 
-// --- NOUVELLES FONCTIONS DE VALEUR PAR DÉFAUT ---
 fn default_min_sol_balance() -> u64 {
-    // Seuil de déclenchement : 0.05 SOL
     50_000_000
 }
 
 fn default_unwrap_amount() -> u64 {
-    // Montant à recharger : 0.05 SOL
     50_000_000
 }
-
 
 impl Config {
     pub fn load() -> Result<Self> {
