@@ -54,7 +54,6 @@ use mev::{
     },
     strategies::spatial::{find_spatial_arbitrage, ArbitrageOpportunity},
 };
-const ANALYSIS_WORKER_COUNT: usize = 4;
 
 
 // Les fonctions helpers (read_hotlist, load_main_graph_from_cache, etc.) restent les mêmes.
@@ -114,10 +113,6 @@ async fn ensure_atas_exist_for_pool(rpc_client: &Arc<ResilientRpcClient>, payer:
     Ok(())
 }
 
-
-const FAILURE_THRESHOLD: usize = 5; // Nombre d'échecs consécutifs avant de déclencher
-const COOLDOWN_SECONDS: u64 = 3600; // MODIFIÉ : 1 heure de pause
-const BLACKLIST_THRESHOLD: usize = 3; // NOUVEAU : Nombre de pauses avant de blacklister
 const BLACKLIST_FILE_NAME: &str = "pool_pair_blacklist.json"; // NOUVEAU : Fichier de persistance
 
 // Structure pour suivre les échecs et l'état de pause
@@ -599,17 +594,16 @@ async fn analysis_worker(
             tracker.consecutive_failures += 1;
             info!("[Worker {}] Échec détecté pour la paire {}. Échecs consécutifs: {}", id, pool_pair_id, tracker.consecutive_failures);
 
-            if tracker.consecutive_failures >= FAILURE_THRESHOLD {
-                tracker.cooldown_trigger_count += 1; // On incrémente le compteur de déclenchements
+            if tracker.consecutive_failures >= deps.config.circuit_breaker_failure_threshold { // <--- UTILISEZ LA CONFIG
+                tracker.cooldown_trigger_count += 1;
                 warn!(
                     "[Worker {}] DISJONCTEUR DÉCLENCHÉ ({}ème fois) pour la paire {} ! Mise en pause pour {} secondes.",
-                    id, tracker.cooldown_trigger_count, pool_pair_id, COOLDOWN_SECONDS
+                    id, tracker.cooldown_trigger_count, pool_pair_id, deps.config.circuit_breaker_cooldown_secs // <--- UTILISEZ LA CONFIG
                 );
-                tracker.cooldown_until = Some(Instant::now() + Duration::from_secs(COOLDOWN_SECONDS));
+                tracker.cooldown_until = Some(Instant::now() + Duration::from_secs(deps.config.circuit_breaker_cooldown_secs)); // <--- UTILISEZ LA CONFIG
                 metrics::CIRCUIT_BREAKER_TRIPPED.with_label_values(&[&pool_pair_id]).inc();
 
-                // LOGIQUE D'ESCALADE -> BLACKLIST
-                if tracker.cooldown_trigger_count >= BLACKLIST_THRESHOLD {
+                if tracker.cooldown_trigger_count >= deps.config.circuit_breaker_blacklist_threshold { // <--- UTILISEZ LA CONFIG
                     error!(
                         "[Worker {}] SEUIL DE BLACKLIST ATTEINT pour la paire {} ! Ajout permanent à la liste noire.",
                         id, pool_pair_id
@@ -760,7 +754,7 @@ async fn main() -> Result<()> {
     let blacklist_manager = BlacklistManager::load();
     let circuit_breaker_state = Arc::new(RwLock::new(HashMap::new()));
 
-    for i in 0..ANALYSIS_WORKER_COUNT {
+    for i in 0..config.analysis_worker_count {
         let deps_for_worker = worker_deps.clone();
         let worker_rx = shared_opportunity_rx.clone();
         let worker_graph = shared_graph.clone();

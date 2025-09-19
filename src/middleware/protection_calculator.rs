@@ -25,6 +25,7 @@ impl Middleware for ProtectionCalculator {
             context.pool_sell_to.as_mut().unwrap().clone(),
             &context.opportunity.token_intermediate_mint,
             context.current_timestamp,
+            context.config.slippage_tolerance_percent, // <--- PASSEZ LA VALEUR DE LA CONFIG
         ) {
             Ok(p) => p,
             Err(e) => {

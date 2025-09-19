@@ -14,11 +14,11 @@ pub fn calculate_slippage_protections(
     mut pool_sell_to: Pool,
     token_intermediate_mint: &Pubkey,
     current_timestamp: i64,
+    slippage_tolerance_percent: f64,
 ) -> Result<SwapProtections> {
     println!("\n--- [Protection] Calcul du Slippage Dynamique ---");
 
-    const SLIPPAGE_TOLERANCE_PERCENT: f64 = 0.25;
-    let slippage_tolerated_in_lamports = (predicted_profit as f64 * SLIPPAGE_TOLERANCE_PERCENT).floor() as u64;
+    let slippage_tolerated_in_lamports = (predicted_profit as f64 * (slippage_tolerance_percent / 100.0)).floor() as u64;
     let expected_total_return = optimal_amount_in.saturating_add(predicted_profit);
     let final_min_amount_out = expected_total_return.saturating_sub(slippage_tolerated_in_lamports);
 

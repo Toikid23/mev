@@ -1,5 +1,4 @@
 // DANS : src/middleware/transaction_builder.rs
-// REMPLACEZ L'INTÉGRALITÉ DU FICHIER PAR CETTE VERSION BASÉE SUR VOTRE CODE
 
 use super::{ExecutionContext, Middleware};
 use crate::execution::{fee_manager::FeeManager, transaction_builder, routing};
@@ -23,9 +22,9 @@ use std::sync::{Arc, RwLock};
 use tracing::{error, info, instrument, warn};
 use crate::execution::transaction_builder::ArbitrageInstructionsTemplate;
 
+// --- CORRECTION : AJOUT DE LA CONSTANTE ICI ---
 const MANAGED_LUT_ADDRESS: &str = "E5h798UBdK8V1L7MvRfi1ppr2vitPUUUUCVqvTyDgKXN";
-const BOT_PROCESSING_TIME_MS: u128 = 50; // On garde votre constante originale
-const JITO_TIP_PERCENT: u64 = 20;
+// --- FIN DE LA CORRECTION ---
 
 pub struct TransactionBuilder {
     pub slot_tracker: Arc<SlotTracker>,
@@ -66,12 +65,11 @@ impl Middleware for TransactionBuilder {
         leader = tracing::field::Empty,
         decision = tracing::field::Empty,
         latency_ms = tracing::field::Empty,
-        jito_region = tracing::field::Empty, // <-- On va utiliser ce champ
+        jito_region = tracing::field::Empty,
     ))]
     async fn process(&self, context: &mut ExecutionContext) -> Result<bool> {
         let span = tracing::Span::current();
 
-        // 1. Charger la configuration dynamique depuis le fichier.
         let runtime_config: RuntimeConfig = fs::read_to_string("runtime_config.json")
             .ok()
             .and_then(|data| serde_json::from_str(&data).ok())
@@ -93,7 +91,6 @@ impl Middleware for TransactionBuilder {
             }
         };
 
-        // --- La logique de sélection du slot et du leader ---
         let time_remaining = self.slot_metronome.estimated_time_remaining_in_slot_ms();
         let current_slot = self.slot_tracker.current().clock.slot;
         let mut target_slot = current_slot;
@@ -101,13 +98,12 @@ impl Middleware for TransactionBuilder {
         let mut leader_id_opt = self.leader_schedule_tracker.get_leader_for_slot(current_slot);
         let mut leader_intel_opt = if let Some(id) = leader_id_opt { self.validator_intel.get_validator_intel(&id).await } else { None };
 
-        // On passe la config chargée à get_routing_info
         let mut routing_info_opt = leader_intel_opt.as_ref()
             .filter(|intel| intel.is_jito)
             .and_then(|intel| routing::get_routing_info(intel, &runtime_config));
 
         let mut latency = routing_info_opt.as_ref().map_or(150, |r| r.estimated_latency_ms) as u128;
-        let time_needed_ms = latency + BOT_PROCESSING_TIME_MS + context.config.transaction_send_safety_margin_ms as u128;
+        let time_needed_ms = latency + context.config.bot_processing_time_ms + context.config.transaction_send_safety_margin_ms as u128;
 
         if time_remaining <= time_needed_ms {
             info!(time_remaining, needed = time_needed_ms, "Trop tard pour le slot actuel, on vise le suivant.");
@@ -120,7 +116,6 @@ impl Middleware for TransactionBuilder {
             latency = routing_info_opt.as_ref().map_or(150, |r| r.estimated_latency_ms) as u128;
         }
 
-        // Le reste de la fonction
         let leader_identity = match leader_id_opt {
             Some(id) => id,
             None => {
@@ -130,7 +125,6 @@ impl Middleware for TransactionBuilder {
             }
         };
 
-        // --- AMÉLIORATION DES LOGS ---
         span.record("target_slot", target_slot);
         span.record("leader", &leader_identity.to_string());
 
@@ -139,7 +133,7 @@ impl Middleware for TransactionBuilder {
         let estimated_cus = context.estimated_cus.unwrap();
 
         let (priority_fee_price_per_cu, jito_tip) = if is_target_leader_jito {
-            let tip = self.fee_manager.calculate_jito_tip(estimated_profit, JITO_TIP_PERCENT, estimated_cus);
+            let tip = self.fee_manager.calculate_jito_tip(estimated_profit, context.config.jito_tip_percent, estimated_cus);
             let profit_net = estimated_profit.saturating_sub(tip);
             if profit_net < 5000 {
                 info!(profit_net, "DÉCISION: Abandon. Profit Jito insuffisant.");

@@ -13,9 +13,23 @@ use mev::{
     decoders::{PoolFactory, PoolOperations},
     filtering::{cache::PoolCache, PoolIdentity},
 };
+use mev::{
+    config::Config,
+};
+use std::str::FromStr;
 
-const HOT_TRANSACTION_THRESHOLD: usize = 5;
-const ACTIVITY_WINDOW_SECS: u64 = 120;
+
+lazy_static::lazy_static! {
+    // Whitelist de tokens de confiance. On ne suit que les pools qui contiennent au moins un de ces tokens.
+    // Pour l'instant, uniquement le Wrapped SOL.
+    static ref TOKEN_WHITELIST: HashSet<Pubkey> = {
+        let mut set = HashSet::new();
+        // Wrapped SOL (WSOL)
+        set.insert(Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap());
+        set
+    };
+}
+
 const HOTLIST_FILE_NAME: &str = "hotlist.json";
 const UNIVERSE_FILE_NAME: &str = "pools_universe.json";
 
@@ -23,7 +37,7 @@ lazy_static::lazy_static! {
     static ref UNIVERSE_FILE_LOCK: Mutex<()> = Mutex::new(());
 }
 
-async fn run_scanner() -> Result<()> {
+async fn run_scanner(config: Config) -> Result<()> {
     info!("[Scanner] Démarrage du Market Scanner.");
     let rpc_url = std::env::var("SOLANA_RPC_URL")?;
     let rpc_client = std::sync::Arc::new(mev::rpc::ResilientRpcClient::new(rpc_url, 3, 500));
@@ -55,12 +69,18 @@ async fn run_scanner() -> Result<()> {
             track_activity(&tx_update, &cache, &mut activity_tracker);
         }
         if last_hotlist_update.elapsed() > Duration::from_secs(10) {
-            update_hotlist(&mut activity_tracker, &mut hotlist, &cache).await?;
+            // --- PASSEZ LES VALEURS DE LA CONFIG ICI ---
+            update_hotlist(
+                &mut activity_tracker,
+                &mut hotlist,
+                &cache,
+                config.hot_transaction_threshold,
+                config.activity_window_secs,
+            ).await?;
             last_hotlist_update = Instant::now();
         }
     }
 }
-
 fn discover_new_pool(tx_update: &SimpleTransactionUpdate, pool_factory: &PoolFactory) -> Option<PoolIdentity> {
     for ix in &tx_update.instructions {
         if let Some(program_id) = tx_update.account_keys.get(ix.program_id_index as usize) {
@@ -121,28 +141,38 @@ fn track_activity(
     }
 }
 
-/// Analyse le tracker d'activité et met à jour le fichier `hotlist.json`.
 async fn update_hotlist(
     activity_tracker: &mut HashMap<Pubkey, Vec<Instant>>,
     current_hotlist: &mut HashSet<Pubkey>,
     cache: &PoolCache,
+    hot_threshold: usize,
+    activity_window: u64,
 ) -> Result<()> {
     let mut new_hotlist = HashSet::new();
     let now = Instant::now();
 
     activity_tracker.retain(|pool_address, timestamps| {
-        timestamps.retain(|ts| now.duration_since(*ts).as_secs() < ACTIVITY_WINDOW_SECS);
-        if timestamps.len() >= HOT_TRANSACTION_THRESHOLD {
-            if let Some(_identity) = cache.pools.get(pool_address) {
-                // On pourrait ajouter d'autres filtres ici (ex: whitelist de tokens)
-                new_hotlist.insert(*pool_address);
+        // Étape 1 : Nettoyer les anciennes transactions de la fenêtre
+        timestamps.retain(|ts| now.duration_since(*ts).as_secs() < activity_window);
+
+        // Étape 2 : Vérifier si le pool est "chaud"
+        if timestamps.len() >= hot_threshold {
+            // --- FILTRE DE WHITELIST AJOUTÉ ICI ---
+            if let Some(identity) = cache.pools.get(pool_address) {
+                // Étape 3 : Vérifier si le pool contient un token de notre whitelist (WSOL)
+                if TOKEN_WHITELIST.contains(&identity.mint_a) || TOKEN_WHITELIST.contains(&identity.mint_b) {
+                    new_hotlist.insert(*pool_address);
+                }
             }
+            // --- FIN DU FILTRE ---
         }
+
+        // On garde le pool dans le tracker tant qu'il a une activité récente
         !timestamps.is_empty()
     });
 
     if *current_hotlist != new_hotlist {
-        info!("[Scanner] Hotlist mise à jour. {} pools actifs.", new_hotlist.len());
+        info!("[Scanner] Hotlist mise à jour. {} pools actifs contenant du WSOL.", new_hotlist.len());
         fs::write(HOTLIST_FILE_NAME, serde_json::to_string_pretty(&new_hotlist)?)?;
         *current_hotlist = new_hotlist;
     }
@@ -153,8 +183,13 @@ async fn update_hotlist(
 async fn main() -> Result<()> {
     mev::monitoring::logging::setup_logging();
     dotenvy::dotenv().ok();
+
+    // --- CHARGEZ LA CONFIG ICI ---
+    let config = Config::load()?;
+
     info!("[Scanner] Démarrage du service Market Scanner.");
-    if let Err(e) = run_scanner().await {
+    // --- PASSEZ LA CONFIG À `run_scanner` ---
+    if let Err(e) = run_scanner(config).await {
         error!("[Scanner] Le service a planté : {:?}.", e);
     }
     Ok(())
