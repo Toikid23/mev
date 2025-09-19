@@ -20,6 +20,7 @@ use crate::monitoring::metrics;
 use std::time::Instant;
 use tracing::debug;
 use std::sync::{Arc, RwLock};
+use tracing::trace;
 
 // --- STRUCTURE DE TRAVAIL "PROPRE" (MODIFIÉE) ---
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,7 +122,7 @@ pub async fn hydrate(pool: &mut DecodedWhirlpoolPool, rpc_client: &ResilientRpcC
     let cached_config = GLOBAL_CACHE.get(&pool.whirlpools_config);
 
     if cached_config.is_none() {
-        println!("[Cache] MISS pour Orca WhirlpoolsConfig: {}. Fetching via RPC...", pool.whirlpools_config);
+        debug!(config_address = %pool.whirlpools_config, "MISS pour Orca WhirlpoolsConfig. Fetching via RPC...");
         let config_account_data = rpc_client
             .get_account_data(&pool.whirlpools_config)
             .await
@@ -134,7 +135,7 @@ pub async fn hydrate(pool: &mut DecodedWhirlpoolPool, rpc_client: &ResilientRpcC
             CacheableData::OrcaWhirlpoolsConfig(new_config),
         );
     } else {
-        println!("[Cache] HIT pour Orca WhirlpoolsConfig: {}", pool.whirlpools_config);
+        debug!(config_address = %pool.whirlpools_config, "HIT pour Orca WhirlpoolsConfig.");
     }
     // Note: Pour l'instant, nous ne stockons pas la config dans la struct du pool car
     // elle n'est pas utilisée par la logique de quote. Le simple fait de la mettre en
@@ -409,6 +410,18 @@ impl PoolOperations for DecodedWhirlpoolPool {
             }
         }
 
+        let a_to_b = *token_in_mint == self.mint_a;
+        debug!(
+            pool_address = %self.address,
+            token_in = %token_in_mint,
+            amount_in,
+            a_to_b,
+            initial_sqrt_price = self.sqrt_price,
+            initial_tick = self.tick_current_index,
+            initial_liquidity = self.liquidity,
+            "Entrée dans get_quote_with_details (Fallback) pour Orca Whirlpool"
+        );
+
 
         let start_time = Instant::now();
         debug!(amount_in, "Calcul de get_quote_with_details pour Orca Whirlpool (Fallback)");
@@ -436,6 +449,15 @@ impl PoolOperations for DecodedWhirlpoolPool {
         let mut ticks_crossed_count = 0u32; // <-- NOTRE COMPTEUR
 
         while amount_remaining > 0 && current_liquidity > 0 {
+
+            trace!(
+                amount_remaining,
+                current_sqrt_price,
+                current_tick_index,
+                current_liquidity,
+                "Début d'une étape de swap Whirlpool"
+            );
+
             let (target_sqrt_price, next_liquidity_net) = {
                 match find_next_initialized_tick(self.tick_spacing, current_tick_index, a_to_b, tick_arrays) {
                     Some((tick_index, tick_data)) => {
@@ -467,6 +489,13 @@ impl PoolOperations for DecodedWhirlpoolPool {
         let fee_on_output = (total_amount_out * out_mint_fee_bps as u128) / 10000;
         let final_amount_out = total_amount_out.saturating_sub(fee_on_output);
 
+        debug!(
+            final_amount_out = final_amount_out as u64,
+            fee = pool_fee as u64,
+            ticks_crossed = ticks_crossed_count,
+            "Résultat du calcul de quote pour Orca Whirlpool"
+        );
+
         metrics::GET_QUOTE_LATENCY.with_label_values(&["OrcaWhirlpool_Fallback"]).observe(start_time.elapsed().as_secs_f64());
 
         Ok(QuoteResult {
@@ -478,6 +507,16 @@ impl PoolOperations for DecodedWhirlpoolPool {
 
     // NOUVELLE VERSION SYNCHRONE DE get_required_input
     fn get_required_input(&mut self, token_out_mint: &Pubkey, amount_out: u64, _current_timestamp: i64) -> Result<u64> {
+
+        debug!(
+            pool_address = %self.address,
+            token_out = %token_out_mint,
+            amount_out,
+            initial_sqrt_price = self.sqrt_price,
+            initial_tick = self.tick_current_index,
+            initial_liquidity = self.liquidity,
+            "Entrée dans get_required_input pour Orca Whirlpool"
+        );
 
         let start_time = Instant::now();
         debug!(amount_out, "Calcul de get_required_input pour Orca Whirlpool");
@@ -509,6 +548,15 @@ impl PoolOperations for DecodedWhirlpoolPool {
         let input_a_to_b = !a_to_b;
 
         while gross_amount_out_target > 0 {
+
+            trace!(
+                remaining_amount_out = gross_amount_out_target,
+                current_sqrt_price,
+                current_tick_index,
+                current_liquidity,
+                "Début d'une étape de calcul d'input requis Whirlpool"
+            );
+
             if current_liquidity == 0 {
                 // ... (la logique de gestion de liquidité nulle reste identique)
                 let find_result = find_next_initialized_tick(self.tick_spacing, current_tick_index, input_a_to_b, tick_arrays);
@@ -576,6 +624,7 @@ impl PoolOperations for DecodedWhirlpoolPool {
 
         final_amount_in = final_amount_in.saturating_add(5);
 
+        debug!(required_input = final_amount_in, "Résultat du calcul de l'input requis pour Whirlpool");
 
         metrics::GET_QUOTE_LATENCY.with_label_values(&["OrcaWhirlpool_required_input"]).observe(start_time.elapsed().as_secs_f64());
 

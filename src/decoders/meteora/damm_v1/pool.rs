@@ -15,6 +15,7 @@ use crate::rpc::ResilientRpcClient;
 use crate::monitoring::metrics;
 use std::time::Instant;
 use tracing::debug;
+use tracing::trace;
 
 // --- CONSTANTES ---
 pub const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB");
@@ -272,7 +273,7 @@ pub async fn hydrate(pool: &mut DecodedMeteoraSbpPool, rpc_client: &ResilientRpc
         pool.reserve_b = get_tokens_for_lp(pool.pool_b_vault_lp_amount, unlocked_b, pool.vault_b_lp_supply);
     }
 
-    println!("✅ Prix Virtuel lu depuis le pool state: {}", pool.depeg_virtual_price);
+    debug!(virtual_price = pool.depeg_virtual_price, "Prix virtuel lu depuis le pool state DAMMv1.");
 
     Ok(())
 }
@@ -309,8 +310,22 @@ impl PoolOperations for DecodedMeteoraSbpPool {
 
     fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<QuoteResult> {
 
+        let (in_reserve, out_reserve) = if *token_in_mint == self.mint_a {
+            (self.reserve_a, self.reserve_b)
+        } else {
+            (self.reserve_b, self.reserve_a)
+        };
+
+        debug!(
+            pool_address = %self.address,
+            token_in = %token_in_mint,
+            amount_in,
+            in_reserve,
+            out_reserve,
+            "Entrée dans get_quote_with_details pour Meteora DAMM V1"
+        );
+
         let start_time = Instant::now();
-        debug!(amount_in, "Calcul de get_quote_with_details pour Meteora DAMM V1");
 
         if !self.enabled || amount_in == 0 {
             return Ok(QuoteResult::default()); // Retourne un résultat vide
@@ -386,6 +401,20 @@ impl PoolOperations for DecodedMeteoraSbpPool {
         let out_lp_to_burn = get_lp_for_tokens(amount_out_gross, unlocked_out_vault, out_vault_lp_supply);
         let final_amount_out = get_tokens_for_lp(out_lp_to_burn, unlocked_out_vault, out_vault_lp_supply);
 
+        trace!(
+            amount_in,
+            net_amount_in_for_curve,
+            amount_out_gross,
+            unlocked_out_vault,
+            out_lp_to_burn,
+            "Calculs intermédiaires du quote DAMM V1"
+        );
+            debug!(
+            final_amount_out,
+            fee = lp_fee as u64,
+            "Résultat du calcul de quote pour Meteora DAMM V1"
+        );
+
         metrics::GET_QUOTE_LATENCY.with_label_values(&["MeteoraDammV1"]).observe(start_time.elapsed().as_secs_f64());
 
 
@@ -397,6 +426,14 @@ impl PoolOperations for DecodedMeteoraSbpPool {
     }
 
     fn get_required_input(&mut self, token_out_mint: &Pubkey, amount_out: u64, current_timestamp: i64) -> Result<u64> {
+
+        debug!(
+            pool_address = %self.address,
+            token_out = %token_out_mint,
+            amount_out,
+            "Entrée dans get_required_input pour Meteora DAMM V1"
+        );
+
         let start_time = Instant::now();
         debug!(amount_out, "Calcul de get_required_input pour Meteora DAMM V1");
 
@@ -435,6 +472,8 @@ impl PoolOperations for DecodedMeteoraSbpPool {
         };
 
         let result = find_input_by_binary_search(quote_fn, amount_out, high_bound);
+
+        debug!(required_input = ?result, "Résultat du calcul de l'input requis pour DAMM V1");
 
         // --- AJOUT JUSTE AVANT DE RETOURNER ---
         metrics::GET_QUOTE_LATENCY.with_label_values(&["MeteoraDammV1_required_input"]).observe(start_time.elapsed().as_secs_f64());

@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 use tokio::task::JoinHandle;
+use tracing::{error, info, warn, debug};
 
 /// Le service qui maintient le planning des leaders à jour.
 #[derive(Clone)]
@@ -23,14 +24,14 @@ pub struct LeaderScheduleTracker {
 
 impl LeaderScheduleTracker {
     pub async fn new(rpc_client: Arc<ResilientRpcClient>) -> Result<Self> {
-        println!("[LeaderSchedule] Initialisation...");
+        info!("Initialisation du LeaderScheduleTracker...");
         let tracker = Self {
             slot_to_identity: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             current_epoch: Arc::new(AtomicU64::new(0)),
             rpc_client,
         };
         tracker.refresh_schedule().await?;
-        println!("[LeaderSchedule] Initialisation réussie.");
+        info!("Initialisation du LeaderScheduleTracker réussie.");
         Ok(tracker)
     }
 
@@ -43,9 +44,9 @@ impl LeaderScheduleTracker {
                 if let Ok(epoch_info) = self_clone.rpc_client.get_epoch_info().await {
                     let known_epoch = self_clone.current_epoch.load(Ordering::Relaxed);
                     if epoch_info.epoch > known_epoch {
-                        println!("[LeaderSchedule] Changement d'epoch détecté ({} -> {}). Rafraîchissement...", known_epoch, epoch_info.epoch);
+                        info!(old_epoch = known_epoch, new_epoch = epoch_info.epoch, "Changement d'epoch détecté, rafraîchissement du planning.");
                         if let Err(e) = self_clone.refresh_schedule().await {
-                            eprintln!("[LeaderSchedule] Erreur lors du rafraîchissement : {:?}", e);
+                            error!(error = ?e, "Erreur lors du rafraîchissement du planning des leaders.");
                         }
                     }
                 }
@@ -75,7 +76,7 @@ impl LeaderScheduleTracker {
             HashMap::new()
         };
 
-        println!("[LeaderSchedule] Planning rafraîchi pour l'epoch {}. {} entrées de slots.", current_epoch, slot_to_identity.len());
+        info!(epoch = current_epoch, slot_count = slot_to_identity.len(), "Planning des leaders rafraîchi.");
 
         self.slot_to_identity.store(Arc::new(slot_to_identity));
         self.current_epoch.store(current_epoch, Ordering::Relaxed);

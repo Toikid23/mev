@@ -17,6 +17,7 @@ use crate::rpc::ResilientRpcClient;
 use std::str::FromStr;
 use std::sync::Arc;
 use crate::decoders::PoolFactory;
+use tracing::{error, info, warn, trace};
 
 // --- CONSTANTES DE CONFIGURATION DU FILTRAGE ---
 // Un pool est "chaud" s'il a eu au moins 5 transactions...
@@ -57,7 +58,7 @@ impl FilteringEngine {
         mut active_pool_receiver: mpsc::Receiver<Pubkey>,
         initial_cache: PoolCache,
     ) {
-        println!("[Engine] Moteur d'analyse démarré avec des seuils de filtrage stricts.");
+        info!("Moteur d'analyse démarré avec des seuils de filtrage stricts.");
         let mut activity_tracker: HashMap<Pubkey, Vec<Instant>> = HashMap::new();
         let mut known_pools: HashMap<Pubkey, super::PoolIdentity> = HashMap::new();
         let mut hotlist: HashSet<Pubkey> = HashSet::new();
@@ -84,12 +85,12 @@ impl FilteringEngine {
                     }
                     match self.hydrate_and_check_liquidity(identity).await {
                         Ok(true) => {
-                            println!("[Engine] Nouveau pool {} a passé le filtre statique. Suivi de l'activité.", pool_address);
+                            info!(pool_address = %pool_address, "Nouveau pool a passé le filtre statique. Suivi de l'activité.");
                             entry.insert(identity.clone());
                             activity_tracker.entry(pool_address).or_default().push(Instant::now());
                         },
                         Ok(false) => { /* Ignore */ },
-                        Err(e) => eprintln!("[Engine] Erreur d'hydratation pour {}: {}", pool_address, e),
+                        Err(e) => warn!(pool_address = %pool_address, error = %e, "Erreur d'hydratation pour un nouveau pool actif."),
                     }
                 }
             } else {
@@ -99,18 +100,16 @@ impl FilteringEngine {
 
         // --- NOUVELLE BRANCHE À AJOUTER ---
         _ = reload_cache_interval.tick() => {
-            println!("[Engine] Tentative de rechargement du cache de l'univers des pools...");
+            info!("Tentative de rechargement du cache de l'univers des pools...");
             match PoolCache::load() {
                 Ok(new_cache) => {
                     if new_cache.pools.len() > cache.pools.len() {
-                        println!("[Engine] ✅ Cache rechargé avec succès. {} nouveaux pools détectés (total: {}).",
-                                 new_cache.pools.len() - cache.pools.len(),
-                                 new_cache.pools.len());
+                        info!(new_pools = new_cache.pools.len() - cache.pools.len(), total_pools = new_cache.pools.len(), "Cache rechargé avec succès.");
                         cache = new_cache; // On remplace l'ancien cache par le nouveau
                     }
                 },
                 Err(e) => {
-                    eprintln!("[Engine] ⚠️ Erreur lors du rechargement du cache : {}", e);
+                    error!(error = %e, "Erreur lors du rechargement du cache.");
                 }
             }
         },
@@ -143,16 +142,16 @@ impl FilteringEngine {
             }
 
                     if !new_hotlist.is_empty() {
-                        println!("[MEM_METRICS] engine.rs - new_hotlist length: {}", new_hotlist.len());
+                        trace!(length = new_hotlist.len(), "new_hotlist length");
                     }
                     if !hot_pairs.is_empty() {
-                        println!("[MEM_METRICS] engine.rs - hot_pairs length: {}", hot_pairs.len());
+                        trace!(length = hot_pairs.len(), "hot_pairs length")
                     }
 
                     if hotlist != new_hotlist {
-                        println!("[Engine] Hotlist mise à jour. {} pools au total.", new_hotlist.len());
+                        info!(total_pools = new_hotlist.len(), "Hotlist mise à jour.");
                         if let Err(e) = fs::write(HOTLIST_FILE_NAME, serde_json::to_string_pretty(&new_hotlist).unwrap()) {
-                            eprintln!("[Engine] Erreur d'écriture de la hotlist: {}", e);
+                            error!(error = %e, file = HOTLIST_FILE_NAME, "Erreur d'écriture de la hotlist.");
                         }
                         hotlist = new_hotlist.clone(); // <-- MODIFIÉ : Cloner la nouvelle hotlist pour la sauvegarder
                     }

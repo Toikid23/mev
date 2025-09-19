@@ -5,6 +5,7 @@ use solana_sdk::pubkey::Pubkey;
 use serde::Deserialize;
 use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration};
 use tokio::{sync::RwLock, task::JoinHandle};
+use tracing::{error, info, warn, debug};
 
 const VALIDATORS_APP_API_URL: &str = "https://www.validators.app/api/v1/validators/mainnet.json";
 const REFRESH_INTERVAL_MINS: u64 = 60;
@@ -40,12 +41,12 @@ pub struct ValidatorIntelService {
 
 impl ValidatorIntelService {
     pub async fn new(api_token: String) -> Result<Self> {
-        println!("[ValidatorIntel] Initialisation...");
+        info!("Initialisation du ValidatorIntelService...");
         let service = Self {
             validators: Arc::new(RwLock::new(HashMap::new())),
         };
         service.refresh(&api_token).await?;
-        println!("[ValidatorIntel] Initialisation réussie.");
+        info!("Initialisation du ValidatorIntelService réussie.");
         Ok(service)
     }
 
@@ -55,9 +56,9 @@ impl ValidatorIntelService {
             let mut interval = tokio::time::interval(Duration::from_secs(REFRESH_INTERVAL_MINS * 60));
             loop {
                 interval.tick().await;
-                println!("[ValidatorIntel] Rafraîchissement périodique des données des validateurs...");
+                info!("Rafraîchissement périodique des données des validateurs...");
                 if let Err(e) = self_clone.refresh(&api_token).await {
-                    eprintln!("[ValidatorIntel] Erreur lors du rafraîchissement : {:?}", e);
+                    error!(error = ?e, "Erreur lors du rafraîchissement des données des validateurs.");
                 }
             }
         })
@@ -103,7 +104,7 @@ impl ValidatorIntelService {
         *writer = new_validators;
 
         let jito_count = writer.values().filter(|v| v.is_jito).count();
-        println!("[ValidatorIntel] Données rafraîchies. {} validateurs en cache (dont {} Jito).", writer.len(), jito_count);
+        info!(validator_count = writer.len(), jito_count, "Données des validateurs rafraîchies.");
         Ok(())
     }
 

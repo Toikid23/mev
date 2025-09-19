@@ -7,6 +7,7 @@ use prometheus::{
     register_int_gauge,
 };
 use warp::Filter;
+use tracing::info;
 
 lazy_static! {
     // --- Stratégie & Opportunités ---
@@ -102,6 +103,6 @@ pub async fn start_metrics_server() {
         encoder.encode(&prometheus::gather(), &mut buffer).unwrap();
         warp::reply::with_header(buffer, "content-type", "text/plain; version=0.0.4")
     });
-    println!("[Monitoring] Serveur de métriques exposé sur http://0.0.0.0:9100/metrics");
+    info!(url = "http://0.0.0.0:9100/metrics", "Serveur de métriques exposé.");
     warp::serve(metrics_route).run(([0, 0, 0, 0], 9100)).await;
 }

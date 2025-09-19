@@ -16,6 +16,7 @@ use crate::decoders::raydium::clmm::{
 use crate::decoders::PoolOperations;
 use crate::decoders::pool_operations::UserSwapAccounts;
 use crate::rpc::ResilientRpcClient;
+use tracing::{error, info,warn};
 
 // Renommée pour la cohérence
 pub async fn test_clmm(rpc_client: &ResilientRpcClient, payer: &Keypair, current_timestamp: i64) -> Result<()> {
@@ -24,11 +25,11 @@ pub async fn test_clmm(rpc_client: &ResilientRpcClient, payer: &Keypair, current
     const INPUT_MINT_STR: &str = "So11111111111111111111111111111111111111112";
     const INPUT_AMOUNT_UI: f64 = 0.1;
 
-    println!("\n--- Test et Simulation (VRAI COMPTE) Raydium CLMM ({}) ---", POOL_ADDRESS);
+    info!(pool_address = POOL_ADDRESS, "--- Test et Simulation (VRAI COMPTE) Raydium CLMM ---");
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
     let program_pubkey = Pubkey::from_str(PROGRAM_ID)?;
 
-    println!("[1/3] Hydratation et prédiction locale...");
+    info!("[1/3] Hydratation et prédiction locale...");
     let pool_account_data = rpc_client.get_account_data(&pool_pubkey).await?;
     let mut pool = decode_pool(&pool_pubkey, &pool_account_data, &program_pubkey)?;
     hydrate(&mut pool, rpc_client).await?;
@@ -41,21 +42,24 @@ pub async fn test_clmm(rpc_client: &ResilientRpcClient, payer: &Keypair, current
     let output_decimals = if input_mint_pubkey == pool.mint_a { pool.mint_b_decimals } else { pool.mint_a_decimals };
 
     let ui_predicted_amount_out = predicted_amount_out as f64 / 10f64.powi(output_decimals as i32);
-    println!("-> PRÉDICTION LOCALE: {}", ui_predicted_amount_out);
+    info!(predicted_amount_out = ui_predicted_amount_out, "Prédiction locale");
 
     let output_mint_pubkey = if input_mint_pubkey == pool.mint_a { pool.mint_b } else { pool.mint_a };
 
-    println!("\n[VALIDATION] Lancement du test d'inversion mathématique...");
+    info!("[VALIDATION] Lancement du test d'inversion mathématique...");
     if predicted_amount_out > 0 {
         let required_input_from_quote = pool.get_required_input(&output_mint_pubkey, predicted_amount_out, current_timestamp)?;
-        println!("  -> Input original     : {}", amount_in_base_units);
-        println!("  -> Output prédit      : {}", predicted_amount_out);
-        println!("  -> Input Re-calculé   : {}", required_input_from_quote);
+        info!(
+            original_input = amount_in_base_units,
+            predicted_output = predicted_amount_out,
+            recalculated_input = required_input_from_quote,
+            "Validation inverse"
+        );
 
         if required_input_from_quote >= amount_in_base_units {
             let difference = required_input_from_quote.saturating_sub(amount_in_base_units);
             if difference <= 100 { // Tolérance un peu plus large pour CLMM
-                println!("  -> ✅ SUCCÈS: Le calcul inverse est cohérent (différence: {} lamports).", difference);
+                info!(difference_lamports = difference, "✅ SUCCÈS : Le calcul inverse est cohérent.");
             } else {
                 bail!("  -> ⚠️ ÉCHEC: La différence du calcul inverse est trop grande ({} lamports).", difference);
             }
@@ -63,10 +67,10 @@ pub async fn test_clmm(rpc_client: &ResilientRpcClient, payer: &Keypair, current
             bail!("  -> ⚠️ ÉCHEC: Le calcul inverse a produit un montant inférieur à l'original !");
         }
     } else {
-        println!("  -> AVERTISSEMENT: Le quote est de 0, test d'inversion sauté.");
+        warn!("Le quote est de 0, test d'inversion sauté.");
     }
 
-    println!("\n[2/3] Préparation de la simulation...");
+    info!("[2/3] Préparation de la simulation...");
 
     let user_source_ata = get_associated_token_address(&payer.pubkey(), &input_mint_pubkey);
     let user_destination_ata = spl_associated_token_account::get_associated_token_address_with_program_id(
@@ -101,15 +105,15 @@ pub async fn test_clmm(rpc_client: &ResilientRpcClient, payer: &Keypair, current
     )?;
 
 
-    println!("\n[3/3] Exécution de la simulation standard...");
+    info!("[3/3] Exécution de la simulation standard...");
     let sim_result = rpc_client.simulate_transaction(&transaction).await?.value;
 
     if sim_result.err.is_some() {
-        println!("LOGS DE SIMULATION DÉTAILLÉS:\n{:#?}", sim_result.logs);
+        error!(logs = ?sim_result.logs, "Logs de simulation détaillés");
         bail!("La simulation a échoué. Cause : {:?}", sim_result.err);
     }
 
-    println!("✅ La simulation a réussi !");
+    info!("✅ La simulation a réussi !");
 
     let is_base_input = input_mint_pubkey == pool.mint_a;
 
@@ -121,17 +125,19 @@ pub async fn test_clmm(rpc_client: &ResilientRpcClient, payer: &Keypair, current
     };
     let ui_simulated_amount_out = simulated_amount_out as f64 / 10f64.powi(output_decimals as i32);
 
-    println!("\n--- COMPARAISON (CLMM) ---");
-    println!("Montant PRÉDIT (local)  : {}", ui_predicted_amount_out);
-    println!("Montant SIMULÉ (on-chain) : {}", ui_simulated_amount_out);
+
     let difference = (ui_predicted_amount_out - ui_simulated_amount_out).abs();
     let difference_percent = if ui_simulated_amount_out > 0.0 { (difference / ui_simulated_amount_out) * 100.0 } else { 0.0 };
-    println!("-> Différence relative: {:.6} %", difference_percent);
+    info!(
+        predicted = ui_predicted_amount_out,
+        simulated = ui_simulated_amount_out,
+        diff_percent = difference_percent,
+    );
 
     if difference_percent < 0.01 { // Seuil de tolérance très strict
-        println!("✅ SUCCÈS DÉFINITIF ! La prédiction est extrêmement précise !");
+        info!("✅ SUCCÈS DÉFINITIF ! La prédiction est extrêmement précise !");
     } else {
-        println!("⚠️ La simulation fonctionne, mais la prédiction est encore à revoir (diff > 0.01%).");
+        warn!("La simulation fonctionne, mais la prédiction est encore à revoir (diff > 0.01%).");
     }
 
     Ok(())

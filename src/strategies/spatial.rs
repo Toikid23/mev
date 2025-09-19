@@ -8,6 +8,7 @@ use std::sync::Arc;
 use anyhow::{Result};
 use crate::execution::cu_manager;
 use crate::config::Config;
+use tracing::{trace, info, warn, debug};
 
 #[derive(Debug, Clone)]
 pub struct ArbitrageOpportunity {
@@ -50,6 +51,13 @@ pub async fn find_spatial_arbitrage(
         let mut best_seller: Option<(u64, Pubkey)> = None;
         let mut best_buyer: Option<(u64, Pubkey)> = None;
 
+        debug!(
+            mint_a = %mint_a,
+            mint_b = %mint_b,
+            pool_count = pool_keys.len(),
+            "Analyse d'une paire de tokens pour arbitrage spatial"
+        );
+
         for pool_key in pool_keys {
             let pool_data = match graph.pools.get(pool_key) {
                 Some(p) => p,
@@ -77,6 +85,18 @@ pub async fn find_spatial_arbitrage(
 
         if let (Some((sell_price_norm, sell_key)), Some((buy_price_norm, buy_key))) = (best_seller, best_buyer) {
             if sell_key != buy_key && buy_price_norm > sell_price_norm {
+
+                info!(
+                    mint_a = %mint_a,
+                    mint_b = %mint_b,
+                    buy_from_pool = %sell_key,
+                    sell_to_pool = %buy_key,
+                    buy_price = sell_price_norm,
+                    sell_price = buy_price_norm,
+                    profit_margin_percent = (buy_price_norm as f64 - sell_price_norm as f64) / sell_price_norm as f64 * 100.0,
+                    "Écart de prix prometteur trouvé"
+                );
+
                 let initial_profit_estimate_percent = (buy_price_norm as f64 - sell_price_norm as f64) / sell_price_norm as f64;
 
                 let mut pool_buy_from = match graph.pools.get(&sell_key) {
@@ -115,10 +135,10 @@ pub async fn find_spatial_arbitrage(
         }
     }
     if !opportunities.is_empty() {
-        println!("[MEM_METRICS] spatial.rs - opportunities length: {}", opportunities.len());
+        trace!(length = opportunities.len(), "spatial.rs - opportunities length");
     }
     if !pools_by_pair.is_empty() {
-        println!("[MEM_METRICS] spatial.rs - pools_by_pair length: {}", pools_by_pair.len());
+        trace!(length = pools_by_pair.len(), "spatial.rs - pools_by_pair length");
     }
 
     opportunities

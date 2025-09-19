@@ -13,6 +13,7 @@ use crate::decoders::pool_operations::{PoolOperations, UserSwapAccounts, QuoteRe
 use crate::monitoring::metrics;
 use std::time::Instant;
 use tracing::debug;
+use tracing::trace;
 
 
 // La structure de données reste la même
@@ -121,6 +122,21 @@ impl PoolOperations for DecodedAmmPool {
     fn address(&self) -> Pubkey { self.address }
 
     fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<QuoteResult> {
+        // --- BLOC DE LOGS À AJOUTER ---
+        let (in_mint_fee_bps, out_mint_fee_bps, in_reserve, out_reserve) = if *token_in_mint == self.mint_a {
+            (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps, self.reserve_a, self.reserve_b)
+        } else {
+            (self.mint_b_transfer_fee_bps, self.mint_a_transfer_fee_bps, self.reserve_b, self.reserve_a)
+        };
+
+        debug!(
+            pool_address = %self.address,
+            token_in = %token_in_mint,
+            amount_in,
+            in_reserve,
+            out_reserve,
+            "Entrée dans get_quote_with_details pour Raydium AMMv4"
+        );
 
         let start_time = Instant::now();
         debug!(amount_in, "Calcul de get_quote_with_details pour Raydium AMMv4");
@@ -147,6 +163,15 @@ impl PoolOperations for DecodedAmmPool {
         let fee_on_output = (amount_out_after_pool_fee * out_mint_fee_bps as u128) / 10000;
         let final_amount_out = amount_out_after_pool_fee.saturating_sub(fee_on_output);
 
+        trace!(
+            amount_in_after_transfer_fee,
+            gross_amount_out,
+            fee_amount,
+            amount_out_after_pool_fee,
+            fee_on_output,
+            "Calculs intermédiaires du quote AMMv4"
+        );
+
         metrics::GET_QUOTE_LATENCY.with_label_values(&["RaydiumAmmV4"]).observe(start_time.elapsed().as_secs_f64());
 
         // <-- MODIFIÉ : Encapsulation dans QuoteResult
@@ -157,12 +182,22 @@ impl PoolOperations for DecodedAmmPool {
         })
     }
 
-    fn get_required_input(
-        &mut self,
-        token_out_mint: &Pubkey,
-        amount_out: u64,
-        _current_timestamp: i64
-    ) -> Result<u64> {
+    fn get_required_input(&mut self, token_out_mint: &Pubkey, amount_out: u64, _current_timestamp: i64) -> Result<u64> {
+        // --- BLOC DE LOGS À AJOUTER ---
+        let (in_mint_fee_bps, out_mint_fee_bps, in_reserve, out_reserve) = if *token_out_mint == self.mint_b {
+            (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps, self.reserve_a, self.reserve_b)
+        } else {
+            (self.mint_b_transfer_fee_bps, self.mint_a_transfer_fee_bps, self.reserve_b, self.reserve_a)
+        };
+
+        debug!(
+            pool_address = %self.address,
+            token_out = %token_out_mint,
+            amount_out,
+            in_reserve,
+            out_reserve,
+            "Entrée dans get_required_input pour Raydium AMMv4"
+        );
 
         let start_time = Instant::now();
         debug!(amount_out, "Calcul de get_required_input pour Raydium AMMv4");
@@ -216,6 +251,14 @@ impl PoolOperations for DecodedAmmPool {
         } else {
             amount_in_after_transfer_fee
         };
+
+        trace!(
+            amount_out_after_pool_fee,
+            gross_amount_out,
+            amount_in_after_transfer_fee,
+            "Calculs intermédiaires de l'input requis AMMv4"
+        );
+        debug!(required_amount_in = required_amount_in, "Résultat du calcul de l'input requis pour AMMv4");
 
         metrics::GET_QUOTE_LATENCY.with_label_values(&["RaydiumAmmV4_required_input"]).observe(start_time.elapsed().as_secs_f64());
 

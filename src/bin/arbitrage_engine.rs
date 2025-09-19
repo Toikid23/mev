@@ -1,3 +1,5 @@
+// DANS : src/bin/arbitrage_engine.rs
+
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -26,7 +28,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, Mutex, watch};
-use tracing::{error, info};
+use tracing::{error, info}; // <-- MODIFIÉ : Assurez-vous que `info` est bien importé
 
 use mev::{
     config::Config,
@@ -64,19 +66,20 @@ fn read_hotlist() -> Result<HashSet<Pubkey>> {
     Ok(serde_json::from_str(&data)?)
 }
 
+
 async fn ensure_pump_user_account_exists(rpc_client: &Arc<ResilientRpcClient>, payer: &Keypair) -> Result<()> {
-    println!("\n[Pré-vérification] Vérification du compte de volume utilisateur pump.fun...");
+    info!(payer = %payer.pubkey(), "[Pré-vérification] Vérification du compte de volume utilisateur pump.fun...");
     let (pda, _) = Pubkey::find_program_address(&[b"user_volume_accumulator", payer.pubkey().as_ref()], &mev::decoders::pump::amm::PUMP_PROGRAM_ID);
     if rpc_client.get_account(&pda).await.is_err() {
-        println!("  -> Compte de volume non trouvé. Création en cours...");
+        info!(pda = %pda, "Compte de volume pump.fun non trouvé. Création en cours...");
         let init_ix = mev::decoders::pump::amm::pool::create_init_user_volume_accumulator_instruction(&payer.pubkey())?;
         let recent_blockhash = rpc_client.get_latest_blockhash().await?;
         let transaction = Transaction::new_signed_with_payer(&[init_ix], Some(&payer.pubkey()), &[payer], recent_blockhash);
         let versioned_tx = VersionedTransaction::from(transaction);
         let signature = rpc_client.send_and_confirm_transaction(&versioned_tx).await?;
-        println!("  -> ✅ SUCCÈS ! Compte de volume créé. Signature : {}", signature);
+        info!(signature = %signature, "✅ Compte de volume pump.fun créé avec succès.");
     } else {
-        println!("  -> Compte de volume déjà existant.");
+        info!(pda = %pda, "Compte de volume pump.fun déjà existant.");
     }
     Ok(())
 }
@@ -103,16 +106,20 @@ async fn ensure_atas_exist_for_pool(rpc_client: &Arc<ResilientRpcClient>, payer:
         instructions_to_execute.push(create_associated_token_account(&payer.pubkey(), &payer.pubkey(), &mint_b, &mint_b_program));
     }
     if !instructions_to_execute.is_empty() {
-        println!("[Admission] Envoi de la transaction pour créer {} ATA(s)...", instructions_to_execute.len());
+        info!(pool_address = %pool.address(), ata_count = instructions_to_execute.len(), "Envoi de la transaction pour créer des ATAs...");
         let recent_blockhash = rpc_client.get_latest_blockhash().await?;
         let transaction = Transaction::new_signed_with_payer(&instructions_to_execute, Some(&payer.pubkey()), &[payer], recent_blockhash);
         let versioned_tx = VersionedTransaction::from(transaction);
         let signature = rpc_client.send_and_confirm_transaction(&versioned_tx).await?;
-        println!("[Admission] ✅ ATA(s) créé(s) avec succès. Signature : {}", signature);
+        info!(signature = %signature, pool_address = %pool.address(), "✅ ATA(s) créé(s) avec succès.");
     }
     Ok(())
 }
 
+// Le reste du fichier reste identique
+// ...
+// (collez le reste du fichier `arbitrage_engine.rs` ici, de la ligne `const BLACKLIST_FILE_NAME...` jusqu'à la fin)
+// ...
 const BLACKLIST_FILE_NAME: &str = "pool_pair_blacklist.json"; // NOUVEAU : Fichier de persistance
 
 // Structure pour suivre les échecs et l'état de pause

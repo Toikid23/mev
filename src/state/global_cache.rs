@@ -18,6 +18,7 @@ use std::{
     sync::RwLock,
     time::{Duration, Instant},
 };
+use tracing::{error, info, warn, debug};
 
 const CONFIG_CACHE_TTL_SECONDS: u64 = 300;
 const CLOCK_CACHE_TTL_MILLIS: u64 = 500;
@@ -98,11 +99,11 @@ pub async fn get_cached_clock(rpc_client: &ResilientRpcClient) -> Result<Clock> 
     let clock_address = clock::ID;
 
     if let Some(CacheableData::SysvarClock(clock)) = GLOBAL_CACHE.get(&clock_address) {
-        println!("[Cache] HIT pour SysvarClock.");
+        debug!("HIT pour SysvarClock.");
         return Ok(clock);
     }
 
-    println!("[Cache] MISS pour SysvarClock. Fetching via RPC...");
+    debug!("MISS pour SysvarClock. Fetching via RPC...");
     let clock_account = rpc_client
         .get_account(&clock_address)
         .await

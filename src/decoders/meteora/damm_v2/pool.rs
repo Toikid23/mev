@@ -18,6 +18,7 @@ use std::time::Instant;
 use tracing::debug;
 use std::sync::{Arc, RwLock};
 use std::collections::BTreeMap;
+use tracing::trace;
 
 
 pub const PROGRAM_ID: Pubkey = solana_sdk::pubkey!("cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG");
@@ -201,6 +202,17 @@ impl PoolOperations for DecodedMeteoraDammPool {
             }
         }
 
+        let a_to_b = *token_in_mint == self.mint_a;
+        debug!(
+            pool_address = %self.address,
+            token_in = %token_in_mint,
+            amount_in,
+            a_to_b,
+            initial_sqrt_price = self.sqrt_price,
+            initial_liquidity = self.liquidity,
+            "Entrée dans get_quote_with_details (Fallback) pour Meteora DAMM V2"
+        );
+
         // --- FALLBACK ---
         let start_time = Instant::now();
         debug!(amount_in, "Calcul de get_quote_with_details pour Meteora DAMM V2 (Fallback)");
@@ -253,6 +265,25 @@ impl PoolOperations for DecodedMeteoraDammPool {
         let fee_on_output = (amount_out_after_pool_fee as u128 * out_mint_fee_bps as u128) / 10000;
         let final_amount_out = amount_out_after_pool_fee.saturating_sub(fee_on_output as u64);
 
+        trace!(
+            amount_in_after_transfer_fee,
+            base_fee_num,
+            dynamic_fee_num,
+            total_fee_numerator,
+            fees_on_input,
+            pre_fee_amount_out,
+            total_fee_amount,
+            lp_fee,
+            amount_out_after_pool_fee,
+            fee_on_output,
+            "Calculs intermédiaires du quote DAMM V2"
+        );
+            debug!(
+            final_amount_out,
+            fee = lp_fee as u64,
+            "Résultat du calcul de quote pour Meteora DAMM V2"
+        );
+
         metrics::GET_QUOTE_LATENCY.with_label_values(&["MeteoraDammV2_Fallback"]).observe(start_time.elapsed().as_secs_f64());
 
         Ok(QuoteResult {
@@ -303,6 +334,15 @@ impl PoolOperations for DecodedMeteoraDammPool {
         current_timestamp: i64,
     ) -> Result<u64> {
 
+        debug!(
+            pool_address = %self.address,
+            token_out = %token_out_mint,
+            amount_out,
+            initial_sqrt_price = self.sqrt_price,
+            initial_liquidity = self.liquidity,
+            "Entrée dans get_required_input pour Meteora DAMM V2"
+        );
+
         let start_time = Instant::now();
         debug!(amount_out, "Calcul de get_required_input pour Meteora DAMM V2");
 
@@ -333,6 +373,8 @@ impl PoolOperations for DecodedMeteoraDammPool {
         // 4. Appel à l'utilitaire de recherche dynamique
         // --- On capture le résultat avant de retourner ---
         let result = find_input_by_binary_search(quote_fn, amount_out, high_bound);
+
+        debug!(required_input = ?result, "Résultat du calcul de l'input requis pour DAMM V2");
 
         // --- AJOUT JUSTE AVANT DE RETOURNER ---
         metrics::GET_QUOTE_LATENCY.with_label_values(&["MeteoraDammV2_required_input"]).observe(start_time.elapsed().as_secs_f64());

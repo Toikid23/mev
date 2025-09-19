@@ -7,6 +7,7 @@ use solana_account_decoder::UiAccountEncoding;
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 use crate::rpc::ResilientRpcClient; // <-- NOUVEL IMPORT
+use tracing::{error, info, warn, debug};
 
 
 #[derive(Debug)]
@@ -28,10 +29,7 @@ pub async fn find_pools_by_program_id_with_filters(
     program_id_str: &str,
     filters: Option<Vec<RpcFilterType>>,
 ) -> Result<Vec<RawPoolData>> {
-    println!(
-        "\nLancement du scan on-chain pour le programme : {}",
-        program_id_str
-    );
+    info!(program_id = program_id_str, "Lancement du scan on-chain.");
 
     let program_id = Pubkey::from_str(program_id_str)?;
 
@@ -54,10 +52,7 @@ pub async fn find_pools_by_program_id_with_filters(
         .get_program_accounts_with_config(&program_id, config)
         .await?;
 
-    println!(
-        "-> Scan terminé. {} comptes trouvés pour ce programme avec les filtres appliqués.",
-        accounts.len()
-    );
+    info!(account_count = accounts.len(), "Scan on-chain terminé.");
 
     let raw_pools = accounts
         .into_iter()

@@ -17,6 +17,7 @@ use crate::monitoring::metrics;
 use std::time::Instant;
 use tracing::debug;
 use std::sync::{Arc, RwLock};
+use tracing::trace;
 
 // ... (Les constantes PROGRAM_ID, MAX_BIN_PER_ARRAY, etc. ne changent pas) ...
 pub const PROGRAM_ID: Pubkey = pubkey!("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo");
@@ -70,6 +71,15 @@ impl DecodedDlmmPool {
     // On supprime calculate_swap_quote_async car il n'est plus utilisé
 
     fn calculate_swap_quote_internal(&self, amount_in: u64, swap_for_y: bool, current_timestamp: i64) -> Result<(u64, u32)> {
+
+        debug!(
+            pool_address = %self.address,
+            amount_in,
+            swap_for_y, // true = base_input
+            initial_active_bin_id = self.active_bin_id,
+            "Entrée dans calculate_swap_quote_internal pour Meteora DLMM"
+        );
+
         let bin_arrays = self.hydrated_bin_arrays.as_ref().ok_or_else(|| anyhow!("Pool not hydrated"))?;
         let mut amount_remaining_in = amount_in as u128;
         let mut total_amount_out: u128 = 0;
@@ -80,6 +90,13 @@ impl DecodedDlmmPool {
         update_references(&mut temp_v_params, &self.parameters, self.active_bin_id, current_timestamp)?;
 
         while amount_remaining_in > 0 {
+
+            trace!(
+                amount_remaining_in,
+                current_bin_id,
+                "Début d'une étape de swap DLMM"
+            );
+
             if current_bin_id < self.parameters.min_bin_id || current_bin_id > self.parameters.max_bin_id { break; }
 
             let bin_array_idx = get_bin_array_index_from_bin_id(current_bin_id);
@@ -168,6 +185,15 @@ impl PoolOperations for DecodedDlmmPool {
 
     // VERSION SYNCHRONE AMÉLIORÉE
     fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, current_timestamp: i64) -> Result<QuoteResult> {
+
+        debug!(
+            pool_address = %self.address,
+            token_in = %token_in_mint,
+            amount_in,
+            "Entrée dans get_quote_with_details pour Meteora DLMM"
+        );
+
+
         // --- LOGIQUE DE CACHE ---
         // Le timestamp peut affecter les frais, donc le cache est moins précis ici,
         // mais reste une excellente approximation rapide. On n'utilise pas le cache si le timestamp est pertinent.
@@ -228,6 +254,14 @@ impl PoolOperations for DecodedDlmmPool {
         amount_out: u64,
         current_timestamp: i64,
     ) -> Result<u64> {
+
+        debug!(
+            pool_address = %self.address,
+            token_out = %token_out_mint,
+            amount_out,
+            "Entrée dans get_required_input pour Meteora DLMM"
+        );
+
 
         let start_time = Instant::now();
         debug!(amount_out, "Calcul de get_required_input pour Meteora DLMM");

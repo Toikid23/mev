@@ -6,6 +6,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 use tokio::task::JoinHandle;
+use tracing::{error, info, warn, debug};
 
 const SLOT_HISTORY_SIZE: usize = 100; // Garder l'historique des 100 derniers slots
 
@@ -56,7 +57,11 @@ impl SlotMetronome {
                         let avg_duration_for_period = total_duration_ms / (slots_elapsed as u128);
 
                         if slots_elapsed > 1 {
-                            println!("[Metronome] Détection d'un saut de {} slots. Durée moyenne enregistrée: {}ms.", slots_elapsed - 1, avg_duration_for_period);
+                            warn!(
+                                slots_skipped = slots_elapsed - 1,
+                                avg_duration_ms = avg_duration_for_period,
+                                "Saut de slots détecté"
+                            );
                         }
 
                         let mut history_writer = self_clone.history.write().unwrap();

@@ -14,6 +14,7 @@ use yellowstone_grpc_proto::{
         SubscribeRequestFilterTransactions,
     },
 };
+use tracing::{error, info, warn, debug};
 
 pub struct Watcher {
     geyser_grpc_url: String,
@@ -31,7 +32,8 @@ impl Watcher {
         programs_to_watch: Vec<Pubkey>, // <-- NOUVEL ARGUMENT
         active_pool_sender: mpsc::Sender<Pubkey>,
     ) -> Result<()> {
-        println!("[Watcher] Connexion au stream Geyser gRPC à l'adresse : {}", self.geyser_grpc_url);
+        info!(geyser_url = %self.geyser_grpc_url, "Connexion au stream Geyser gRPC.");
+
 
         let mut client = GeyserGrpcClient::build_from_shared(self.geyser_grpc_url.clone())?
             .connect()
@@ -88,7 +90,7 @@ impl Watcher {
                         }
                         for pool_address in found_pools {
                             if let Err(e) = active_pool_sender.send(pool_address).await {
-                                eprintln!("[Watcher] Erreur: Le canal est fermé. Arrêt. Raison: {}", e);
+                                error!(error = %e, "Erreur: Le canal vers le filtering_engine est fermé. Arrêt du watcher.");
                                 return Ok(());
                             }
                         }

@@ -9,6 +9,7 @@ use solana_sdk::{pubkey::Pubkey, transaction::VersionedTransaction};
 use solana_transaction_status::UiTransactionEncoding;
 use std::sync::Arc;
 use crate::rpc::ResilientRpcClient;
+use tracing::{error, info, warn, debug};
 
 // NOUVEAU : On définit une structure pour un retour propre
 pub struct SimulationResult {
@@ -34,7 +35,7 @@ pub async fn run_simulations(
     transaction: &VersionedTransaction,
     accounts_for_fees: Vec<Pubkey>,
 ) -> Result<SimulationResult> {
-    println!("\n--- [Phase 2] Lancement des simulations et de la récupération des frais ---");
+    info!("--- [Phase 2] Lancement des simulations et de la récupération des frais ---");
     let sim_config = RpcSimulateTransactionConfig {
         sig_verify: false,
         replace_recent_blockhash: true,
@@ -50,7 +51,7 @@ pub async fn run_simulations(
         rpc_client.get_recent_prioritization_fees(&accounts_for_fees)
     );
 
-    println!("\n--- [Phase 3] Analyse des résultats ---");
+    info!("--- [Phase 3] Analyse des résultats ---");
     let sim_response = match jito_sim_result.or(sim_result) {
         Ok(response) => response,
         Err(e) => return Err(anyhow!("Les deux simulations ont échoué. Erreur RPC : {}", e)),
@@ -63,7 +64,7 @@ pub async fn run_simulations(
         }
         return Err(anyhow!("Simulation ÉCHOUÉE : {:?}", err));
     }
-    println!("  -> Simulation RÉUSSIE !");
+    info!("Simulation RÉUSSIE !");
 
     let compute_units = sim_value.units_consumed.unwrap_or(0);
     let logs = sim_value.logs.unwrap_or_default();
@@ -71,13 +72,13 @@ pub async fn run_simulations(
     let profit_brut_reel = parse_realized_profit_from_logs(&logs)
         .ok_or_else(|| anyhow!("ERREUR : Impossible d'extraire le profit des logs de simulation."))?;
 
-    println!("     -> Profit Brut Réel (simulé) : {} lamports", profit_brut_reel);
-    println!("     -> Compute Units Consommés   : {}", compute_units);
+    info!(simulated_gross_profit = profit_brut_reel, "Profit brut réel (simulé)");
+    info!(consumed_cus = compute_units, "Compute Units consommés");
 
     let priority_fees = match priority_fees_result {
         Ok(fees) => fees,
         Err(e) => {
-            println!("  -> AVERTISSEMENT : Impossible de récupérer les frais de priorité : {}", e);
+            warn!(error = %e, "Impossible de récupérer les frais de priorité.");
             vec![] // Retourne un vecteur vide en cas d'erreur
         }
     };

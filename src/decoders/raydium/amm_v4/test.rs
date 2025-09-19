@@ -22,6 +22,7 @@ use crate::decoders::PoolOperations;
 use crate::decoders::pool_operations::UserSwapAccounts;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use crate::rpc::ResilientRpcClient;
+use tracing::{error, info, warn, debug};
 
 
 pub async fn test_ammv4_with_simulation(rpc_client: &ResilientRpcClient, payer_keypair: &Keypair, current_timestamp: i64) -> anyhow::Result<()> {
@@ -29,11 +30,11 @@ pub async fn test_ammv4_with_simulation(rpc_client: &ResilientRpcClient, payer_k
     const INPUT_MINT_STR: &str = "So11111111111111111111111111111111111111112"; // WSOL
     const INPUT_AMOUNT_UI: f64 = 0.05;
 
-    println!("\n--- Test et Simulation (Lecture de Compte) Raydium AMMv4 ({}) ---", POOL_ADDRESS);
+    info!(pool_address = POOL_ADDRESS, "--- Test et Simulation (Lecture de Compte) Raydium AMMv4 ---");
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
 
     // --- 1. Prédiction Locale (inchangée) ---
-    println!("[1/3] Hydratation et prédiction locale...");
+    info!("[1/3] Hydratation et prédiction locale...");
     let pool_account_data = rpc_client.get_account_data(&pool_pubkey).await?;
     let mut pool = decode_pool(&pool_pubkey, &pool_account_data)?;
     hydrate(&mut pool, rpc_client).await?;
@@ -48,22 +49,25 @@ pub async fn test_ammv4_with_simulation(rpc_client: &ResilientRpcClient, payer_k
 
     let predicted_amount_out = pool.get_quote(&input_mint_pubkey, amount_in_base_units, current_timestamp)?;
     let ui_predicted_amount_out = predicted_amount_out as f64 / 10f64.powi(output_decimals as i32);
-    println!("-> PRÉDICTION LOCALE: {}", ui_predicted_amount_out);
+    info!(predicted_amount_out = ui_predicted_amount_out, "Prédiction locale");
 
 
-    println!("\n[VALIDATION] Lancement du test d'inversion mathématique...");
+    info!("[VALIDATION] Lancement du test d'inversion mathématique...");
     if predicted_amount_out > 0 {
         let required_input_from_quote = pool.get_required_input(&output_mint_pubkey, predicted_amount_out, current_timestamp)?;
-        println!("  -> Input original     : {}", amount_in_base_units);
-        println!("  -> Output prédit      : {}", predicted_amount_out);
-        println!("  -> Input Re-calculé   : {}", required_input_from_quote);
+        info!(
+            original_input = amount_in_base_units,
+            predicted_output = predicted_amount_out,
+            recalculated_input = required_input_from_quote,
+            "Validation inverse"
+        );
 
         // On vérifie que le résultat est égal ou légèrement supérieur.
         if required_input_from_quote >= amount_in_base_units {
             let difference = required_input_from_quote.saturating_sub(amount_in_base_units);
             // On tolère une petite différence due aux arrondis successifs.
             if difference <= 10 { // 10 lamports est une tolérance très acceptable
-                println!("  -> ✅ SUCCÈS : Le calcul inverse est cohérent (différence: {} lamports).", difference);
+                info!(difference_lamports = difference, "✅ SUCCÈS : Le calcul inverse est cohérent.");
             } else {
                 bail!("  -> ⚠️ ÉCHEC : La différence du calcul inverse est trop grande ({} lamports).", difference);
             }
@@ -71,19 +75,19 @@ pub async fn test_ammv4_with_simulation(rpc_client: &ResilientRpcClient, payer_k
             bail!("  -> ⚠️ ÉCHEC : Le calcul inverse a produit un montant inférieur à l'original !");
         }
     } else {
-        println!("  -> AVERTISSEMENT : Le quote est de 0, test d'inversion sauté.");
+        warn!("Le quote est de 0, test d'inversion sauté.");
     }
 
 
     // --- 2. Préparation de la Transaction (inchangée) ---
-    println!("\n[2/3] Préparation de la transaction de swap...");
+    info!("[2/3] Préparation de la transaction de swap...");
     let payer_pubkey = payer_keypair.pubkey();
     let user_source_ata = get_associated_token_address(&payer_pubkey, &input_mint_pubkey);
     let user_destination_ata = get_associated_token_address(&payer_pubkey, &output_mint_pubkey);
 
 
     // --- NOUVEAU: Pré-vérification de tous les comptes ---
-    println!("\n[DIAGNOSTIC] Vérification de l'existence de tous les comptes requis...");
+    info!("[DIAGNOSTIC] Vérification de l'existence de tous les comptes requis...");
     let (amm_authority, _) = Pubkey::find_program_address(&[b"amm authority"], &RAYDIUM_AMM_V4_PROGRAM_ID);
 
     // On recrée la liste EXACTE des clés qui seront utilisées dans l'instruction
@@ -114,9 +118,9 @@ pub async fn test_ammv4_with_simulation(rpc_client: &ResilientRpcClient, payer_k
     for (i, result) in account_results.iter().enumerate() {
         let pubkey = account_keys_to_check[i];
         if result.is_some() {
-            println!("  -> Compte {}: {} ... Trouvé ✅", i, pubkey);
+            info!(account_index = i, pubkey = %pubkey, "Compte trouvé ✅");
         } else {
-            println!("  -> Compte {}: {} ... MANQUANT ❌", i, pubkey);
+            error!(account_index = i, pubkey = %pubkey, "Compte MANQUANT ❌");
             all_found = false;
         }
     }
@@ -124,7 +128,7 @@ pub async fn test_ammv4_with_simulation(rpc_client: &ResilientRpcClient, payer_k
     if !all_found {
         bail!("Vérification échouée : Un ou plusieurs comptes requis pour la transaction n'existent pas sur le RPC interrogé.");
     }
-    println!("[DIAGNOSTIC] Tous les comptes ont été trouvés. Le problème est ailleurs.");
+    info!("[DIAGNOSTIC] Tous les comptes ont été trouvés.");
     // --- FIN DU BLOC DE DIAGNOSTIC ---
 
 
@@ -167,14 +171,14 @@ pub async fn test_ammv4_with_simulation(rpc_client: &ResilientRpcClient, payer_k
     )?;
 
     // --- 3. Simulation et Analyse par Lecture de Compte ---
-    println!("\n[3/3] Exécution de la simulation avec lecture de compte...");
+    info!("[3/3] Exécution de la simulation avec lecture de compte...");
 
     // On récupère la balance du compte de destination AVANT la simulation.
     let initial_destination_balance = match rpc_client.get_account(&user_destination_ata).await {
         Ok(acc) => SplTokenAccount::unpack(&acc.data)?.amount,
         Err(_) => 0,
     };
-    println!("-> Balance initiale du compte de destination: {}", initial_destination_balance);
+    info!(initial_balance = initial_destination_balance, "Balance initiale du compte de destination");
 
     // Configuration de la simulation pour qu'elle nous retourne l'état du compte de destination.
     let sim_config = RpcSimulateTransactionConfig {
@@ -193,8 +197,7 @@ pub async fn test_ammv4_with_simulation(rpc_client: &ResilientRpcClient, payer_k
     let sim_result = sim_response.value;
 
     if let Some(err) = sim_result.err {
-        println!("!! ERREUR DE SIMULATION: {:?}", err);
-        println!("!! LOGS: {:?}", sim_result.logs);
+        error!(simulation_error = ?err, logs = ?sim_result.logs, "ERREUR DE SIMULATION");
         bail!("La simulation a échoué.");
     }
 
@@ -209,24 +212,25 @@ pub async fn test_ammv4_with_simulation(rpc_client: &ResilientRpcClient, payer_k
 
     let token_account_data = SplTokenAccount::unpack(&decoded_data)?;
     let post_simulation_balance = token_account_data.amount;
-    println!("-> Balance finale du compte de destination (simulée): {}", post_simulation_balance);
+    info!(final_balance = post_simulation_balance, "Balance finale du compte de destination (simulée)");
 
     // Le montant reçu est simplement la différence.
     let simulated_amount_out = post_simulation_balance.saturating_sub(initial_destination_balance);
     let ui_simulated_amount_out = simulated_amount_out as f64 / 10f64.powi(output_decimals as i32);
 
     // --- 4. Comparaison ---
-    println!("\n--- COMPARAISON (AMMv4) ---");
-    println!("Montant PRÉDIT (local)             : {}", ui_predicted_amount_out);
-    println!("Montant SIMULÉ (lecture de compte) : {}", ui_simulated_amount_out);
     let difference = (ui_predicted_amount_out - ui_simulated_amount_out).abs();
     let difference_percent = if ui_simulated_amount_out > 0.0 { (difference / ui_simulated_amount_out) * 100.0 } else { 0.0 };
-    println!("-> Différence relative: {:.6} %", difference_percent);
+    info!(
+        predicted = ui_predicted_amount_out,
+        simulated = ui_simulated_amount_out,
+        diff_percent = difference_percent,
+    );
 
     if difference_percent < 0.1 {
-        println!("✅ SUCCÈS ! Le décodeur Raydium AMMv4 est précis.");
+        info!("✅ SUCCÈS ! Le décodeur Raydium AMMv4 est précis.");
     } else {
-        println!("⚠️ ÉCHEC ! La différence est trop grande.");
+        error!("⚠️ ÉCHEC ! La différence est trop grande.");
     }
 
     Ok(())

@@ -16,10 +16,11 @@ use solana_sdk::{
     message::AddressLookupTableAccount as SdkAddressLookupTableAccount,
     pubkey::Pubkey,
 };
+
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
-use tracing::{error, info, instrument, warn};
+use tracing::{error, info, instrument, warn, debug};
 use crate::execution::transaction_builder::ArbitrageInstructionsTemplate;
 
 // --- CORRECTION : AJOUT DE LA CONSTANTE ICI ---
@@ -69,6 +70,12 @@ impl Middleware for TransactionBuilder {
     ))]
     async fn process(&self, context: &mut ExecutionContext) -> Result<bool> {
         let span = tracing::Span::current();
+
+        debug!(
+            estimated_profit = context.estimated_profit,
+            estimated_cus = context.estimated_cus,
+            "Entrée dans le TransactionBuilder"
+        );
 
         let runtime_config: RuntimeConfig = fs::read_to_string("runtime_config.json")
             .ok()
@@ -152,7 +159,14 @@ impl Middleware for TransactionBuilder {
             });
             span.record("jito_region", region_name);
             span.record("latency_ms", latency);
-            info!(profit_net = estimated_profit.saturating_sub(tip), jito_tip = tip, target_region = region_name, latency_ms = latency, "DÉCISION: PRÉPARER BUNDLE JITO.");
+            info!(
+                decision = "PrepareJitoBundle",
+                profit_net = estimated_profit.saturating_sub(tip),
+                jito_tip = tip,
+                target_region = region_name,
+                latency_ms = latency,
+                "Leader Jito détecté, préparation du bundle"
+            );
             (0, Some(tip))
         } else {
             let time_remaining_ms = if target_slot == current_slot {
@@ -181,7 +195,14 @@ impl Middleware for TransactionBuilder {
             }
 
             span.record("decision", "PrepareNormal");
-            info!(profit_net, priority_fee=total_fee, "DÉCISION: PRÉPARER TRANSACTION NORMALE.");
+            info!(
+                decision = "PrepareNormalTx",
+                profit_net,
+                priority_fee_per_cu = fee_per_cu,
+                total_priority_fee = total_fee,
+                time_remaining_in_slot_ms = time_remaining_ms,
+                "Leader non-Jito ou routage impossible, préparation d'une transaction normale"
+            );
             (fee_per_cu, None)
         };
 

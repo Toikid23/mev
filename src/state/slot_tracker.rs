@@ -6,6 +6,7 @@ use std::{
     sync::Arc,
     time::Instant,
 };
+use tracing::{error, info, warn, debug};
 
 #[derive(Debug, Clone)]
 pub struct SlotState {
@@ -23,7 +24,7 @@ impl SlotTracker {
         println!("[SlotTracker] Initialisation : récupération du premier Clock...");
         let clock_account = rpc_client.get_account(&clock::ID).await?;
         let initial_clock: Clock = bincode::deserialize(&clock_account.data)?;
-        println!("[SlotTracker] Initialisation réussie. Slot: {}, Timestamp: {}", initial_clock.slot, initial_clock.unix_timestamp);
+        info!(slot = initial_clock.slot, timestamp = initial_clock.unix_timestamp, "Initialisation du SlotTracker réussie.");
 
         let initial_state = SlotState {
             clock: initial_clock,

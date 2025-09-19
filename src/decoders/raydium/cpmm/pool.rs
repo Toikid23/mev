@@ -17,6 +17,7 @@ use crate::state::global_cache::{CacheableData, GLOBAL_CACHE};
 use crate::monitoring::metrics;
 use std::time::Instant;
 use tracing::debug;
+use tracing::trace;
 // --- FIN DES AJOUTS ---
 
 const CPMM_POOL_STATE_DISCRIMINATOR: [u8; 8] = [247, 237, 227, 245, 215, 195, 222, 70];
@@ -174,6 +175,21 @@ impl PoolOperations for DecodedCpmmPool {
     fn address(&self) -> Pubkey { self.address }
 
     fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<QuoteResult> {
+        let (in_mint_fee_bps, out_mint_fee_bps, in_reserve, out_reserve) = if *token_in_mint == self.token_0_mint {
+            (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps, self.reserve_a, self.reserve_b)
+        } else {
+            (self.mint_b_transfer_fee_bps, self.mint_a_transfer_fee_bps, self.reserve_b, self.reserve_a)
+        };
+
+        debug!(
+        pool_address = %self.address,
+        token_in = %token_in_mint,
+        amount_in,
+        in_reserve,
+        out_reserve,
+        "Entrée dans get_quote_with_details pour Raydium CPMM"
+    );
+
         let start_time = Instant::now();
         debug!(amount_in, "Calcul de get_quote_with_details pour Raydium CPMM");
 
@@ -205,6 +221,16 @@ impl PoolOperations for DecodedCpmmPool {
         let fee_on_output = (gross_amount_out as u128 * out_mint_fee_bps as u128) / 10000;
         let final_amount_out = gross_amount_out.saturating_sub(fee_on_output as u64);
 
+        trace!(
+            amount_in_after_transfer_fee = amount_in_after_transfer_fee,
+            trade_fee = trade_fee,
+            creator_fee = creator_fee,
+            amount_in_less_fees = amount_in_less_fees,
+            gross_amount_out = gross_amount_out,
+            fee_on_output = fee_on_output,
+            "Calculs intermédiaires du quote CPMM"
+        );
+
         metrics::GET_QUOTE_LATENCY.with_label_values(&["RaydiumCPMM"]).observe(start_time.elapsed().as_secs_f64());
 
         Ok(QuoteResult {
@@ -215,6 +241,21 @@ impl PoolOperations for DecodedCpmmPool {
     }
 
     fn get_required_input(&mut self, token_out_mint: &Pubkey, amount_out: u64, _current_timestamp: i64) -> Result<u64> {
+        let (in_mint_fee_bps, out_mint_fee_bps, in_reserve, out_reserve) = if *token_out_mint == self.token_1_mint {
+            (self.mint_a_transfer_fee_bps, self.mint_b_transfer_fee_bps, self.reserve_a, self.reserve_b)
+        } else {
+            (self.mint_b_transfer_fee_bps, self.mint_a_transfer_fee_bps, self.reserve_b, self.reserve_a)
+        };
+
+        debug!(
+        pool_address = %self.address,
+        token_out = %token_out_mint,
+        amount_out,
+        in_reserve,
+        out_reserve,
+        "Entrée dans get_required_input pour Raydium CPMM"
+    );
+
         let start_time = Instant::now();
         debug!(amount_out, "Calcul de get_required_input pour Raydium CPMM");
 
@@ -259,6 +300,14 @@ impl PoolOperations for DecodedCpmmPool {
         } else {
             amount_in_after_transfer_fee
         };
+
+        trace!(
+            gross_amount_out = gross_amount_out,
+            amount_in_less_fees = amount_in_less_fees,
+            amount_in_after_transfer_fee = amount_in_after_transfer_fee,
+            "Calculs intermédiaires de l'input requis CPMM"
+        );
+        debug!(required_amount_in = required_amount_in, "Résultat du calcul de l'input requis pour CPMM");
 
         metrics::GET_QUOTE_LATENCY.with_label_values(&["RaydiumCPMM_required_input"]).observe(start_time.elapsed().as_secs_f64());
 

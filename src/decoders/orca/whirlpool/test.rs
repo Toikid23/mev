@@ -18,6 +18,7 @@ use solana_program_pack::Pack;
 use crate::decoders::pool_operations::UserSwapAccounts;
 use crate::decoders::PoolOperations;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use tracing::{error, info,warn};
 
 // Imports depuis notre propre crate
 use crate::decoders::orca::whirlpool::{decode_pool, hydrate};
@@ -29,11 +30,11 @@ pub async fn test_whirlpool_with_simulation(rpc_client: &ResilientRpcClient, pay
     const INPUT_MINT_STR: &str = "So11111111111111111111111111111111111111112";
     const INPUT_AMOUNT_UI: f64 = 0.05;
 
-    println!("\n--- Test et Simulation Orca Whirlpool ({}) ---", POOL_ADDRESS);
+    info!(pool_address = POOL_ADDRESS, "--- Test et Simulation Orca Whirlpool ---");
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
     let input_mint_pubkey = Pubkey::from_str(INPUT_MINT_STR)?;
 
-    println!("[1/3] Hydratation et prédiction locale...");
+    info!("[1/3] Hydratation et prédiction locale...");
     // Les appels RPC utilisent maintenant notre client résilient
     let pool_account_data = rpc_client.get_account_data(&pool_pubkey).await?;
     let mut pool = decode_pool(&pool_pubkey, &pool_account_data)?;
@@ -48,19 +49,22 @@ pub async fn test_whirlpool_with_simulation(rpc_client: &ResilientRpcClient, pay
     let amount_in_base_units = (INPUT_AMOUNT_UI * 10f64.powi(input_decimals as i32)) as u64;
     let predicted_amount_out = pool.get_quote(&input_mint_pubkey, amount_in_base_units, current_timestamp)?;
     let ui_predicted_amount_out = predicted_amount_out as f64 / 10f64.powi(output_decimals as i32);
-    println!("-> PRÉDICTION LOCALE: {} UI", ui_predicted_amount_out);
+    info!(predicted_amount_out = ui_predicted_amount_out, "Prédiction locale");
 
     // [VALIDATION INVERSE] ... (code inchangé)
-    println!("\n[VALIDATION] Lancement du test d'inversion mathématique...");
+    info!("[VALIDATION] Lancement du test d'inversion mathématique...");
     if predicted_amount_out > 0 {
         let required_input_from_quote = pool.get_required_input(&output_mint_pubkey, predicted_amount_out, current_timestamp)?;
-        println!("  -> Input original     : {}", amount_in_base_units);
-        println!("  -> Output prédit      : {}", predicted_amount_out);
-        println!("  -> Input Re-calculé   : {}", required_input_from_quote);
+        info!(
+            original_input = amount_in_base_units,
+            predicted_output = predicted_amount_out,
+            recalculated_input = required_input_from_quote,
+            "Validation inverse"
+        );
         if required_input_from_quote >= amount_in_base_units {
             let difference = required_input_from_quote.saturating_sub(amount_in_base_units);
             if difference <= 100 {
-                println!("  -> ✅ SUCCÈS: Le calcul inverse est cohérent (différence: {} lamports).", difference);
+                info!(difference_lamports = difference, "✅ SUCCÈS : Le calcul inverse est cohérent.");
             } else {
                 bail!("  -> ⚠️ ÉCHEC: La différence du calcul inverse est trop grande ({} lamports).", difference);
             }
@@ -68,10 +72,10 @@ pub async fn test_whirlpool_with_simulation(rpc_client: &ResilientRpcClient, pay
             bail!("  -> ⚠️ ÉCHEC: Le calcul inverse a produit un montant inférieur à l'original !");
         }
     } else {
-        println!("  -> AVERTISSEMENT: Le quote est de 0, test d'inversion sauté.");
+        warn!("Le quote est de 0, test d'inversion sauté.");
     }
 
-    println!("\n[2/3] Préparation de la simulation...");
+    info!("[2/3] Préparation de la simulation...");
     let user_accounts = UserSwapAccounts {
         owner: payer.pubkey(),
         source: get_associated_token_address(&payer.pubkey(), &input_mint_pubkey),
@@ -91,7 +95,7 @@ pub async fn test_whirlpool_with_simulation(rpc_client: &ResilientRpcClient, pay
         &[payer],
     )?;
 
-    println!("\n[3/3] Exécution de la simulation standard...");
+    info!("[3/3] Exécution de la simulation standard...");
     let user_destination_ata = user_accounts.destination;
 
     // --- AMÉLIORATION DE LA LECTURE DU SOLDE ---
@@ -118,8 +122,7 @@ pub async fn test_whirlpool_with_simulation(rpc_client: &ResilientRpcClient, pay
 
     // Le reste du code de comparaison est inchangé
     if let Some(err) = sim_result.err {
-        println!("!! ERREUR DE SIMULATION: {:?}", err);
-        println!("!! LOGS: {:?}", sim_result.logs);
+        error!(simulation_error = ?err, logs = ?sim_result.logs, "ERREUR DE SIMULATION");
         bail!("La simulation a échoué.");
     }
     let post_accounts = sim_result.accounts.ok_or_else(|| anyhow!("La simulation n'a pas retourné l'état des comptes."))?;
@@ -132,16 +135,18 @@ pub async fn test_whirlpool_with_simulation(rpc_client: &ResilientRpcClient, pay
     let simulated_amount_out = token_account_data.amount.saturating_sub(initial_destination_balance);
     let ui_simulated_amount_out = simulated_amount_out as f64 / 10f64.powi(output_decimals as i32);
 
-    println!("\n--- COMPARAISON (Whirlpool) ---");
-    println!("Montant PRÉDIT (local)    : {}", ui_predicted_amount_out);
-    println!("Montant SIMULÉ (on-chain) : {}", ui_simulated_amount_out);
     let difference = (ui_predicted_amount_out - ui_simulated_amount_out).abs();
     let difference_percent = if ui_simulated_amount_out > 0.0 { (difference / ui_simulated_amount_out) * 100.0 } else { 0.0 };
-    println!("-> Différence relative: {:.6} %", difference_percent);
+    info!(
+        predicted = ui_predicted_amount_out,
+        simulated = ui_simulated_amount_out,
+        diff_percent = difference_percent,
+        "--- COMPARAISON (Whirlpool) ---"
+    );
     if difference_percent < 0.1 {
-        println!("✅ SUCCÈS ! Le décodeur Whirlpool est précis.");
+        info!("✅ SUCCÈS ! Le décodeur Whirlpool est précis.");
     } else {
-        println!("⚠️ ÉCHEC ! La différence est trop grande.");
+        error!("⚠️ ÉCHEC ! La différence est trop grande.");
     }
 
     Ok(())

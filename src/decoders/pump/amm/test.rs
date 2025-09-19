@@ -19,15 +19,16 @@ use crate::decoders::pump::amm::{
     events::{PumpBuyEvent},
 };
 use borsh::BorshDeserialize;
+use tracing::{error, info};
 
 pub async fn test_amm_with_simulation(rpc_client: &ResilientRpcClient, payer_keypair: &Keypair, current_timestamp: i64) -> anyhow::Result<()> {
     const POOL_ADDRESS: &str = "CLYFHhJfJjNPSMQv7byFeAsZ8x1EXQyYkGTPrNc2vc78";
     const DESIRED_OUTPUT_AMOUNT_UI: f64 = 30000.0;
 
-    println!("\n--- Test et Simulation (FIXED-OUTPUT) pump.fun AMM ({}) ---", POOL_ADDRESS);
+    info!(pool_address = POOL_ADDRESS, "--- Test et Simulation (FIXED-OUTPUT) pump.fun AMM ---");
     let pool_pubkey = Pubkey::from_str(POOL_ADDRESS)?;
 
-    println!("[1/3] Hydratation et prédiction du COÛT...");
+    info!("[1/3] Hydratation et prédiction du COÛT...");
     let pool_account_data = rpc_client.get_account_data(&pool_pubkey).await?;
     let mut pool = decode_pool(&pool_pubkey, &pool_account_data)?;
     hydrate(&mut pool, rpc_client).await?;
@@ -40,7 +41,7 @@ pub async fn test_amm_with_simulation(rpc_client: &ResilientRpcClient, payer_key
     let ui_predicted_amount_in = predicted_amount_in as f64 / 10f64.powi(input_decimals as i32);
     // On ne log plus ici, les logs sont maintenant dans la fonction elle-même
 
-    println!("\n[2/3] Préparation de la transaction d'ACHAT (fixed-output)...");
+    info!("[2/3] Préparation de la transaction d'ACHAT (fixed-output)...");
     let user_accounts = UserSwapAccounts {
         owner: payer_keypair.pubkey(),
         source: get_associated_token_address_with_program_id(&payer_keypair.pubkey(), &pool.mint_b, &pool.mint_b_program),
@@ -79,11 +80,11 @@ pub async fn test_amm_with_simulation(rpc_client: &ResilientRpcClient, payer_key
         &[payer_keypair],
     )?;
 
-    println!("\n[3/3] Exécution de la simulation...");
+    info!("[3/3] Exécution de la simulation...");
     let sim_result = rpc_client.simulate_transaction(&transaction).await?.value;
 
     if let Some(err) = sim_result.err {
-        println!("LOGS DE SIMULATION DÉTAILLÉS:\n{:#?}", sim_result.logs);
+        error!(logs = ?sim_result.logs, "Logs de simulation détaillés");
         bail!("La simulation a échoué: {:?}", err);
     }
 
@@ -106,14 +107,15 @@ pub async fn test_amm_with_simulation(rpc_client: &ResilientRpcClient, payer_key
 
     let event = onchain_event.ok_or_else(|| anyhow!("Impossible de parser l'événement d'achat complet"))?;
 
-    println!("\n--- [ON-CHAIN EVENT DEBUG] ---");
-    println!("  - Coût NET (quote_amount_in) : {}", event.quote_amount_in);
-    println!("  - Frais LP (lamports)        : {}", event.lp_fee);
-    println!("  - Frais Prot (lamports)      : {}", event.protocol_fee);
-    println!("  - Frais Créat. (lamports)      : {}", event.coin_creator_fee);
-    println!("  - Coût Total PAYÉ            : {}", event.user_quote_amount_in);
-    println!("  - Sortie Reçue               : {}", event.base_amount_out);
-    println!("--------------------------------");
+    info!(
+        net_cost = event.quote_amount_in,
+        lp_fee = event.lp_fee,
+        protocol_fee = event.protocol_fee,
+        creator_fee = event.coin_creator_fee,
+        total_cost_paid = event.user_quote_amount_in,
+        output_received = event.base_amount_out,
+        "--- [ON-CHAIN EVENT DEBUG] ---"
+    );
 
     let simulated_amount_out = event.base_amount_out;
     let simulated_amount_in = event.user_quote_amount_in;
@@ -121,21 +123,26 @@ pub async fn test_amm_with_simulation(rpc_client: &ResilientRpcClient, payer_key
     let ui_simulated_amount_out = simulated_amount_out as f64 / 10f64.powi(output_decimals as i32);
     let ui_simulated_amount_in = simulated_amount_in as f64 / 10f64.powi(input_decimals as i32);
 
-    println!("\n--- COMPARAISON FINALE (pump.fun) ---");
-    println!("\n[VALIDATION - MONTANT REÇU]");
-    println!("Montant DÉSIRÉ (local)     : {}", DESIRED_OUTPUT_AMOUNT_UI);
-    println!("Montant REÇU (on-chain)    : {}", ui_simulated_amount_out);
     let diff_out_percent = ((desired_amount_out_base_units as i128 - simulated_amount_out as i128).abs() as f64 / desired_amount_out_base_units as f64) * 100.0;
-    println!("-> Différence relative (out): {:.6} %", diff_out_percent);
+    info!("--- COMPARAISON FINALE (pump.fun) ---");
+    info!(
+        desired_ui = DESIRED_OUTPUT_AMOUNT_UI,
+        received_ui = ui_simulated_amount_out,
+        diff_percent = diff_out_percent,
+        "[VALIDATION - MONTANT REÇU]"
+    );
 
-    println!("\n[VALIDATION - COÛT PAYÉ]");
-    println!("Coût PRÉDIT (local)        : {:.9} SOL", ui_predicted_amount_in);
-    println!("Coût RÉEL (on-chain)       : {:.9} SOL", ui_simulated_amount_in);
+
     let diff_in_percent = ((predicted_amount_in as i128 - simulated_amount_in as i128).abs() as f64 / predicted_amount_in as f64) * 100.0;
-    println!("-> Différence relative (in) : {:.6} %", diff_in_percent);
+    info!(
+        predicted_cost_ui = ui_predicted_amount_in,
+        actual_cost_ui = ui_simulated_amount_in,
+        diff_percent = diff_in_percent,
+        "[VALIDATION - COÛT PAYÉ]"
+    );
 
     if diff_out_percent < 0.01 && diff_in_percent < 0.01 {
-        println!("\n✅✅✅ SUCCÈS TOTAL ! Votre décodeur pump.fun est parfaitement calibré pour l'achat !");
+        info!("✅✅✅ SUCCÈS TOTAL ! Le décodeur pump.fun est parfaitement calibré pour l'achat !");
     } else {
         bail!("⚠️ ÉCHEC FINAL ! Un des deux calculs est encore imprécis.");
     }

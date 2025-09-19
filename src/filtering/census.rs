@@ -8,7 +8,7 @@ use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
 use std::fs::File;
 use std::str::FromStr;
-use tracing::error;
+use tracing::{error, info, warn, debug};
 
 // Structure pour la sérialisation JSON
 #[derive(serde::Serialize)]
@@ -22,7 +22,7 @@ async fn scan_program_for_pools(
     rpc_client: &ResilientRpcClient,
     program_id: Pubkey,
 ) -> Result<Vec<onchain_scanner::RawPoolData>> {
-    println!("[Recensement] Scan du programme : {}", program_id);
+    info!(program_id = %program_id, "Scan du programme.");
     onchain_scanner::find_pools_by_program_id_with_filters(
         rpc_client,
         &program_id.to_string(),
@@ -33,7 +33,8 @@ async fn scan_program_for_pools(
 
 /// Fonction principale du recensement.
 pub async fn run_census(rpc_client: &ResilientRpcClient) -> Result<()> {
-    println!("\n--- [Recensement] Démarrage du scan complet de la blockchain ---");
+    info!("--- Démarrage du recensement complet ---");
+
 
     // Une seule map pour agréger tous les résultats
     let mut raw_data_map: HashMap<String, PoolDataForJson> = HashMap::new();
@@ -53,7 +54,7 @@ pub async fn run_census(rpc_client: &ResilientRpcClient) -> Result<()> {
         let program_id = Pubkey::from_str(program_str)?;
         match scan_program_for_pools(rpc_client, program_id).await {
             Ok(pools) => {
-                println!("[Recensement] -> Programme {}: {} comptes trouvés.", program_id, pools.len());
+                info!(program_id = %program_id, count = pools.len(), "Scan du programme terminé.");
                 for raw_pool in pools {
                     raw_data_map.insert(
                         raw_pool.address.to_string(),
@@ -70,14 +71,14 @@ pub async fn run_census(rpc_client: &ResilientRpcClient) -> Result<()> {
         }
     }
 
-    println!("\n[Recensement] Scan terminé. Total de {} comptes de pools bruts trouvés.", raw_data_map.len());
+    info!(total_count = raw_data_map.len(), "Scan de tous les programmes terminé.");
 
     // Sauvegarde dans le fichier
     let file = File::create("pools_universe.json")?; // Nom de fichier simplifié
     serde_json::to_writer_pretty(file, &raw_data_map)
         .context("Échec de la sauvegarde du cache de l'univers des pools")?;
 
-    println!("[Recensement] Sauvegarde des données brutes de {} pools terminée.", raw_data_map.len());
+    info!(pool_count = raw_data_map.len(), "Sauvegarde de l'univers des pools terminée.");
 
     Ok(())
 }

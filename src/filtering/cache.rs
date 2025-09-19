@@ -8,6 +8,7 @@ use std::{
     io::{BufReader, BufWriter},
     path::Path,
 };
+use tracing::{error, info, warn, debug};
 use super::PoolIdentity; // On importe la structure depuis notre mod.rs parent
 
 const CACHE_FILE_NAME: &str = "pools_universe.json";
@@ -29,14 +30,14 @@ impl PoolCache {
     /// Si le fichier n'existe pas, retourne un cache vide.
     pub fn load() -> Result<Self> {
         if !Path::new(CACHE_FILE_NAME).exists() {
-            println!("[Cache] Le fichier '{}' n'existe pas. Démarrage avec un cache vide.", CACHE_FILE_NAME);
+            info!(file = CACHE_FILE_NAME, "Fichier de cache non trouvé. Démarrage avec un cache vide.");
             return Ok(Self {
                 pools: HashMap::new(),
                 watch_map: HashMap::new(),
             });
         }
 
-        println!("[Cache] Chargement de la bibliothèque de pools depuis '{}'...", CACHE_FILE_NAME);
+        info!(file = CACHE_FILE_NAME, "Chargement de la bibliothèque de pools depuis le cache.");
         let file = File::open(CACHE_FILE_NAME)
             .with_context(|| format!("Impossible d'ouvrir le fichier de cache '{}'", CACHE_FILE_NAME))?;
         let reader = BufReader::new(file);
@@ -44,7 +45,7 @@ impl PoolCache {
         let identities: Vec<PoolIdentity> = serde_json::from_reader(reader)
             .with_context(|| format!("Erreur de désérialisation du fichier de cache '{}'", CACHE_FILE_NAME))?;
 
-        println!("[Cache] {} pools chargés. Construction des maps de recherche...", identities.len());
+        info!(pool_count = identities.len(), "Pools chargés. Construction des maps de recherche...");
 
         let mut pools = HashMap::with_capacity(identities.len());
         let mut watch_map = HashMap::new();
@@ -56,7 +57,7 @@ impl PoolCache {
             pools.insert(identity.address, identity);
         }
 
-        println!("[Cache] Prêt. {} pools et {} comptes à surveiller en mémoire.", pools.len(), watch_map.len());
+        info!(pool_count = pools.len(), watch_count = watch_map.len(), "Cache prêt.");
 
         Ok(Self { pools, watch_map })
     }
@@ -64,7 +65,7 @@ impl PoolCache {
     /// Sauvegarde la liste complète des identités de pools dans le fichier JSON.
     /// Cette fonction sera appelée par notre futur module "Recensement".
     pub fn save(identities: &[PoolIdentity]) -> Result<()> {
-        println!("[Cache] Sauvegarde de {} identités de pools dans '{}'...", identities.len(), CACHE_FILE_NAME);
+        info!(identity_count = identities.len(), file = CACHE_FILE_NAME, "Sauvegarde des identités de pools.");
         let file = File::create(CACHE_FILE_NAME)
             .with_context(|| format!("Impossible de créer le fichier de cache '{}'", CACHE_FILE_NAME))?;
         let writer = BufWriter::new(file);
@@ -72,7 +73,7 @@ impl PoolCache {
         serde_json::to_writer_pretty(writer, identities)
             .with_context(|| format!("Erreur de sérialisation vers le fichier de cache '{}'", CACHE_FILE_NAME))?;
 
-        println!("[Cache] Sauvegarde terminée avec succès.");
+        info!("Sauvegarde du cache terminée avec succès.");
         Ok(())
     }
 }

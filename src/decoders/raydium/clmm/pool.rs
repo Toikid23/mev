@@ -24,6 +24,7 @@ use crate::monitoring::metrics;
 use std::time::Instant;
 use tracing::debug;
 use std::sync::{Arc, RwLock};
+use tracing::trace;
 
 // ... (Les structs DecodedClmmPool, PoolState, RewardInfo ne changent pas) ...
 // ... (Les fonctions decode_pool et hydrate ne changent pas) ...
@@ -250,6 +251,16 @@ impl DecodedClmmPool {
     // ... (contenu identique)
     pub fn fee_as_percent(&self) -> f64 { self.trade_fee_rate as f64 / 1_000_000.0 * 100.0 }
     fn calculate_swap_quote_internal(&self, amount_in: u64, is_base_input: bool) -> Result<(u64, u32, u64)> {
+        // --- BLOC DE LOGS À AJOUTER ---
+        debug!(
+            pool_address = %self.address,
+            amount_in,
+            is_base_input,
+            initial_sqrt_price = self.sqrt_price_x64,
+            initial_tick = self.tick_current,
+            initial_liquidity = self.liquidity,
+            "Entrée dans calculate_swap_quote_internal pour Raydium CLMM"
+        );
         let tick_arrays = self.tick_arrays.as_ref().ok_or_else(|| anyhow!("Pool is not hydrated."))?;
         if tick_arrays.is_empty() || self.liquidity == 0 { return Ok((0, 0, 0)); }
         const FEE_RATE_DENOMINATOR_VALUE: u64 = 1_000_000;
@@ -265,6 +276,15 @@ impl DecodedClmmPool {
             let current_tick_array_start_index = tick_array::get_start_tick_index(current_tick_index, self.tick_spacing);
             tick_arrays_crossed.insert(tick_array::get_tick_array_address(&self.address, current_tick_array_start_index, &self.program_id));
             if current_liquidity > 0 {
+
+                trace!(
+                    amount_remaining,
+                    current_sqrt_price,
+                    current_tick_index,
+                    current_liquidity,
+                    "Début d'une étape de swap CLMM"
+                );
+
                 let (next_tick_index, next_liquidity_net) = match find_next_initialized_tick(self, current_tick_index, is_base_input, tick_arrays) {
                     Ok(result) => result,
                     Err(_) => (if is_base_input { math::MIN_TICK } else { math::MAX_TICK }, 0)
@@ -372,6 +392,14 @@ impl PoolOperations for DecodedClmmPool {
     fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<QuoteResult> {
         let is_base_input = *token_in_mint == self.mint_a;
 
+        debug!(
+            pool_address = %self.address,
+            token_in = %token_in_mint,
+            amount_in,
+            is_base_input,
+            "Entrée dans get_quote_with_details pour Raydium CLMM"
+        );
+
         // --- LOGIQUE DE CACHE ---
         if let Some(table_arc) = &self.quote_lookup_table {
             let table = table_arc.read().unwrap();
@@ -422,6 +450,19 @@ impl PoolOperations for DecodedClmmPool {
         })
     }
     fn get_required_input(&mut self, token_out_mint: &Pubkey, amount_out: u64, _current_timestamp: i64) -> Result<u64> {
+        let is_base_output = *token_out_mint == self.mint_a;
+
+        // --- BLOC DE LOGS À AJOUTER ---
+        debug!(
+            pool_address = %self.address,
+            token_out = %token_out_mint,
+            amount_out,
+            is_base_output,
+            initial_sqrt_price = self.sqrt_price_x64,
+            initial_tick = self.tick_current,
+            initial_liquidity = self.liquidity,
+            "Entrée dans get_required_input pour Raydium CLMM"
+        );
         let start_time = Instant::now();
         debug!(amount_out, "Calcul de get_required_input pour Raydium CLMM");
         if amount_out == 0 { return Ok(0); }
@@ -441,6 +482,15 @@ impl PoolOperations for DecodedClmmPool {
         let mut current_tick_index = self.tick_current;
         let mut current_liquidity = self.liquidity;
         while mutable_gross_amount_out_target > 0 {
+
+            trace!(
+                remaining_amount_out = mutable_gross_amount_out_target,
+                current_sqrt_price,
+                current_tick_index,
+                current_liquidity,
+                "Début d'une étape de calcul d'input requis CLMM"
+            );
+
             if current_liquidity == 0 { return Err(anyhow!("Not enough liquidity to reach target amount out.")); }
             let (next_tick_index, next_liquidity_net) = match find_next_initialized_tick(self, current_tick_index, is_base_input, tick_arrays) {
                 Ok(result) => result,
@@ -476,6 +526,9 @@ impl PoolOperations for DecodedClmmPool {
         const FEE_RATE_DENOMINATOR_VALUE: u64 = 1_000_000;
         let amount_in_after_transfer_fee = (total_amount_in_net as u64).mul_div_ceil(FEE_RATE_DENOMINATOR_VALUE, FEE_RATE_DENOMINATOR_VALUE - self.trade_fee_rate as u64).ok_or_else(|| anyhow!("Math overflow"))?;
         let result = calculate_gross_amount_before_transfer_fee(amount_in_after_transfer_fee, in_mint_fee_bps, in_mint_max_fee);
+
+        debug!(required_input = ?result, "Résultat du calcul de l'input requis pour CLMM");
+
         metrics::GET_QUOTE_LATENCY.with_label_values(&["RaydiumCLMM_required_input"]).observe(start_time.elapsed().as_secs_f64());
         result
     }

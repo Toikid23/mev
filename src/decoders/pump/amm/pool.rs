@@ -17,6 +17,7 @@ use anyhow::Context;
 use crate::monitoring::metrics;
 use std::time::Instant;
 use tracing::debug;
+use tracing::trace;
 
 // --- CONSTANTES ---
 pub const PUMP_PROGRAM_ID: Pubkey = solana_sdk::pubkey!("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA");
@@ -117,12 +118,12 @@ pub async fn hydrate(pool: &mut DecodedPumpAmmPool, rpc_client: &ResilientRpcCli
     let cached_config = GLOBAL_CACHE.get(&global_config_address);
 
     let global_config = if let Some(CacheableData::PumpAmmGlobalConfig(config_box)) = cached_config {
-        println!("[Cache] HIT pour Pump.fun GlobalConfig: {}", global_config_address);
+        debug!(config_address = %global_config_address, "HIT pour Pump.fun GlobalConfig.");
         // config_box est un Box<GlobalConfig>. On le déréférence pour obtenir GlobalConfig.
         // Comme GlobalConfig est `Copy`, cela crée une copie simple sur la stack.
         *config_box
     } else {
-        println!("[Cache] MISS pour Pump.fun GlobalConfig: {}. Fetching via RPC...", global_config_address);
+        debug!(config_address = %global_config_address, "MISS pour Pump.fun GlobalConfig. Fetching via RPC...");
         let global_config_data = rpc_client
             .get_account_data(&global_config_address)
             .await
@@ -230,6 +231,15 @@ impl PoolOperations for DecodedPumpAmmPool {
 
     fn get_quote_with_details(&self, token_in_mint: &Pubkey, amount_in: u64, _current_timestamp: i64) -> Result<QuoteResult> {
 
+        debug!(
+            pool_address = %self.address,
+            token_in = %token_in_mint,
+            amount_in,
+            reserve_a = self.reserve_a,
+            reserve_b = self.reserve_b,
+            "Entrée dans get_quote_with_details pour Pump AMM"
+        );
+
         let start_time = Instant::now();
         debug!(amount_in, "Calcul de get_quote_with_details pour Pump AMM");
 
@@ -262,6 +272,13 @@ impl PoolOperations for DecodedPumpAmmPool {
             (amount_out, total_fee as u64)
         };
 
+        trace!(
+            lp_fee_bps = fees.lp_fee_bps,
+            protocol_fee_bps = fees.protocol_fee_bps,
+            creator_fee_bps = fees.creator_fee_bps,
+            "Frais sélectionnés pour le quote Pump AMM"
+        );
+
         metrics::GET_QUOTE_LATENCY.with_label_values(&["PumpAmm"]).observe(start_time.elapsed().as_secs_f64());
 
         // <-- MODIFIÉ : Encapsulation dans QuoteResult
@@ -273,6 +290,15 @@ impl PoolOperations for DecodedPumpAmmPool {
     }
 
     fn get_required_input(&mut self, token_out_mint: &Pubkey, amount_out: u64, _current_timestamp: i64) -> Result<u64> {
+
+        debug!(
+            pool_address = %self.address,
+            token_out = %token_out_mint,
+            amount_out,
+            reserve_a = self.reserve_a,
+            reserve_b = self.reserve_b,
+            "Entrée dans get_required_input pour Pump AMM"
+        );
 
         let start_time = Instant::now();
         debug!(amount_out, "Calcul de get_required_input pour Pump AMM");
@@ -320,6 +346,16 @@ impl PoolOperations for DecodedPumpAmmPool {
         println!("  - Multiplicateur de coût total (bps): {}", 10000 + total_fee_bps);
         println!("  - Coût Total PRÉDIT    : {}", final_total_cost);
         println!("------------------------------------");
+
+        trace!(
+            net_cost = net_amount_in,
+            lp_fee_bps = fees.lp_fee_bps,
+            protocol_fee_bps = fees.protocol_fee_bps,
+            creator_fee_bps = fees.creator_fee_bps,
+            total_fee_multiplier_bps = 10000 + total_fee_bps,
+            "Calculs intermédiaires de l'input requis Pump AMM"
+        );
+        debug!(predicted_total_cost = final_total_cost, "Résultat du calcul de l'input requis pour Pump AMM");
 
         metrics::GET_QUOTE_LATENCY.with_label_values(&["PumpAmm_required_input"]).observe(start_time.elapsed().as_secs_f64());
 

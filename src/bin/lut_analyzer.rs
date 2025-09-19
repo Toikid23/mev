@@ -1,8 +1,10 @@
+// DANS : src/bin/lut_analyzer.rs
+
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::Result;
-use mev::{config::Config, rpc::ResilientRpcClient};
+use mev::{config::Config, rpc::ResilientRpcClient, monitoring::logging}; // <-- MODIFIÉ : Ajout de logging
 use solana_address_lookup_table_program::state::AddressLookupTable;
 use solana_sdk::{
     pubkey::Pubkey, signature::{Keypair, Signature}, signer::Signer,
@@ -14,6 +16,7 @@ use std::{
     str::FromStr,
 };
 use solana_transaction_status::{UiTransactionEncoding, UiLoadedAddresses};
+use tracing::{info, warn}; // <-- MODIFIÉ : Ajout des imports
 
 const MANAGED_LUT_ADDRESS: &str = "E5h798UBdK8V1L7MvRfi1ppr2vitPUUUUCVqvTyDgKXN";
 const TX_HISTORY_LIMIT: usize = 1000;
@@ -22,35 +25,33 @@ const SUGGESTIONS_FILE: &str = "lut_addresses_to_add.txt";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    println!("--- Lancement de l'Analyseur de LUT (Mode Rapport Uniquement) ---");
+    logging::setup_logging(); // <-- MODIFIÉ : Initialisation des logs
+    info!("--- Lancement de l'Analyseur de LUT (Mode Rapport Uniquement) ---");
     let config = Config::load()?;
     let rpc_client = ResilientRpcClient::new(config.solana_rpc_url, 5, 500);
     let payer = Keypair::from_base58_string(&config.payer_private_key);
     let lut_pubkey = Pubkey::from_str(MANAGED_LUT_ADDRESS)?;
 
-    println!("Portefeuille analysé : {}", payer.pubkey());
-    println!("LUT cible : {}", lut_pubkey);
+    info!(payer = %payer.pubkey(), "Portefeuille analysé");
+    info!(lut_address = %lut_pubkey, "LUT cible");
 
     let on_chain_addresses = match rpc_client.get_account(&lut_pubkey).await {
         Ok(acc) => {
             let lut_data = AddressLookupTable::deserialize(&acc.data)?;
-            println!("  -> {} adresses trouvées dans la LUT.", lut_data.addresses.len());
-            // <-- LA CORRECTION EST ICI
-            // On clone chaque Pubkey pour en prendre possession.
-            // .cloned() est un raccourci pour .map(|pk| pk.clone())
+            info!(count = lut_data.addresses.len(), "Adresses trouvées dans la LUT on-chain.");
             lut_data.addresses.iter().cloned().collect::<HashSet<_>>()
         }
         Err(_) => {
-            println!("  -> AVERTISSEMENT: La LUT n'existe pas ou est inaccessible.");
+            warn!("La LUT n'existe pas ou est inaccessible. Continuation avec une liste vide.");
             HashSet::new()
         }
     };
 
-    println!("\n[2/4] Récupération de l'historique des transactions...");
+    info!("[2/4] Récupération de l'historique des transactions...");
     let signatures_with_status = rpc_client
         .get_signatures_for_address_with_limit(&payer.pubkey(), TX_HISTORY_LIMIT)
         .await?;
-    println!("  -> {} signatures à analyser...", signatures_with_status.len());
+    info!(count = signatures_with_status.len(), "Signatures à analyser...");
 
     let mut address_counts: HashMap<Pubkey, usize> = HashMap::new();
     let encoding_config = Some(UiTransactionEncoding::Base64);
@@ -59,26 +60,16 @@ async fn main() -> Result<()> {
         let signature = Signature::from_str(&tx_status.signature)?;
 
         if let Ok(tx_with_meta) = rpc_client.get_transaction(&signature, encoding_config).await {
-            // Logique pour les comptes statiques
             if let Some(decoded_tx) = tx_with_meta.transaction.transaction.decode() {
                 let static_account_keys = decoded_tx.message.static_account_keys();
                 for key in static_account_keys {
                     *address_counts.entry(*key).or_insert(0) += 1;
                 }
             }
-
-            // Logique pour les comptes chargés via LUT
             if let Some(meta) = tx_with_meta.transaction.meta {
-                let loaded_addresses_opt: Option<UiLoadedAddresses> = meta.loaded_addresses.into();
-                if let Some(loaded_addresses) = loaded_addresses_opt {
-                    // Les adresses ici sont des Strings, il faut les convertir.
-                    for key_str in loaded_addresses.writable {
-                        if let Ok(key_pubkey) = Pubkey::from_str(&key_str) {
-                            *address_counts.entry(key_pubkey).or_insert(0) += 1;
-                        }
-                    }
-                    for key_str in loaded_addresses.readonly {
-                        if let Ok(key_pubkey) = Pubkey::from_str(&key_str) {
+                if let Some(loaded_addresses) = Option::<UiLoadedAddresses>::from(meta.loaded_addresses) {
+                    for key_str in loaded_addresses.writable.iter().chain(&loaded_addresses.readonly) {
+                        if let Ok(key_pubkey) = Pubkey::from_str(key_str) {
                             *address_counts.entry(key_pubkey).or_insert(0) += 1;
                         }
                     }
@@ -87,7 +78,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    println!("\n[3/4] Filtrage et tri des adresses par fréquence...");
+    info!("[3/4] Filtrage et tri des adresses par fréquence...");
     let common_addresses: HashSet<Pubkey> = [
         spl_token::ID,
         spl_associated_token_account::ID,
@@ -106,7 +97,7 @@ async fn main() -> Result<()> {
         .collect();
     sorted_addresses.sort_by(|a, b| b.1.cmp(&a.1));
 
-    println!("\n[4/4] Génération des rapports...");
+    info!("[4/4] Génération des rapports...");
     let mut report_content = String::new();
     report_content.push_str("--- Rapport d'Analyse de la LUT ---\n\n");
     report_content.push_str(&format!("LUT Adresse: {}\n", lut_pubkey));
@@ -139,10 +130,8 @@ async fn main() -> Result<()> {
     let mut suggestions_file = File::create(SUGGESTIONS_FILE)?;
     suggestions_file.write_all(suggestions_content.as_bytes())?;
 
-    println!("\n✅ --- ANALYSE TERMINÉE --- ✅");
-    println!("  -> Rapport complet sauvegardé dans : {}", ANALYSIS_OUTPUT_FILE);
-    println!("  -> Suggestions d'adresses à ajouter sauvegardées dans : {}", SUGGESTIONS_FILE);
-    println!("\nACTION REQUISE : Vérifiez `{}` et utilisez `lut_manager` pour appliquer les changements.", SUGGESTIONS_FILE);
+    info!(report_file = ANALYSIS_OUTPUT_FILE, suggestions_file = SUGGESTIONS_FILE, "✅ --- ANALYSE TERMINÉE --- ✅");
+    info!("ACTION REQUISE : Vérifiez `{}` et utilisez `lut_manager` pour appliquer les changements.", SUGGESTIONS_FILE);
 
     Ok(())
 }

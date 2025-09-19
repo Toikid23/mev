@@ -10,6 +10,7 @@ use std::{
 };
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
+use tracing::{error, info, warn, debug};
 
 const FEE_CACHE_REFRESH_INTERVAL_MS: u64 = 2000;
 
@@ -58,7 +59,7 @@ impl FeeManager {
                             }
                         }
                     },
-                    Err(e) => eprintln!("[FeeManager] Erreur de rafraîchissement des frais: {}", e),
+                    Err(e) => warn!(error = %e, "Erreur de rafraîchissement des frais de priorité."),
                 }
             }
         })
@@ -71,6 +72,8 @@ impl FeeManager {
     ) -> u64 {
         let reader = self.fee_cache.read().await;
         if reader.is_empty() {
+            // AJOUT : Log pour le cas du fallback
+            debug!("Fee cache vide, utilisation du fallback de 1000 lamports.");
             return 1000; // Fallback s'il n'y a pas de données de frais
         }
 
@@ -82,7 +85,11 @@ impl FeeManager {
 
         if relevant_fees.is_empty() {
             relevant_fees = reader.values().map(|fee| fee.prioritization_fee).collect();
-            if relevant_fees.is_empty() { return 1000; }
+            if relevant_fees.is_empty() {
+                // AJOUT : Log pour le cas du fallback
+                debug!("Aucun frais pertinent trouvé, utilisation du fallback de 1000 lamports.");
+                return 1000;
+            }
         }
 
         relevant_fees.sort_unstable();
@@ -92,7 +99,6 @@ impl FeeManager {
         let base_fee = *relevant_fees.get(safe_index).unwrap_or(&1000);
 
         // --- NOUVELLE LOGIQUE DE COURBE D'ENCHÈRE ---
-        // Ces valeurs peuvent être affinées une fois sur le bare metal.
         let overbid_percent = match time_remaining_in_slot_ms {
             0..=100 => 200,   // < 100ms restant : Enchère très agressive (200% de plus)
             101..=250 => 50,  // < 250ms restant : Enchère agressive (50% de plus)
@@ -101,7 +107,19 @@ impl FeeManager {
         };
 
         let overbid_amount = (base_fee as u128 * overbid_percent) / 100;
-        (base_fee as u128 + overbid_amount) as u64
+        let final_fee = (base_fee as u128 + overbid_amount) as u64;
+
+        // --- LE BLOC DE LOGS CORRECT À AJOUTER ICI ---
+        debug!(
+            base_fee,
+            time_remaining_ms = time_remaining_in_slot_ms,
+            overbid_percent,
+            final_fee,
+            "Calcul des frais de priorité dynamique"
+        );
+        // --- FIN DU BLOC ---
+
+        final_fee // On retourne la variable qu'on vient de créer
     }
 
     
