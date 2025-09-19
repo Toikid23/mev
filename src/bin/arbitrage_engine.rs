@@ -8,6 +8,9 @@ use solana_sdk::{
     pubkey::Pubkey, signature::Keypair, signer::Signer, transaction::Transaction,
     transaction::VersionedTransaction,
 };
+use mev::filtering::cache::PoolCache; // Assurez-vous que cet import est présent
+use mev::decoders::PoolFactory;      // Assurez-vous que cet import est présent
+use anyhow::bail;
 use mev::state::slot_tracker::SlotState;
 use zmq;
 use mev::communication::{
@@ -19,7 +22,6 @@ use tracing::warn;
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
-    io::Read,
     sync::{Arc, RwLock},
     time::{Duration, Instant},
 };
@@ -62,18 +64,45 @@ fn read_hotlist() -> Result<HashSet<Pubkey>> {
     let data = fs::read_to_string("hotlist.json")?;
     Ok(serde_json::from_str(&data)?)
 }
-fn load_main_graph_from_cache() -> Result<Graph> { // <-- MODIFIÉ : retourne Graph, pas Arc<Graph>
-    println!("[Graph] Chargement du cache de pools de référence depuis 'graph_cache.bin'...");
-    let file = fs::File::open("graph_cache.bin")?;
-    let mut buffer = Vec::new();
-    let mut reader = std::io::BufReader::new(file);
-    reader.read_to_end(&mut buffer)?;
-    let decoded_pools: HashMap<Pubkey, Pool> = bincode::deserialize(&buffer)?;
+/// Charge le graphe de référence en décodant tous les pools de l'univers connu.
+/// Charge le graphe de référence en décodant tous les pools de l'univers connu.
+async fn load_main_graph_from_universe(
+    rpc_client: &Arc<ResilientRpcClient>,
+    pool_factory: &PoolFactory
+) -> Result<Graph> {
+    info!("[Graph] Chargement du graphe de référence depuis 'pools_universe.json'...");
+    let cache = PoolCache::load()?;
+    if cache.pools.is_empty() {
+        // C'est une condition critique. Le bot ne peut pas démarrer sans connaissance.
+        bail!("[Graph] ERREUR CRITIQUE: 'pools_universe.json' est vide. Lancez le 'maintenance_worker census' au moins une fois avant de démarrer l'engine.");
+    }
 
     let mut graph = Graph::new();
-    for (_, pool) in decoded_pools.into_iter() {
-        graph.add_pool_to_graph(pool); // Utilise la nouvelle méthode
+    let pool_pubkeys: Vec<Pubkey> = cache.pools.keys().cloned().collect();
+
+    info!("[Graph] Récupération des données de compte pour {} pools...", pool_pubkeys.len());
+
+    // On récupère tous les comptes par lots pour ne pas surcharger le RPC.
+    let account_chunks = pool_pubkeys.chunks(100);
+    let mut all_accounts_data = Vec::new();
+
+    for chunk in account_chunks {
+        let accounts = rpc_client.get_multiple_accounts(chunk).await?;
+        all_accounts_data.extend(accounts);
     }
+
+    info!("[Graph] Décodage des pools en cours...");
+    for (index, account_opt) in all_accounts_data.into_iter().enumerate() {
+        let address = pool_pubkeys[index];
+        if let Some(account) = account_opt {
+            // On décode le pool "brut" (non-hydraté) à partir des données du compte
+            if let Ok(pool) = pool_factory.decode_raw_pool(&address, &account.data, &account.owner) {
+                graph.add_pool_to_graph(pool);
+            }
+        }
+    }
+
+    info!("[Graph] Graphe de référence construit avec {} pools.", graph.pools.len());
     Ok(graph)
 }
 async fn ensure_pump_user_account_exists(rpc_client: &Arc<ResilientRpcClient>, payer: &Keypair) -> Result<()> {
@@ -626,6 +655,7 @@ async fn main() -> Result<()> {
     let config = Config::load()?;
     let payer = Keypair::from_base58_string(&config.payer_private_key);
     let rpc_client = Arc::new(ResilientRpcClient::new(config.solana_rpc_url.clone(), 3, 500));
+    let pool_factory = PoolFactory::new(rpc_client.clone());
 
     let (confirmation_service, tx_to_confirm_sender) = ConfirmationService::new(rpc_client.clone());
     confirmation_service.start();
@@ -647,7 +677,7 @@ async fn main() -> Result<()> {
     balance_tracker::start_monitoring(rpc_client.clone(), config.clone());
 
     ensure_pump_user_account_exists(&rpc_client, &payer).await?;
-    let main_graph = Arc::new(load_main_graph_from_cache()?);
+    let main_graph = Arc::new(load_main_graph_from_universe(&rpc_client, &pool_factory).await?);
 
     // --- Architecture de données ---
     let hot_graph = Arc::new(ArcSwap::new(Arc::new(Graph::new())));
