@@ -36,11 +36,13 @@ pub async fn find_spatial_arbitrage(
     let mut opportunities = Vec::with_capacity(10);
 
     let pools_by_pair = {
+        // On pré-alloue avec une estimation raisonnable. graph.pools.len() / 2 est un bon point de départ.
         let mut map: HashMap<(Pubkey, Pubkey), Vec<Pubkey>> = HashMap::with_capacity(graph.pools.len() / 2);
         for (pool_key, pool_data) in graph.pools.iter() {
             let (mut mint_a, mut mint_b) = pool_data.get_mints();
             if mint_a > mint_b { std::mem::swap(&mut mint_a, &mut mint_b); }
-            map.entry((mint_a, mint_b)).or_default().push(*pool_key);
+            // On pré-alloue aussi le Vec interne. On s'attend rarement à plus de 10 pools pour une même paire.
+            map.entry((mint_a, mint_b)).or_insert_with(|| Vec::with_capacity(10)).push(*pool_key);
         }
         map
     };
@@ -134,16 +136,29 @@ pub async fn find_spatial_arbitrage(
             }
         }
     }
+    // --- AJOUT DES LOGS TRACE À LA FIN DE LA FONCTION ---
+    // Juste avant la ligne `opportunities` qui retourne la valeur.
+
     if !opportunities.is_empty() {
-        trace!(length = opportunities.len(), "spatial.rs - opportunities length");
+        trace!(
+            len = opportunities.len(),
+            capacity = opportunities.capacity(),
+            "Collection 'opportunities' size"
+        );
     }
     if !pools_by_pair.is_empty() {
-        trace!(length = pools_by_pair.len(), "spatial.rs - pools_by_pair length");
+        // Pour un HashMap, on peut logger sa taille et la taille moyenne des Vec internes
+        let avg_vec_len = pools_by_pair.values().map(|v| v.len()).sum::<usize>() as f32 / pools_by_pair.len() as f32;
+        trace!(
+            len = pools_by_pair.len(),
+            capacity = pools_by_pair.capacity(),
+            avg_inner_len = avg_vec_len,
+            "Collection 'pools_by_pair' size"
+        );
     }
 
     opportunities
 }
-
 fn find_optimal_arbitrage(
     pool_buy_from: &mut Pool,
     pool_sell_to: &mut Pool,

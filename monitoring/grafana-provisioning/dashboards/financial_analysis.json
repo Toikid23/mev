@@ -302,6 +302,178 @@
           }
         }
       ]
+    },
+    {
+      "id": 6,
+      "title": "Analyse de la Pré-Allocation Mémoire",
+      "type": "row",
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 21
+      }
+    },
+    {
+      "id": 7,
+      "title": "Taille de la collection 'opportunities'",
+      "type": "timeseries",
+      "datasource": {
+        "type": "loki",
+        "uid": "Loki (MEV Logs)"
+      },
+      "description": "Affiche la taille (len) et la capacité (capacity) du vecteur 'opportunities' dans spatial.rs. Permet d'ajuster Vec::with_capacity.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "showPoints": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "len"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Taille (Utilisée)"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "capacity"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Capacité (Allouée)"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "max",
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "right"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "Loki (MEV Logs)"
+          },
+          "editorMode": "code",
+          "expr": "{job=\"execution_bot\"} | json | message=\"Collection 'opportunities' size\"",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Taille de la collection 'pools_by_pair'",
+      "type": "timeseries",
+      "datasource": {
+        "type": "loki",
+        "uid": "Loki (MEV Logs)"
+      },
+      "description": "Affiche la taille (len) et la capacité (capacity) du HashMap 'pools_by_pair' dans spatial.rs. Permet d'ajuster HashMap::with_capacity.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "showPoints": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "len"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Taille (Utilisée)"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "capacity"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Capacité (Allouée)"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "max",
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "right"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "Loki (MEV Logs)"
+          },
+          "editorMode": "code",
+          "expr": "{job=\"execution_bot\"} | json | message=\"Collection 'pools_by_pair' size\"",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ]
     }
   ],
   "schemaVersion": 39,
@@ -320,3 +492,12 @@
   "version": 1,
   "weekStart": ""
 }
+
+
+
+
+
+
+
+
+

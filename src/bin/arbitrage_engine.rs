@@ -287,7 +287,7 @@ async fn clmm_pre_hydrator(
 
         let mut new_graph = (*old_graph).clone();
         let mut graph_was_updated = false;
-        let mut hydration_futures = Vec::new();
+        let mut hydration_futures = Vec::with_capacity(new_graph.pools.len());
 
         for (pool_key, pool) in new_graph.pools.iter() {
             if matches!(pool, Pool::RaydiumClmm(_) | Pool::OrcaWhirlpool(_) | Pool::MeteoraDlmm(_) | Pool::MeteoraDammV2(_)) {
@@ -724,7 +724,11 @@ async fn main() -> Result<()> {
     info!("[Main] Graphe initial prêt avec {} pools.", initial_graph.pools.len());
 
     // --- 3. Initialisation des Données Partagées ---
+    let initial_graph_size = initial_graph.pools.len();
+    // Maintenant on peut déplacer initial_graph sans problème.
     let shared_graph = Arc::new(ArcSwap::new(Arc::new(initial_graph)));
+    // --- FIN DE LA CORRECTION ---
+
     let (update_tx, update_rx) = watch::channel(());
     let (opportunity_tx, opportunity_rx) = mpsc::channel::<ArbitrageOpportunity>(1024);
     let shared_opportunity_rx = Arc::new(Mutex::new(opportunity_rx));
@@ -768,7 +772,7 @@ async fn main() -> Result<()> {
         fee_manager: fee_manager.clone(),
         sender: sender.clone(),
         config: config.clone(),
-        template_cache: Arc::new(RwLock::new(HashMap::new())),
+        template_cache: Arc::new(RwLock::new(HashMap::with_capacity(initial_graph_size))),
     };
 
     let blacklist_manager = BlacklistManager::load();
