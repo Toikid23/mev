@@ -17,6 +17,7 @@ StandardError=journal
 LimitNOFILE=65535
 # --- AJOUT IMPORTANT : Nettoie son fichier en s'arrêtant ---
 ExecStop=/bin/rm -f /home/mev/bot/copytrade_hotlist.json
+ExecStop=/bin/rm -f /home/mev/bot/copytrade_hotlist.json
 
 [Install]
 WantedBy=multi-user.target

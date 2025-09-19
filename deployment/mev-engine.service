@@ -1,5 +1,3 @@
-# DANS : deployment/mev-engine.service
-
 [Unit]
 Description=MEV Bot - Arbitrage Engine Service
 After=mev-gateway.service mev-scanner.service
@@ -12,7 +10,7 @@ WorkingDirectory=/home/mev/bot/
 
 # --- LA MODIFICATION EST ICI ---
 # Commande à exécuter AVANT de lancer le service principal.
-# On lance les tâches de maintenance les plus importantes une fois au démarrage.
+# Le `\ ` à la fin de chaque ligne permet d'écrire une commande sur plusieurs lignes.
 ExecStartPre=/bin/bash -c '\
     echo "--- Lancement des tâches de pré-démarrage pour l'Arbitrage Engine ---" && \
     /home/mev/bot/target/release/maintenance_worker census && \
@@ -28,8 +26,6 @@ RestartSec=5s
 StandardOutput=journal
 StandardError=journal
 LimitNOFILE=65535
-
-ExecStop=/bin/rm -f /home/mev/bot/copytrade_hotlist.json
 
 [Install]
 WantedBy=multi-user.target
