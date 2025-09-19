@@ -126,3 +126,26 @@ groups:
         annotations:
           summary: "La tâche 'health-check' du maintenance_worker a échoué."
           description: "Un ou plusieurs décodeurs ne fonctionnent plus. Consultez les logs du worker : `make logs-worker`."
+            
+      # Règle 7 : Aucune nouvelle pool découverte récemment
+      - uid: no_new_pools_alert
+        title: "Aucune nouvelle pool découverte récemment"
+        condition: A
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600 # 1h
+              to: 0
+            datasourceUid: 'Prometheus (MEV Bot)'
+            model:
+              # On calcule le taux de découverte sur 1h. S'il est à 0, l'alerte se prépare.
+              expr: 'sum(rate(mev_new_pools_discovered_total[1h])) == 0'
+              type: 'query'
+        # L'alerte se déclenche seulement si la condition est vraie pendant 30 minutes consécutives.
+        # Cela évite les fausses alertes pendant les périodes de calme sur le marché.
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Le Market Scanner n'a découvert aucune nouvelle pool depuis plus de 30 minutes."
+          description: "Cela peut indiquer un problème avec le stream Geyser, le market_scanner lui-même, ou une période de très faible activité sur Solana. Une investigation est recommandée."
