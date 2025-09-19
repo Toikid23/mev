@@ -3,6 +3,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+use mev::monitoring;
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use spl_associated_token_account::instruction::create_associated_token_account;
@@ -524,10 +525,15 @@ async fn analysis_worker(
         let start_time = Instant::now();
         let graph_for_processing = shared_graph.load_full();
 
+        // --- DÉBUT DE LA CORRECTION ---
+        // On extrait les clés dont nous aurons besoin plus tard AVANT de déplacer `opportunity`.
+        let pool_buy_key = opportunity.pool_buy_from_key;
+        let pool_sell_key = opportunity.pool_sell_to_key;
+
         let pool_pair_id = format!(
             "{}-{}",
-            opportunity.pool_buy_from_key.min(opportunity.pool_sell_to_key),
-            opportunity.pool_buy_from_key.max(opportunity.pool_sell_to_key)
+            pool_buy_key.min(pool_sell_key),
+            pool_buy_key.max(pool_sell_key)
         );
 
         // --- NIVEAU 3 : VÉRIFICATION DE LA BLACKLIST (LA PLUS RAPIDE) ---
@@ -608,7 +614,14 @@ async fn analysis_worker(
                     id, tracker.cooldown_trigger_count, pool_pair_id, deps.config.circuit_breaker_cooldown_secs // <--- UTILISEZ LA CONFIG
                 );
                 tracker.cooldown_until = Some(Instant::now() + Duration::from_secs(deps.config.circuit_breaker_cooldown_secs)); // <--- UTILISEZ LA CONFIG
-                metrics::CIRCUIT_BREAKER_TRIPPED.with_label_values(&[&pool_pair_id]).inc();
+                let pool_buy_from = graph_for_processing.pools.get(&pool_buy_key).unwrap();
+                let pool_sell_to = graph_for_processing.pools.get(&pool_sell_key).unwrap();
+
+                let dex_buy_name = monitoring::get_pool_type_name(pool_buy_from);
+                let dex_sell_name = monitoring::get_pool_type_name(pool_sell_to);
+                let dex_pair_label = format!("{}-{}", dex_buy_name, dex_sell_name);
+
+                metrics::CIRCUIT_BREAKER_TRIPPED.with_label_values(&[&pool_pair_id, &dex_pair_label]).inc();
 
                 if tracker.cooldown_trigger_count >= deps.config.circuit_breaker_blacklist_threshold { // <--- UTILISEZ LA CONFIG
                     error!(

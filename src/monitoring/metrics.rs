@@ -70,9 +70,7 @@ lazy_static! {
     pub static ref TRANSACTION_OUTCOMES: IntCounterVec = register_int_counter_vec!(
         "mev_transaction_outcomes_total",
         "Résultats des transactions après décision",
-        // --- MODIFICATION ICI ---
-        &["outcome", "pool_pair"] // Labels: "SimSuccess", "pool1-pool2"
-        // --- FIN DE LA MODIFICATION ---
+        &["outcome", "pool_pair", "dex_pair"] // <-- AJOUT ICI
     ).unwrap();
 
     pub static ref NEW_POOLS_DISCOVERED: IntCounterVec = register_int_counter_vec!(
@@ -84,7 +82,7 @@ lazy_static! {
     pub static ref CIRCUIT_BREAKER_TRIPPED: IntCounterVec = register_int_counter_vec!(
         "mev_circuit_breaker_tripped_total",
         "Compteur de déclenchements du disjoncteur par paire de pools",
-        &["pool_pair"]
+        &["pool_pair", "dex_pair"] // <-- AJOUT ICI
     ).unwrap();
 
     pub static ref PNL_CUMULATIVE_LAMPORTS: IntGauge = register_int_gauge!(

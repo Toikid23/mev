@@ -21,7 +21,7 @@ pub struct SlotTracker {
 
 impl SlotTracker {
     pub async fn new(rpc_client: &ResilientRpcClient) -> Result<Self> {
-        println!("[SlotTracker] Initialisation : récupération du premier Clock...");
+        info!("Initialisation du SlotTracker : récupération du premier Clock...");
         let clock_account = rpc_client.get_account(&clock::ID).await?;
         let initial_clock: Clock = bincode::deserialize(&clock_account.data)?;
         info!(slot = initial_clock.slot, timestamp = initial_clock.unix_timestamp, "Initialisation du SlotTracker réussie.");

@@ -339,13 +339,15 @@ impl PoolOperations for DecodedPumpAmmPool {
             .saturating_mul(BPS_DENOMINATOR + total_fee_bps as u128)
             .div_ceil(BPS_DENOMINATOR);
 
-        // Les logs de débogage restent utiles pour valider
-        println!("\n--- [get_required_input DEBUG - OPTIMIZED] ---");
-        println!("  - Coût NET (calculé)   : {}", net_amount_in);
-        println!("  - Frais sélectionnés (LP, Prot, Créateur) bps: ({}, {}, {})", fees.lp_fee_bps, fees.protocol_fee_bps, fees.creator_fee_bps);
-        println!("  - Multiplicateur de coût total (bps): {}", 10000 + total_fee_bps);
-        println!("  - Coût Total PRÉDIT    : {}", final_total_cost);
-        println!("------------------------------------");
+        trace!(
+            net_cost = net_amount_in,
+            lp_fee_bps = fees.lp_fee_bps,
+            protocol_fee_bps = fees.protocol_fee_bps,
+            creator_fee_bps = fees.creator_fee_bps,
+            total_fee_multiplier_bps = 10000 + total_fee_bps,
+            predicted_total_cost = final_total_cost,
+            "Calculs détaillés de l'input requis pour Pump AMM"
+        );
 
         trace!(
             net_cost = net_amount_in,

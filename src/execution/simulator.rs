@@ -60,7 +60,10 @@ pub async fn run_simulations(
     let sim_value = sim_response.value;
     if let Some(err) = sim_value.err {
         if let Some(logs) = sim_value.logs {
-            logs.iter().for_each(|log| println!("       {}", log));
+            for log in logs {
+                // On utilise warn! pour qu'ils soient visibles par défaut mais indiquent un problème
+                warn!(simulation_log = log);
+            }
         }
         return Err(anyhow!("Simulation ÉCHOUÉE : {:?}", err));
     }

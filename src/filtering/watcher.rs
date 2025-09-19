@@ -40,7 +40,7 @@ impl Watcher {
             .await
             .context("Impossible de se connecter au client Geyser gRPC")?;
 
-        println!("[Watcher] Connexion réussie. Préparation de l'abonnement pour {} programmes DEX...", programs_to_watch.len());
+        info!(program_count = programs_to_watch.len(), "Connexion Geyser réussie. Préparation de l'abonnement.");
 
         // --- LA LOGIQUE DU FILTRE CHANGE ICI ---
         // On convertit les Pubkeys en String pour le filtre.
@@ -71,7 +71,7 @@ impl Watcher {
         let (mut subscribe_tx, mut stream) = client.subscribe().await?;
         subscribe_tx.send(request).await?;
 
-        println!("[Watcher] Abonnement réussi. En attente du flux de transactions...");
+        info!("Abonnement Geyser réussi. En attente du flux de transactions...");
 
         while let Some(message_result) = stream.next().await {
             let message = message_result.context("Erreur dans le stream Geyser")?;

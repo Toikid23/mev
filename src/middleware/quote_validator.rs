@@ -8,8 +8,9 @@ use tracing::{info, warn, instrument, error};
 use std::result::Result::Ok;
 use crate::state::balance_tracker::{BalanceHistory, HISTORY_WINDOW_SECS};
 use std::time::{SystemTime, UNIX_EPOCH};
-// --- AJOUTER L'IMPORT ---
+use crate::monitoring;
 pub struct QuoteValidator;
+
 
 #[async_trait]
 impl Middleware for QuoteValidator {
@@ -78,11 +79,16 @@ impl Middleware for QuoteValidator {
             }
         };
 
+        let dex_buy_name = monitoring::get_pool_type_name(&pool_buy_from);
+        let dex_sell_name = monitoring::get_pool_type_name(&pool_sell_to);
+        let dex_pair_label = format!("{}-{}", dex_buy_name, dex_sell_name);
+        context.dex_pair_label = dex_pair_label.clone();
+
         let quote_buy_details = match pool_buy_from.get_quote_with_details(&context.opportunity.token_in_mint, context.opportunity.amount_in, context.current_timestamp) {
             Ok(q) => q,
             Err(e) => {
                 warn!(error = %e, "Échec du calcul de quote (buy). Abandon.");
-                metrics::TRANSACTION_OUTCOMES.with_label_values(&["Abandoned_QuoteError", &context.pool_pair_id]).inc();
+                metrics::TRANSACTION_OUTCOMES.with_label_values(&["InternalError_PoolNotFound", &context.pool_pair_id, "N/A"]).inc();
                 return Ok(false);
             }
         };
@@ -91,7 +97,7 @@ impl Middleware for QuoteValidator {
             Ok(q) => q,
             Err(e) => {
                 warn!(error = %e, "Échec du calcul de quote (sell). Abandon.");
-                metrics::TRANSACTION_OUTCOMES.with_label_values(&["Abandoned_QuoteError", &context.pool_pair_id]).inc();
+                metrics::TRANSACTION_OUTCOMES.with_label_values(&["InternalError_PoolNotFound", &context.pool_pair_id, "N/A"]).inc();
                 return Ok(false);
             }
         };
@@ -107,7 +113,7 @@ impl Middleware for QuoteValidator {
                 threshold = min_profit_threshold, // On log le seuil utilisé
                 "Abandon. Profit brut ré-évalué insuffisant."
             );
-            metrics::TRANSACTION_OUTCOMES.with_label_values(&["Abandoned_ProfitTooLow", &context.pool_pair_id]).inc();
+            metrics::TRANSACTION_OUTCOMES.with_label_values(&["Abandoned_ProfitTooLow", &context.pool_pair_id, &dex_pair_label]).inc();
             return Ok(false);
         }
 

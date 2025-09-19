@@ -47,7 +47,7 @@ impl Middleware for FinalSimulator {
         match context.rpc_client.simulate_transaction_with_config(tx_to_simulate, sim_config).await {
             Ok(sim_response) if sim_response.value.err.is_none() => {
                 info!("SUCCÈS DE LA SIMULATION FINALE ! Passage à l'envoi.");
-                metrics::TRANSACTION_OUTCOMES.with_label_values(&["SimSuccess", &context.pool_pair_id]).inc();
+                metrics::TRANSACTION_OUTCOMES.with_label_values(&["SimSuccess", &context.pool_pair_id, &context.dex_pair_label]).inc();
 
                 // On peut toujours logger le profit simulé pour analyse, mais sans toucher au PnL
                 if let Some(logs) = &sim_response.value.logs {
@@ -82,11 +82,11 @@ impl Middleware for FinalSimulator {
             Ok(sim_response) => {
                 warn!(error = ?sim_response.value.err, "ÉCHEC DE LA SIMULATION FINALE.");
                 if let Some(logs) = sim_response.value.logs { for log in logs { warn!(log = log); } }
-                metrics::TRANSACTION_OUTCOMES.with_label_values(&["SimFailure", &context.pool_pair_id]).inc();
+                metrics::TRANSACTION_OUTCOMES.with_label_values(&["SimFailure", &context.pool_pair_id, &context.dex_pair_label]).inc();
             }
             Err(e) => {
                 error!(error = %e, "ERREUR RPC pendant la simulation finale.");
-                metrics::TRANSACTION_OUTCOMES.with_label_values(&["RpcError", &context.pool_pair_id]).inc();
+                metrics::TRANSACTION_OUTCOMES.with_label_values(&["RpcError", &context.pool_pair_id, &context.dex_pair_label]).inc();
             }
         }
 

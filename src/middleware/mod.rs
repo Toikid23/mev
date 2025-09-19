@@ -41,6 +41,7 @@ pub struct ExecutionContext {
 
     // Métadonnées
     pub pool_pair_id: String,
+    pub dex_pair_label: String,
     pub span: Span,
 }
 
@@ -76,6 +77,7 @@ impl ExecutionContext {
             target_jito_region: None,
             config,
             pool_pair_id,
+            dex_pair_label: String::new(),
             span,
         }
     }
