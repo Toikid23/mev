@@ -30,10 +30,11 @@ lazy_static::lazy_static! {
     };
 }
 
-const HOTLIST_FILE_NAME: &str = "hotlist.json";
+const HOTLIST_FILE_NAME: &str = "scanner_hotlist.json";
 const UNIVERSE_FILE_NAME: &str = "pools_universe.json";
 
 lazy_static::lazy_static! {
+    static ref HOTLIST_FILE_LOCK: Mutex<()> = Mutex::new(()); // Verrou pour scanner_hotlist.json
     static ref UNIVERSE_FILE_LOCK: Mutex<()> = Mutex::new(());
 }
 
@@ -148,34 +149,57 @@ async fn update_hotlist(
     hot_threshold: usize,
     activity_window: u64,
 ) -> Result<()> {
-    let mut new_hotlist = HashSet::new();
     let now = Instant::now();
 
+    // --- NOUVELLE LOGIQUE ---
+
+    // Étape 1 : Regrouper tous les pools actuellement actifs par paire de tokens.
+    // Clé: (mint_a, mint_b) triée, Valeur: Set des adresses de pools actifs pour cette paire.
+    let mut active_pools_by_pair: HashMap<(Pubkey, Pubkey), HashSet<Pubkey>> = HashMap::new();
+
     activity_tracker.retain(|pool_address, timestamps| {
-        // Étape 1 : Nettoyer les anciennes transactions de la fenêtre
+        // On nettoie les anciennes transactions comme avant pour la gestion mémoire.
         timestamps.retain(|ts| now.duration_since(*ts).as_secs() < activity_window);
 
-        // Étape 2 : Vérifier si le pool est "chaud"
+        // Si le pool est suffisamment actif...
         if timestamps.len() >= hot_threshold {
-            // --- FILTRE DE WHITELIST AJOUTÉ ICI ---
             if let Some(identity) = cache.pools.get(pool_address) {
-                // Étape 3 : Vérifier si le pool contient un token de notre whitelist (WSOL)
+                // On vérifie toujours la whitelist (WSOL)
                 if TOKEN_WHITELIST.contains(&identity.mint_a) || TOKEN_WHITELIST.contains(&identity.mint_b) {
-                    new_hotlist.insert(*pool_address);
+
+                    // On crée une clé canonique pour la paire en triant les mints.
+                    // (SOL, USDC) devient la même clé que (USDC, SOL).
+                    let (mut mint_a, mut mint_b) = (identity.mint_a, identity.mint_b);
+                    if mint_a > mint_b {
+                        std::mem::swap(&mut mint_a, &mut mint_b);
+                    }
+
+                    // On ajoute ce pool au groupe de sa paire.
+                    active_pools_by_pair.entry((mint_a, mint_b)).or_default().insert(*pool_address);
                 }
             }
-            // --- FIN DU FILTRE ---
         }
 
-        // On garde le pool dans le tracker tant qu'il a une activité récente
+        // On garde le pool dans le tracker tant qu'il a une activité récente.
         !timestamps.is_empty()
     });
 
+    // Étape 2 : Construire la nouvelle hotlist uniquement avec les paires qui ont au moins 2 pools actifs.
+    let mut new_hotlist: HashSet<Pubkey> = HashSet::new();
+    for (_pair, active_pools) in active_pools_by_pair {
+        if active_pools.len() >= 2 {
+            // C'est une paire arbitrable ! On ajoute TOUS les pools de ce groupe à la hotlist.
+            new_hotlist.extend(active_pools);
+        }
+    }
+
+    // Étape 3 : Mettre à jour le fichier sur le disque si la hotlist a changé.
     if *current_hotlist != new_hotlist {
-        info!("[Scanner] Hotlist mise à jour. {} pools actifs contenant du WSOL.", new_hotlist.len());
+        info!("[Scanner] Hotlist mise à jour. {} pools actifs formant des paires arbitrables.", new_hotlist.len());
         fs::write(HOTLIST_FILE_NAME, serde_json::to_string_pretty(&new_hotlist)?)?;
         *current_hotlist = new_hotlist;
     }
+
     Ok(())
 }
 

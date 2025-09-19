@@ -103,7 +103,7 @@ impl Middleware for TransactionBuilder {
             .and_then(|intel| routing::get_routing_info(intel, &runtime_config));
 
         let mut latency = routing_info_opt.as_ref().map_or(150, |r| r.estimated_latency_ms) as u128;
-        let time_needed_ms = latency + context.config.bot_processing_time_ms + context.config.transaction_send_safety_margin_ms as u128;
+        let time_needed_ms = latency + context.config.bot_processing_time_ms as u128 + context.config.transaction_send_safety_margin_ms as u128;
 
         if time_remaining <= time_needed_ms {
             info!(time_remaining, needed = time_needed_ms, "Trop tard pour le slot actuel, on vise le suivant.");

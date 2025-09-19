@@ -66,17 +66,17 @@ setup-server:
 
 start:
 	@echo "$(YELLOW)--- Démarrage de tous les services du bot... ---$(NC)"
-	@ssh ${REMOTE_SSH} "sudo systemctl start mev-gateway.service mev-scanner.service arbitrage-engine.service"
+	@ssh ${REMOTE_SSH} "sudo systemctl start mev-gateway.service mev-scanner.service mev-copytrade.service mev-engine.service"
 	@make status
 
 stop:
 	@echo "$(YELLOW)--- Arrêt de tous les services du bot... ---$(NC)"
-	@ssh ${REMOTE_SSH} "sudo systemctl stop mev-gateway.service mev-scanner.service arbitrage-engine.service"
+	@ssh ${REMOTE_SSH} "sudo systemctl stop mev-gateway.service mev-scanner.service mev-copytrade.service mev-engine.service"
 	@make status
 
 restart:
 	@echo "$(YELLOW)--- Redémarrage de tous les services du bot... ---$(NC)"
-	@ssh ${REMOTE_SSH} "sudo systemctl restart mev-gateway.service mev-scanner.service arbitrage-engine.service"
+	@ssh ${REMOTE_SSH} "sudo systemctl restart mev-gateway.service mev-scanner.service mev-copytrade.service mev-engine.service"
 	@echo "Attente de 5 secondes pour la stabilisation des services..."
 	@sleep 5
 	@make status
@@ -102,6 +102,10 @@ logs-scanner:
 	@echo "$(YELLOW)--- Affichage des logs du MARKET SCANNER en direct (Ctrl+C pour quitter)... ---$(NC)"
 	@ssh ${REMOTE_SSH} "sudo journalctl -u mev-scanner.service -f -n 100"
 
+logs-copytrade:
+	@echo "$(YELLOW)--- Affichage des logs du COPY-TRADE TRACKER en direct (Ctrl+C pour quitter)... ---$(NC)"
+	@ssh ${REMOTE_SSH} "sudo journalctl -u mev-copytrade.service -f -n 100"
+
 # Affiche les logs du worker de maintenance (utile pour le débogage de cron)
 logs-worker:
 	@echo "$(YELLOW)--- Affichage des 100 derniers logs du MAINTENANCE WORKER... ---$(NC)"
@@ -125,6 +129,29 @@ run-health-check:
 run-update-config:
 	@echo "$(YELLOW)--- Lancement d'une mise à jour de la config manuelle sur le serveur... ---$(NC)"
 	@ssh ${REMOTE_SSH} "${REMOTE_DIR}/target/release/maintenance_worker update-runtime-config"
+
+# --- Contrôle des Stratégies de Découverte ---
+
+strategy-volume-enable:
+	@echo "$(YELLOW)--- Activation de la stratégie de scan par volume... ---$(NC)"
+	@ssh ${REMOTE_SSH} "sudo systemctl enable --now mev-scanner.service"
+	@make status
+
+strategy-volume-disable:
+	@echo "$(YELLOW)--- Désactivation de la stratégie de scan par volume... ---$(NC)"
+	@ssh ${REMOTE_SSH} "sudo systemctl disable --now mev-scanner.service"
+	@make status
+
+strategy-copytrade-enable:
+	@echo "$(YELLOW)--- Activation de la stratégie de copy-trading... ---$(NC)"
+	@ssh ${REMOTE_SSH} "sudo systemctl enable --now mev-copytrade.service"
+	@make status
+
+strategy-copytrade-disable:
+	@echo "$(YELLOW)--- Désactivation de la stratégie de copy-trading... ---$(NC)"
+	@ssh ${REMOTE_SSH} "sudo systemctl disable --now mev-copytrade.service"
+	@make status
+
 
 # --- Cible d'Aide ---
 help:
@@ -152,6 +179,14 @@ help:
 	@echo "  run-census         - Lance manuellement un recensement."
 	@echo "  run-health-check   - Lance manuellement une vérification de santé."
 	@echo "  run-update-config  - Lance manuellement une mise à jour de la config."
+	@echo ""
+    @echo "  --- Contrôle des Stratégies de Découverte ---"
+    @echo "  strategy-volume-enable      - Active le scan par volume."
+    @echo "  strategy-volume-disable     - Désactive le scan par volume."
+    @echo "  strategy-copytrade-enable   - Active le copy-trading."
+    @echo "  strategy-copytrade-disable  - Désactive le copy-trading."
+    @echo "  (La stratégie manuelle est toujours active via le fichier manual_hotlist.json)"
+
 
 # Déclare que ces cibles ne sont pas des fichiers, pour que `make` les exécute toujours.
-.PHONY: build deploy setup-server start stop restart status logs logs-engine logs-gateway logs-scanner logs-worker logs-all run-census run-health-check run-update-config help
+.PHONY: build deploy setup-server start stop restart status logs logs-engine logs-gateway logs-scanner logs-worker logs-all run-census run-health-check run-update-config strategy-volume-enable strategy-volume-disable strategy-copytrade-enable strategy-copytrade-disable help

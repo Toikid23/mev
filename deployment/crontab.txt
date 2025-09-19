@@ -45,3 +45,13 @@ WORKER_BIN="${BOT_DIR}/target/release/maintenance_worker"
 #    Lancé toutes les 6 heures, à 00:05, 06:05, 12:05, 18:05.
 #    (On met un décalage de 5 minutes pour ne pas le lancer en même temps que la tâche horaire)
 5 */6 * * * cd ${BOT_DIR} && ${WORKER_BIN} census >> ${LOG_FILE} 2>&1
+
+
+# --- Tâche de Fusion (Haute Fréquence) ---
+
+# 4. Fusionne toutes les sources de hotlist dans le fichier final lu par l'engine.
+#    Exécuté toutes les 15 secondes pour une réactivité maximale.
+* * * * * cd ${BOT_DIR} && ${WORKER_BIN} merge-hotlists >> ${LOG_FILE} 2>&1
+* * * * * sleep 15 && cd ${BOT_DIR} && ${WORKER_BIN} merge-hotlists >> ${LOG_FILE} 2>&1
+* * * * * sleep 30 && cd ${BOT_DIR} && ${WORKER_BIN} merge-hotlists >> ${LOG_FILE} 2>&1
+* * * * * sleep 45 && cd ${BOT_DIR} && ${WORKER_BIN} merge-hotlists >> ${LOG_FILE} 2>&1

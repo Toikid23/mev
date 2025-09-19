@@ -1,22 +1,22 @@
-# DANS : deployment/mev-scanner.service
+# DANS : deployment/mev-copytrade.service
 
 [Unit]
-Description=MEV Bot - Market Scanner Service
-After=network.target
+Description=MEV Bot - Copy-Trade Wallet Tracker Service
+After=mev-gateway.service
 
 [Service]
 Type=simple
 User=mev
 Group=mev
 WorkingDirectory=/home/mev/bot/
-ExecStart=/home/mev/bot/target/release/market_scanner
+ExecStart=/home/mev/bot/target/release/wallet_tracker
 Restart=always
 RestartSec=5s
 StandardOutput=journal
 StandardError=journal
 LimitNOFILE=65535
 # --- AJOUT IMPORTANT : Nettoie son fichier en s'arrêtant ---
-ExecStop=/bin/rm -f /home/mev/bot/scanner_hotlist.json
+ExecStop=/bin/rm -f /home/mev/bot/copytrade_hotlist.json
 
 [Install]
 WantedBy=multi-user.target

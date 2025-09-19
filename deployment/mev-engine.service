@@ -29,5 +29,7 @@ StandardOutput=journal
 StandardError=journal
 LimitNOFILE=65535
 
+ExecStop=/bin/rm -f /home/mev/bot/copytrade_hotlist.json
+
 [Install]
 WantedBy=multi-user.target

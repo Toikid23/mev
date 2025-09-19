@@ -26,6 +26,8 @@ use spl_associated_token_account::get_associated_token_address_with_program_id;
 use std::{collections::HashMap, fs, str::FromStr};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
+use std::collections::HashSet;
+
 
 const RUNTIME_CONFIG_FILE: &str = "runtime_config.json";
 const CU_CHANGE_ALERT_THRESHOLD_PERCENT: f64 = 15.0;
@@ -67,11 +69,11 @@ enum Commands {
     Census,
     HealthCheck,
     UpdateRuntimeConfig,
+    MergeHotlists,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // (Le main reste le même)
     logging::setup_logging();
     let cli = Cli::parse();
     let config = Config::load()?;
@@ -79,10 +81,12 @@ async fn main() -> Result<()> {
 
     info!("[Worker] Lancement de la tâche de maintenance...");
 
+    // --- AJOUTEZ LE NOUVEAU MATCH ARM ---
     let task_result = match &cli.command {
         Commands::Census => run_census_task(&rpc_client).await,
         Commands::HealthCheck => run_health_check_task(&config, &rpc_client).await,
         Commands::UpdateRuntimeConfig => run_update_config_task(&config, &rpc_client).await,
+        Commands::MergeHotlists => run_merge_hotlists_task().await,
     };
 
     if let Err(e) = task_result {
@@ -93,6 +97,49 @@ async fn main() -> Result<()> {
     info!("[Worker] Tâche terminée avec succès.");
     Ok(())
 }
+
+// --- AJOUTEZ CETTE NOUVELLE FONCTION COMPLÈTE EN BAS DU FICHIER ---
+
+// On définit les noms de fichiers comme constantes pour éviter les erreurs de frappe.
+const HOTLIST_FILE_NAME: &str = "hotlist.json";
+const MANUAL_HOTLIST_FILE_NAME: &str = "manual_hotlist.json";
+const SCANNER_HOTLIST_FILE_NAME: &str = "scanner_hotlist.json";
+const COPYTRADE_HOTLIST_FILE_NAME: &str = "copytrade_hotlist.json";
+
+/// Tâche: Fusionne toutes les sources de hotlist en un seul fichier final.
+async fn run_merge_hotlists_task() -> Result<()> {
+    info!("[Worker/Merge] Démarrage de la fusion des hotlists...");
+
+    let mut final_hotlist: HashSet<Pubkey> = HashSet::new();
+
+    // Fonction helper pour charger et fusionner une source de manière propre.
+    let mut merge_source = |file_path: &str| -> Result<()> {
+        if let Ok(data) = fs::read_to_string(file_path) {
+            match serde_json::from_str::<HashSet<Pubkey>>(&data) {
+                Ok(pools) => {
+                    info!("[Worker/Merge] -> Fusion de {} pools depuis {}", pools.len(), file_path);
+                    final_hotlist.extend(pools);
+                },
+                Err(e) => warn!("[Worker/Merge] Fichier {} corrompu, ignoré. Erreur: {}", file_path, e),
+            }
+        }
+        // Si le fichier n'existe pas, on ne fait rien, ce qui est normal.
+        Ok(())
+    };
+
+    // On fusionne toutes les sources.
+    merge_source(MANUAL_HOTLIST_FILE_NAME)?;
+    merge_source(SCANNER_HOTLIST_FILE_NAME)?;
+    merge_source(COPYTRADE_HOTLIST_FILE_NAME)?;
+
+    info!("[Worker/Merge] Fusion terminée. Total de {} pools uniques dans la hotlist finale.", final_hotlist.len());
+
+    // On écrit le fichier final qui sera lu par l'arbitrage_engine.
+    fs::write(HOTLIST_FILE_NAME, serde_json::to_string_pretty(&final_hotlist)?)?;
+
+    Ok(())
+}
+
 
 async fn ping_jito_endpoints() -> Result<HashMap<String, u32>> {
     info!("[Worker/Config] Démarrage du ping des endpoints Jito...");
@@ -386,3 +433,4 @@ async fn run_all_decoder_tests(config: &Config, rpc_client: &ResilientRpcClient)
     }
     Ok(())
 }
+
