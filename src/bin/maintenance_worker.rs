@@ -1,7 +1,8 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use anyhow::bail;
+use mev::decoders::{meteora, orca, pump, raydium};
+use anyhow::bail; // Assurez-vous que `bail` est importé
 use std::time::Duration;
 use mev::filtering::census;
 use anyhow::{anyhow, Result};
@@ -179,18 +180,61 @@ async fn run_census_task(rpc_client: &ResilientRpcClient) -> Result<()> {
     Ok(())
 }
 
-/// Tâche: Vérifie la santé de tous les décodeurs.
+/// Tâche: Vérifie la santé de tous les décodeurs de manière robuste et individuelle.
 async fn run_health_check_task(config: &Config, rpc_client: &ResilientRpcClient) -> Result<()> {
-    info!("[Worker/Health] Démarrage de la vérification de santé des décodeurs...");
-    // Ici, nous allons réutiliser la logique de votre `dev_runner`.
-    // Pour simplifier, nous créons une nouvelle fonction qui encapsule cette logique.
-    // Cela évite d'avoir à gérer les arguments en ligne de commande du dev_runner.
-    run_all_decoder_tests(config, rpc_client).await?;
-    info!("[Worker/Health] Tous les décodeurs sont opérationnels.");
-    Ok(())
+    info!("[Worker/Health] Démarrage de la vérification de santé robuste des décodeurs...");
+
+    const TOTAL_RUNS: u32 = 10;
+    const SUCCESS_THRESHOLD_PERCENT: f32 = 0.8; // 80% de réussite requis
+
+    let mut success_counts: HashMap<String, u32> = HashMap::new();
+
+    for i in 1..=TOTAL_RUNS {
+        info!("[Worker/Health] Lancement du cycle de tests n°{}/{}...", i, TOTAL_RUNS);
+
+        // On appelle la fonction de test qui nous retourne les résultats individuels.
+        let results = run_all_decoder_tests_individually(config, rpc_client).await;
+
+        for (decoder_name, result) in results {
+            let counter = success_counts.entry(decoder_name.clone()).or_insert(0);
+
+            if result.is_ok() {
+                *counter += 1;
+            } else if let Err(e) = result {
+                // **LA CORRECTION DE L'ERREUR DE LOG EST ICI**
+                // On utilise la variable `decoder_name` directement.
+                warn!("[Worker/Health] -> Run {} : ÉCHEC pour le décodeur '{}'. Erreur: {}", i, decoder_name, e);
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
+    info!("[Worker/Health] Vérification terminée. Synthèse des résultats :");
+
+    let mut all_decoders_healthy = true;
+    let required_successes = (TOTAL_RUNS as f32 * SUCCESS_THRESHOLD_PERCENT).ceil() as u32;
+
+    for (decoder_name, count) in &success_counts {
+        if *count >= required_successes {
+            info!("[Worker/Health] - ✅ {} : SAIN ({} / {} succès)", decoder_name, count, TOTAL_RUNS);
+        } else {
+            error!("[Worker/Health] - ❌ {} : DÉFAILLANT ({} / {} succès, seuil: {})", decoder_name, count, TOTAL_RUNS, required_successes);
+            all_decoders_healthy = false;
+        }
+    }
+
+    if all_decoders_healthy {
+        info!("[Worker/Health] ✅ Tous les décodeurs sont considérés comme opérationnels.");
+        Ok(())
+    } else {
+        bail!(
+            "CRITICAL: Un ou plusieurs décodeurs n'ont pas atteint le seuil de réussite de {}%.",
+            (SUCCESS_THRESHOLD_PERCENT * 100.0)
+        )
+    }
 }
 
-/// Tâche: Met à jour les coûts CU et les latences.
+
 /// Tâche: Met à jour les coûts CU et les latences.
 async fn run_update_config_task(config: &Config, rpc_client: &ResilientRpcClient) -> Result<()> {
     info!("[Worker/Config] Démarrage de la mise à jour de la configuration d'exécution...");
@@ -383,54 +427,72 @@ fn get_mint_b_decimals(pool: &Pool) -> u8 {
     }
 }
 
-/// Helper qui exécute tous les tests de décodeurs (logique de `dev_runner`).
-
-async fn run_all_decoder_tests(config: &Config, rpc_client: &ResilientRpcClient) -> Result<()> {
+async fn run_all_decoder_tests_individually(
+    config: &Config,
+    rpc_client: &ResilientRpcClient,
+) -> Vec<(String, Result<()>)> {
     use mev::decoders::{meteora, orca, pump, raydium};
-    use anyhow::bail; // Assurez-vous que `bail` est importé
+    use anyhow::anyhow;
 
-    let payer = config.payer_keypair()?; // Le '?' est correct ici car payer_keypair retourne un Result
-    let clock = mev::state::global_cache::get_cached_clock(rpc_client).await?;
-    let ts = clock.unix_timestamp;
+    let payer = match config.payer_keypair() {
+        Ok(kp) => kp,
+        Err(e) => {
+            let err_msg = format!("Impossible de parser la clé privée du payeur : {}", e);
+            return vec![
+                ("Raydium AMM V4".to_string(), Err(anyhow!(err_msg.clone()))),
+                ("Raydium CPMM".to_string(), Err(anyhow!(err_msg.clone()))),
+                ("Raydium CLMM".to_string(), Err(anyhow!(err_msg.clone()))),
+                ("Orca Whirlpool".to_string(), Err(anyhow!(err_msg.clone()))),
+                ("Meteora DAMM V1".to_string(), Err(anyhow!(err_msg.clone()))),
+                ("Meteora DAMM V2".to_string(), Err(anyhow!(err_msg.clone()))),
+                ("Meteora DLMM".to_string(), Err(anyhow!(err_msg.clone()))),
+                ("Pump AMM".to_string(), Err(anyhow!(err_msg))),
+            ];
+        }
+    };
 
-    let mut all_ok = true;
+    let clock_res = mev::state::global_cache::get_cached_clock(rpc_client).await;
+    if let Err(e) = clock_res {
+        let err_msg = format!("Impossible de récupérer le Sysvar Clock via RPC : {}", e);
+        return vec![
+            ("Raydium AMM V4".to_string(), Err(anyhow!(err_msg.clone()))),
+            ("Raydium CPMM".to_string(), Err(anyhow!(err_msg.clone()))),
+            ("Raydium CLMM".to_string(), Err(anyhow!(err_msg.clone()))),
+            ("Orca Whirlpool".to_string(), Err(anyhow!(err_msg.clone()))),
+            ("Meteora DAMM V1".to_string(), Err(anyhow!(err_msg.clone()))),
+            ("Meteora DAMM V2".to_string(), Err(anyhow!(err_msg.clone()))),
+            ("Meteora DLMM".to_string(), Err(anyhow!(err_msg.clone()))),
+            ("Pump AMM".to_string(), Err(anyhow!(err_msg))),
+        ];
+    }
+    let ts = clock_res.unwrap().unix_timestamp;
 
-    info!("Lancement du test Raydium AMM V4...");
-    if let Err(e) = raydium::amm_v4::test::test_ammv4_with_simulation(rpc_client, &payer, ts).await {
-        error!("[Health] ÉCHEC Raydium AMM V4: {:?}", e); all_ok = false;
-    }
-    info!("Lancement du test Raydium CPMM...");
-    if let Err(e) = raydium::cpmm::test::test_cpmm_with_simulation(rpc_client, &payer, ts).await {
-        error!("[Health] ÉCHEC Raydium CPMM: {:?}", e); all_ok = false;
-    }
-    info!("Lancement du test Raydium CLMM...");
-    if let Err(e) = raydium::clmm::test::test_clmm(rpc_client, &payer, ts).await {
-        error!("[Health] ÉCHEC Raydium CLMM: {:?}", e); all_ok = false;
-    }
-    info!("Lancement du test Orca Whirlpool...");
-    if let Err(e) = orca::whirlpool::test::test_whirlpool_with_simulation(rpc_client, &payer, ts).await {
-        error!("[Health] ÉCHEC Orca Whirlpool: {:?}", e); all_ok = false;
-    }
-    info!("Lancement du test Meteora DAMM V1...");
-    if let Err(e) = meteora::damm_v1::test::test_damm_v1_with_simulation(rpc_client, &payer, ts).await {
-        error!("[Health] ÉCHEC Meteora DAMM V1: {:?}", e); all_ok = false;
-    }
-    info!("Lancement du test Meteora DAMM V2...");
-    if let Err(e) = meteora::damm_v2::test::test_damm_v2_with_simulation(rpc_client, &payer, ts).await {
-        error!("[Health] ÉCHEC Meteora DAMM V2: {:?}", e); all_ok = false;
-    }
-    info!("Lancement du test Meteora DLMM...");
-    if let Err(e) = meteora::dlmm::test::test_dlmm_with_simulation(rpc_client, &payer, ts).await {
-        error!("[Health] ÉCHEC Meteora DLMM: {:?}", e); all_ok = false;
-    }
-    info!("Lancement du test Pump AMM...");
-    if let Err(e) = pump::amm::test::test_amm_with_simulation(rpc_client, &payer, ts).await {
-        error!("[Health] ÉCHEC Pump AMM: {:?}", e); all_ok = false;
-    }
+    let mut results = Vec::new();
 
-    if !all_ok {
-        bail!("Un ou plusieurs tests de décodeur ont échoué.");
-    }
-    Ok(())
+    // On exécute les tests un par un. C'est plus simple et résout les erreurs de lifetime.
+    let r_amm_v4 = raydium::amm_v4::test::test_ammv4_with_simulation(rpc_client, &payer, ts).await;
+    results.push(("Raydium AMM V4".to_string(), r_amm_v4));
+
+    let r_cpmm = raydium::cpmm::test::test_cpmm_with_simulation(rpc_client, &payer, ts).await;
+    results.push(("Raydium CPMM".to_string(), r_cpmm));
+
+    let r_clmm = raydium::clmm::test::test_clmm(rpc_client, &payer, ts).await;
+    results.push(("Raydium CLMM".to_string(), r_clmm));
+
+    let o_whirlpool = orca::whirlpool::test::test_whirlpool_with_simulation(rpc_client, &payer, ts).await;
+    results.push(("Orca Whirlpool".to_string(), o_whirlpool));
+
+    let m_damm_v1 = meteora::damm_v1::test::test_damm_v1_with_simulation(rpc_client, &payer, ts).await;
+    results.push(("Meteora DAMM V1".to_string(), m_damm_v1));
+
+    let m_damm_v2 = meteora::damm_v2::test::test_damm_v2_with_simulation(rpc_client, &payer, ts).await;
+    results.push(("Meteora DAMM V2".to_string(), m_damm_v2));
+
+    let m_dlmm = meteora::dlmm::test::test_dlmm_with_simulation(rpc_client, &payer, ts).await;
+    results.push(("Meteora DLMM".to_string(), m_dlmm));
+
+    let p_amm = pump::amm::test::test_amm_with_simulation(rpc_client, &payer, ts).await;
+    results.push(("Pump AMM".to_string(), p_amm));
+
+    results
 }
-

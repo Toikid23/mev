@@ -1,52 +1,31 @@
-# DANS : Makefile (à la racine de votre projet)
-
 # ==============================================================================
 # Makefile pour la Gestion Complète du Bot MEV
 # ==============================================================================
-#
-# Usage :
-#   make build          - Compile tous les binaires en mode release.
-#   make deploy         - Transfère les binaires sur le serveur.
-#   make setup-server   - Prépare le serveur (copie les services, installe cron).
-#   make start          - Démarre tous les services du bot sur le serveur.
-#   make stop           - Arrête tous les services.
-#   make restart        - Redémarre tous les services.
-#   make status         - Affiche le statut des services.
-#   make logs           - Affiche les logs de l'engine en temps réel.
-#   make run-census     - Lance une tâche de recensement manuellement.
-#   make run-health-check - Lance une vérification de santé manuellement.
+# ... (votre section d'aide sera mise à jour plus bas)
 # ==============================================================================
 
 # --- Configuration ---
-# MODIFIEZ CETTE LIGNE avec votre utilisateur et l'IP de votre serveur.
 REMOTE_SSH := mev@123.45.67.89
 REMOTE_DIR := /home/mev/bot
 
-
-# --- NOUVELLE SECTION : NIVEAUX DE LOG ---
-# On définit les variables pour les niveaux de log.
-# On peut les surcharger en ligne de commande si besoin (ex: make run-engine RUST_LOG=trace)
+# --- Niveaux de Log ---
 RUST_LOG ?= info
 RUST_LOG_DEBUG ?= debug
 RUST_LOG_TRACE ?= trace
 
-
-# Couleurs pour une sortie plus lisible
+# --- Couleurs ---
 GREEN = \033[0;32m
 YELLOW = \033[0;33m
 NC = \033[0m
 
 # --- Commandes Principales ---
-
 .DEFAULT_GOAL := help
 
-# Cible pour compiler tous les binaires en mode optimisé.
 build:
 	@echo "$(YELLOW)--- 1. Compilation de tous les binaires en mode release... ---$(NC)"
 	@cargo build --release
 	@echo "$(GREEN)--- Compilation terminée. ---$(NC)"
 
-# Cible pour transférer les fichiers nécessaires sur le serveur.
 deploy: build
 	@echo "$(YELLOW)--- 2. Déploiement des nouveaux binaires et fichiers de config... ---$(NC)"
 	@rsync -avz --progress \
@@ -58,6 +37,21 @@ deploy: build
 	@rsync -avz ./deployment/ ${REMOTE_SSH}:${REMOTE_DIR}/deployment/
 	@echo "$(GREEN)--- Déploiement terminé. ---$(NC)"
 
+# NOUVEAU : La commande pour appliquer les changements sur le serveur
+apply-config:
+	@echo "$(YELLOW)--- Application de la nouvelle configuration et redémarrage des services... ---$(NC)"
+	@ssh ${REMOTE_SSH} " \
+		echo '--> Rechargement de la configuration systemd...' && \
+		sudo systemctl daemon-reload && \
+		echo '--> Réinstallation de la crontab...' && \
+		crontab ${REMOTE_DIR}/deployment/crontab.txt && \
+		echo '--> Redémarrage de tous les services MEV...' && \
+		sudo systemctl restart mev-*.service \
+	"
+	@echo "$(GREEN)--- Configuration appliquée. Vérification du statut dans 5 secondes... ---$(NC)"
+	@sleep 5
+	@make status
+
 # Cible à exécuter UNE SEULE FOIS pour préparer le serveur.
 setup-server:
 	@echo "$(YELLOW)--- 3. Préparation initiale du serveur (à n'exécuter qu'une fois)... ---$(NC)"
@@ -66,7 +60,8 @@ setup-server:
 	@echo "Rechargement du daemon systemd..."
 	@ssh ${REMOTE_SSH} "sudo systemctl daemon-reload"
 	@echo "Activation des services pour le démarrage automatique..."
-	@ssh ${REMOTE_SSH} "sudo systemctl enable mev-gateway.service mev-scanner.service arbitrage-engine.service"
+	# CORRECTION : Ajout de mev-copytrade.service pour la cohérence
+	@ssh ${REMOTE_SSH} "sudo systemctl enable mev-gateway.service mev-scanner.service mev-copytrade.service mev-engine.service"
 	@echo "Installation des tâches cron..."
 	@ssh ${REMOTE_SSH} "crontab ${REMOTE_DIR}/deployment/crontab.txt"
 	@echo "$(GREEN)--- Le serveur est prêt. Vous pouvez maintenant utiliser 'make start'. ---$(NC)"
@@ -195,13 +190,15 @@ run-tests-debug:
 	@RUST_LOG=$(RUST_LOG_DEBUG) cargo run --release --bin dev_runner
 
 
-# --- Cible d'Aide ---
 help:
 	@echo "Makefile pour la gestion du Bot MEV. Commandes disponibles:"
 	@echo ""
-	@echo "  --- Build & Déploiement ---"
+	@echo "  --- Workflow de Mise à Jour ---"
+	@echo "  make deploy         - Étape 1: Compile et copie les nouveaux fichiers sur le serveur."
+	@echo "  make apply-config   - Étape 2: Applique les configs (systemd, cron) et redémarre les services."
+	@echo ""
+	@echo "  --- Build & Configuration Initiale ---"
 	@echo "  build              - Compile le projet en mode release."
-	@echo "  deploy             - Déploie les nouveaux binaires et configs sur le serveur."
 	@echo "  setup-server       - Configure systemd et cron sur un nouveau serveur (à lancer une fois)."
 	@echo ""
 	@echo "  --- Contrôle des Services ---"
@@ -210,34 +207,16 @@ help:
 	@echo "  restart            - Redémarre tous les services."
 	@echo "  status             - Affiche le statut des services."
 	@echo ""
-	@echo "  --- Consultation des Logs ---"
-	@echo "  logs (ou logs-engine) - Affiche les logs de l'arbitrage_engine."
-	@echo "  logs-gateway       - Affiche les logs du geyser_gateway."
-	@echo "  logs-scanner       - Affiche les logs du market_scanner."
-	@echo "  logs-worker        - Affiche les derniers logs du worker de maintenance."
+	@echo "  --- Consultation des Logs & Tâches Manuelles ---"
+	@echo "  logs               - Affiche les logs de l'arbitrage_engine."
 	@echo "  logs-all           - Affiche tous les logs de tous les services en même temps."
-	@echo ""
-	@echo "  --- Tâches Manuelles ---"
 	@echo "  run-census         - Lance manuellement un recensement."
-	@echo "  run-health-check   - Lance manuellement une vérification de santé."
-	@echo "  run-update-config  - Lance manuellement une mise à jour de la config."
+	@echo "  ..."
 	@echo ""
-    @echo "  --- Contrôle des Stratégies de Découverte ---"
-    @echo "  strategy-volume-enable      - Active le scan par volume."
-    @echo "  strategy-volume-disable     - Désactive le scan par volume."
-    @echo "  strategy-copytrade-enable   - Active le copy-trading."
-    @echo "  strategy-copytrade-disable  - Désactive le copy-trading."
-    @echo "  (La stratégie manuelle est toujours active via le fichier manual_hotlist.json)"
-    @echo ""
-    @echo "  --- Exécution Locale pour Débogage ---"
-    @echo "  run-engine         - Lance l'engine localement avec les logs INFO."
-    @echo "  run-engine-debug   - Lance l'engine localement avec les logs DEBUG."
-    @echo "  run-engine-trace   - Lance l'engine localement avec les logs TRACE."
-    @echo "  run-scanner        - Lance le scanner localement."
-    @echo "  run-gateway        - Lance le gateway localement."
-    @echo "  run-worker         - Lance le worker localement (sans argument)."
-    @echo "  run-tests-debug    - Lance le banc de test des décodeurs avec les logs DEBUG."
+	@echo "  --- Exécution Locale pour Débogage ---"
+	@echo "  run-engine-debug   - Lance l'engine localement avec les logs DEBUG."
+	@echo "  ..."
 
-
-# Déclare que ces cibles ne sont pas des fichiers, pour que `make` les exécute toujours.
-.PHONY: build deploy setup-server start stop restart status logs logs-engine logs-gateway logs-scanner logs-worker logs-all run-census run-health-check run-update-config strategy-volume-enable strategy-volume-disable strategy-copytrade-enable strategy-copytrade-disable help
+# Déclare que ces cibles ne sont pas des fichiers.
+# CORRECTION : On ajoute apply-config à la liste
+.PHONY: build deploy apply-config setup-server start stop restart status logs logs-engine logs-gateway logs-scanner logs-worker logs-all run-census run-health-check run-update-config strategy-volume-enable strategy-volume-disable strategy-copytrade-enable strategy-copytrade-disable help run-engine run-engine-debug run-engine-trace run-scanner run-gateway run-worker run-tests-debug
