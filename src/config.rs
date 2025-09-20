@@ -59,6 +59,10 @@ pub struct Config {
     // Dans .env, séparez-les par des virgules : COPY_TRADE_WALLETS="addr1,addr2,addr3"
     #[serde(default, deserialize_with = "deserialize_string_list")]
     pub copy_trade_wallets: Vec<String>,
+
+
+    #[serde(default = "default_true")]
+    pub run_census: bool,
 }
 
 // --- Fonctions de valeur par défaut ---
@@ -81,6 +85,7 @@ fn default_slippage_tolerance_percent() -> f64 { 0.25 }
 fn default_jito_tip_percent() -> u64 { 20 }
 fn default_hot_transaction_threshold() -> usize { 5 }
 fn default_activity_window_secs() -> u64 { 120 }
+
 
 
 impl Config {

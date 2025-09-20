@@ -9,14 +9,22 @@ Group=mev
 WorkingDirectory=/home/mev/bot/
 
 # --- LA MODIFICATION EST ICI ---
-# Commande à exécuter AVANT de lancer le service principal.
-# Le `\ ` à la fin de chaque ligne permet d'écrire une commande sur plusieurs lignes.
+# Cette commande va :
+# 1. Charger les variables du fichier .env
+# 2. Vérifier la variable RUN_CENSUS (si elle n'est pas définie, la considérer comme 'true')
+# 3. Exécuter le census uniquement si la condition est remplie.
 ExecStartPre=/bin/bash -c '\
-    echo "--- Lancement des tâches de pré-démarrage pour l'Arbitrage Engine ---" && \
-    /home/mev/bot/target/release/maintenance_worker census && \
+    echo "--- Lancement des tâches de pré-démarrage pour l''Arbitrage Engine ---" && \
+    if [ "$(grep -E ''^RUN_CENSUS='' /home/mev/bot/.env | cut -d ''='' -f2)" != "false" ]; then \
+        echo "--> RUN_CENSUS est activé, lancement du recensement..." && \
+        /home/mev/bot/target/release/maintenance_worker census; \
+    else \
+        echo "--> RUN_CENSUS est désactivé, recensement ignoré."; \
+    fi && \
     /home/mev/bot/target/release/maintenance_worker update-runtime-config && \
     /home/mev/bot/target/release/maintenance_worker health-check && \
     echo "--- Tâches de pré-démarrage terminées avec succès ---"'
+
 
 # La commande principale ne change pas.
 ExecStart=/home/mev/bot/target/release/arbitrage_engine

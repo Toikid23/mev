@@ -41,10 +41,9 @@ WORKER_BIN="${BOT_DIR}/target/release/maintenance_worker"
 # --- Tâches de Fond (Basse Fréquence) ---
 
 # 3. Recensement Complet (Census)
-#    Exécute un scan complet de la chaîne pour trouver tous les pools.
+#    Exécute un scan complet de la chaîne, sauf si RUN_CENSUS=false dans .env
 #    Lancé toutes les 6 heures, à 00:05, 06:05, 12:05, 18:05.
-#    (On met un décalage de 5 minutes pour ne pas le lancer en même temps que la tâche horaire)
-5 */6 * * * cd ${BOT_DIR} && ${WORKER_BIN} census >> ${LOG_FILE} 2>&1
+5 */6 * * * cd ${BOT_DIR} && if [ "$(grep -E '^RUN_CENSUS=' .env | cut -d '=' -f2)" != "false" ]; then ${WORKER_BIN} census; else echo "Census skipped by config."; fi >> ${LOG_FILE} 2>&1
 
 
 # --- Tâche de Fusion (Haute Fréquence) ---
